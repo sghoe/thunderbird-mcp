@@ -128,12 +128,12 @@ describe("writeConnectionInfo directory hardening", () => {
       const { sandbox, written } = makeSandbox({ os: "WINNT", tmpDir });
       const writeConnectionInfo = loadWriteConnectionInfo(sandbox);
 
-      const result = writeConnectionInfo(8765, "token");
+      const result = writeConnectionInfo(8765);
 
       assert.equal(result, "thunderbird-mcp-hardened/connection.json");
       assert.equal(tmpDir.permissionReads, 0);
       assert.deepEqual(tmpDir.chmodCalls, []);
-      assert.deepEqual(JSON.parse(written[0]), { port: 8765, token: "token", pid: 4242 });
+      assert.deepEqual(JSON.parse(written[0]), { port: 8765, pid: 4242 });
     });
   }
 
@@ -145,7 +145,7 @@ describe("writeConnectionInfo directory hardening", () => {
         const writeConnectionInfo = loadWriteConnectionInfo(sandbox);
 
         assert.throws(
-          () => writeConnectionInfo(8765, "token"),
+          () => writeConnectionInfo(8765),
           /group\/world permissions/
         );
         assert.deepEqual(tmpDir.chmodCalls, [0o700]);
@@ -159,7 +159,7 @@ describe("writeConnectionInfo directory hardening", () => {
       const { sandbox, written } = makeSandbox({ os, tmpDir });
       const writeConnectionInfo = loadWriteConnectionInfo(sandbox);
 
-      const result = writeConnectionInfo(8770, "token");
+      const result = writeConnectionInfo(8770);
 
       assert.equal(result, "thunderbird-mcp-hardened/connection.json");
       assert.deepEqual(tmpDir.chmodCalls, [0o700]);
@@ -173,7 +173,7 @@ describe("writeConnectionInfo directory hardening", () => {
         const { sandbox, written } = makeSandbox({ os, tmpDir });
         const writeConnectionInfo = loadWriteConnectionInfo(sandbox);
 
-        assert.equal(writeConnectionInfo(8765, "token"), "thunderbird-mcp-hardened/connection.json");
+        assert.equal(writeConnectionInfo(8765), "thunderbird-mcp-hardened/connection.json");
         assert.equal(tmpDir.permissionReads, 1);
         assert.deepEqual(tmpDir.chmodCalls, []);
         assert.equal(written.length, 1);
@@ -187,7 +187,7 @@ describe("writeConnectionInfo directory hardening", () => {
       const { sandbox, written } = makeSandbox({ os, tmpDir });
       const writeConnectionInfo = loadWriteConnectionInfo(sandbox);
 
-      assert.equal(writeConnectionInfo(8765, "token"), "thunderbird-mcp-hardened/connection.json");
+      assert.equal(writeConnectionInfo(8765), "thunderbird-mcp-hardened/connection.json");
       assert.deepEqual(tmpDir.createCalls, [{ type: 1, permissions: 0o700 }]);
       assert.equal(tmpDir.exists(), true);
       assert.equal(tmpDir.permissionReads, 0);
@@ -200,7 +200,7 @@ describe("writeConnectionInfo directory hardening", () => {
       const { sandbox, opened, written } = makeSandbox({ os, tmpDir });
       const writeConnectionInfo = loadWriteConnectionInfo(sandbox);
 
-      assert.throws(() => writeConnectionInfo(8765, "token"), /directory is a symlink/);
+      assert.throws(() => writeConnectionInfo(8765), /directory is a symlink/);
       assert.deepEqual(tmpDir.createCalls, []);
       assert.equal(tmpDir.permissionReads, 0);
       assert.deepEqual(tmpDir.chmodCalls, []);
@@ -214,7 +214,7 @@ describe("writeConnectionInfo directory hardening", () => {
         const { sandbox, opened, written } = makeSandbox({ os, tmpDir });
         const writeConnectionInfo = loadWriteConnectionInfo(sandbox);
 
-        const result = writeConnectionInfo(8770, "new-token");
+        const result = writeConnectionInfo(8770);
 
         assert.equal(result, "thunderbird-mcp-hardened/connection.json");
         assert.deepEqual(tmpDir.removeCalls, connectionFileExists ? [false] : []);
@@ -229,7 +229,7 @@ describe("writeConnectionInfo directory hardening", () => {
           behavior: 0,
           fileExisted: false,
         }]);
-        assert.deepEqual(JSON.parse(written[0]), { port: 8770, token: "new-token", pid: 4242 });
+        assert.deepEqual(JSON.parse(written[0]), { port: 8770, pid: 4242 });
       });
     }
   }

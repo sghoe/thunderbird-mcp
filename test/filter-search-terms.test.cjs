@@ -308,6 +308,8 @@ function makeFilterHarness({
   ci = makeCi(), allowSend, prefError = false,
   getAccessibleFolder = (uri) => ({ folder: makeAccessibleFolder(uri) }),
   addressBooksRestricted = false,
+  // Capabilities of the calling client (default: every capability).
+  granted = Object.keys(Core.policy.CAPABILITIES),
 } = {}) {
   const prefReads = [];
   const submissions = [];
@@ -372,6 +374,7 @@ function makeFilterHarness({
     },
     globals: {
       isAccountAllowed: (id) => id === account.key,
+      clientHasCapability: (capability) => granted.includes(capability),
       isAddressBookAccessRestricted: () => addressBooksRestricted,
       getAccessibleAccounts: () => [account],
       getAccessibleFolder,
@@ -2058,6 +2061,56 @@ describe("custom filter actions remain unsupported by mutations", () => {
     const result = h.api.updateFilter("account", 0, undefined, undefined, undefined, undefined, [{ type: "markRead" }]);
     assert.equal(result.success, true, result.error);
     assert.equal(h.filterList.filters[0].actionCount, 1);
+  });
+});
+
+describe("stored filter actions need the calling client's capabilities", () => {
+  const readOnlyRun = ["filters.read", "filters.manage", "filters.run", "mail.metadata"];
+
+  it("applyFilters skips rules whose actions the client may not perform", () => {
+    const h = makeFilterHarness({ allowSend: true, granted: [...readOnlyRun, "mail.flag"] });
+    h.seed({ name: "Flag", actions: [{ type: "markRead" }] });
+    h.seed({ name: "Move", actions: [{ type: "moveToFolder", value: "imap://account/Archive" }] });
+    h.seed({ name: "Delete", actions: [{ type: "delete" }] });
+    h.seed({ name: "Forward", actions: [{ type: "forward", value: "target@example.invalid" }] });
+    const result = h.api.applyFilters("account", h.folder.URI);
+    assert.equal(result.success, true, result.error);
+    assert.deepEqual(Array.from(result.submitted), ["Flag"]);
+    assert.deepEqual(Array.from(result.skipped, (entry) => ({ ...entry })), [
+      { name: "Move", reason: "missing-capability" },
+      { name: "Delete", reason: "missing-capability" },
+      { name: "Forward", reason: "missing-capability" },
+    ]);
+    assert.deepEqual(h.submissions[0].filters.map((filter) => filter.filterName), ["Flag"]);
+  });
+
+  it("applyFilters runs nothing for a client without a capability set", () => {
+    const h = makeFilterHarness({ granted: [] });
+    h.seed({ name: "Flag", actions: [{ type: "markRead" }] });
+    const result = h.api.applyFilters("account", h.folder.URI);
+    assert.deepEqual(Array.from(result.submitted), []);
+    assert.equal(h.submissions.length, 0);
+  });
+
+  it("updateFilter refuses to enable, rename or widen a rule with ungranted actions", () => {
+    const h = makeFilterHarness({ allowSend: true, granted: readOnlyRun });
+    h.seed({ name: "Forward", enabled: false, actions: [{ type: "forward", value: "target@example.invalid" }] });
+    const before = h.snapshot();
+    for (const change of [[true], [undefined, "Renamed"], [undefined, undefined, undefined, [{ attrib: "subject", op: "contains", value: "x" }]]]) {
+      const [enabled, name, type, conditions] = change;
+      const result = h.api.updateFilter("account", 0, name, enabled, type, conditions);
+      assert.match(result.error, /require filters\.autosend/);
+    }
+    assert.equal(h.snapshot(), before);
+    assert.equal(h.filterList.saveAttempts, 0);
+  });
+
+  it("updateFilter always allows disabling such a rule", () => {
+    const h = makeFilterHarness({ allowSend: true, granted: readOnlyRun });
+    h.seed({ name: "Forward", actions: [{ type: "forward", value: "target@example.invalid" }] });
+    const result = h.api.updateFilter("account", 0, undefined, false);
+    assert.equal(result.success, true, result.error);
+    assert.equal(h.filterList.filters[0].enabled, false);
   });
 });
 

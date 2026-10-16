@@ -38,6 +38,7 @@ function loadDeleteMessages(dependencies) {
     openFolder: dependencies.openFolder,
     findTrashFolder: dependencies.findTrashFolder,
     MailServices: dependencies.MailServices,
+    clientHasCapability: dependencies.clientHasCapability,
     Ci,
   };
   vm.createContext(sandbox);
@@ -57,6 +58,7 @@ function makeHarness({
   trashFolder = null,
   serverType = "imap",
   deleteModel = Ci.nsMsgImapDeleteModels.MoveToTrash,
+  canDeletePermanently = true,
 } = {}) {
   const header = { messageId: "message-1@example.com" };
   const deleteCalls = [];
@@ -108,6 +110,7 @@ function makeHarness({
   };
   const deleteMessages = loadDeleteMessages({
     openFolder: () => ({ folder, db }),
+    clientHasCapability: (capability) => capability === "mail.deletePermanent" ? canDeletePermanently : true,
     findTrashFolder(sourceFolder) {
       trashLookups.push(sourceFolder);
       return trashFolder;
@@ -249,5 +252,36 @@ describe("deleteMessages trash lookup", () => {
     assert.equal(harness.copyCalls[0][1][0], harness.header);
     assert.equal(harness.copyCalls[0][2], trashFolder);
     assert.deepStrictEqual(harness.copyCalls[0].slice(3), [true, null, null, false]);
+  });
+});
+
+describe("permanent deletion needs mail.deletePermanent", () => {
+  for (const [label, options, folderPath] of [
+    ["from Trash", { isTrash: true }, "imap://account/Trash"],
+    ["from a Trash descendant", { isTrashDescendant: true }, "imap://account/Trash/Nested"],
+    ["with IMAP IMAPDelete", { deleteModel: Ci.nsMsgImapDeleteModels.IMAPDelete }, "imap://account/INBOX"],
+    ["with IMAP DeleteNoTrash", { deleteModel: Ci.nsMsgImapDeleteModels.DeleteNoTrash }, "imap://account/INBOX"],
+    ["from Drafts without Trash", { isDrafts: true }, "imap://account/Drafts"],
+  ]) {
+    it(`refuses deletion ${label} for a client without it`, () => {
+      const harness = makeHarness({ ...options, canDeletePermanently: false });
+      const result = harness.deleteMessages([harness.header.messageId], folderPath);
+      assert.match(result.error, /requires mail\.deletePermanent/);
+      assert.equal(harness.deleteCalls.length, 0);
+      assert.equal(harness.copyCalls.length, 0);
+    });
+  }
+
+  it("still moves to Trash for a client without it", () => {
+    const harness = makeHarness({ trashFolder: { URI: "imap://account/Trash" }, canDeletePermanently: false });
+    const result = harness.deleteMessages([harness.header.messageId], "imap://account/INBOX");
+    assert.deepStrictEqual(toPlainObject(result), { success: true, deleted: 1 });
+  });
+
+  it("still moves Drafts to Trash for a client without it", () => {
+    const harness = makeHarness({ isDrafts: true, trashFolder: { URI: "imap://account/Trash" }, canDeletePermanently: false });
+    const result = harness.deleteMessages([harness.header.messageId], "imap://account/Drafts");
+    assert.equal(result.success, true);
+    assert.equal(harness.copyCalls.length, 1);
   });
 });

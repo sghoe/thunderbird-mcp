@@ -34,7 +34,6 @@ const { ensureFreshConnectionInfo } = loadConnectionInfoRefreshHelpers();
 function makeOptions(overrides) {
   return {
     port: 8765,
-    token: "token",
     expectedPid: 1234,
     onCheckError() {},
     ...overrides,
@@ -46,7 +45,7 @@ describe("connection info refresh decision", () => {
     const result = ensureFreshConnectionInfo(makeOptions({
       readConnectionInfo: () => ({
         path: "/tmp/thunderbird-mcp-hardened/connection.json",
-        data: { port: 8765, token: "token", pid: 1234 },
+        data: { port: 8765, pid: 1234 },
       }),
       writeConnectionInfo() {
         throw new Error("writeConnectionInfo should not be called");
@@ -63,28 +62,30 @@ describe("connection info refresh decision", () => {
         path: "/tmp/thunderbird-mcp-hardened/connection.json",
         data: null,
       }),
-      writeConnectionInfo(port, token) {
-        writes.push({ port, token });
+      writeConnectionInfo(...args) {
+        writes.push(args);
         return "/tmp/thunderbird-mcp-hardened/connection.json";
       },
     }));
 
     assert.equal(result, "/tmp/thunderbird-mcp-hardened/connection.json");
-    assert.deepEqual(writes, [{ port: 8765, token: "token" }]);
+    assert.deepEqual(writes, [[8765]]);
   });
 
   for (const staleCase of [
     {
       name: "port changed",
-      data: { port: 8766, token: "token", pid: 1234 },
+      data: { port: 8766, pid: 1234 },
     },
     {
-      name: "token changed",
+      // Files written before Stage 4 contain the old master token; it must
+      // not linger on disk.
+      name: "pre-Stage-4 token still present",
       data: { port: 8765, token: "old-token", pid: 1234 },
     },
     {
       name: "pid changed",
-      data: { port: 8765, token: "token", pid: 4321 },
+      data: { port: 8765, pid: 4321 },
     },
   ]) {
     it(`rewrites when connection.json is stale: ${staleCase.name}`, () => {
@@ -94,10 +95,9 @@ describe("connection info refresh decision", () => {
           path: "/tmp/thunderbird-mcp-hardened/connection.json",
           data: staleCase.data,
         }),
-        writeConnectionInfo(port, token) {
+        writeConnectionInfo(...args) {
           writeCount++;
-          assert.equal(port, 8765);
-          assert.equal(token, "token");
+          assert.deepEqual(args, [8765]);
           return "/tmp/thunderbird-mcp-hardened/connection.json";
         },
       }));

@@ -638,14 +638,12 @@ function tryReadConnectionCandidate(candidate, context, { discovered = false, ch
     } catch {
       throw new Error('malformed JSON in connection file');
     }
-    if (!data || !data.port || !data.token) {
-      throw new Error('Invalid connection file: missing port or token');
+    // Discovery carries no secret; each client brings its own token.
+    if (!data || !data.port) {
+      throw new Error('Invalid connection file: missing port');
     }
     if (!Number.isInteger(data.port) || data.port < 1 || data.port > 65535) {
       throw new Error('Invalid connection file: port must be an integer between 1 and 65535');
-    }
-    if (!isValidAuthToken(data.token)) {
-      throw new Error('Invalid connection file: token must be 64 lowercase hex characters');
     }
     if (checkProcess) validateConnectionProcess(data, context);
     return {
@@ -1077,7 +1075,7 @@ async function readAttachmentFromPath(fileInfo, context) {
 // preflighted before the first read, then files are read sequentially so a
 // caller cannot force many large buffers to be resident at once.
 async function inlineAttachmentPaths(args, options = {}) {
-  if (!args || args.attachments === undefined || args.attachments === null) return;
+  if (!args || args.attachments === undefined || args.attachments === null) return 0;
   if (!Array.isArray(args.attachments)) {
     throw new Error('attachments must be an array, not a JSON-encoded string or another value');
   }
@@ -1129,6 +1127,7 @@ async function inlineAttachmentPaths(args, options = {}) {
     );
   }
   args.attachments = resolved;
+  return fileInfoByIndex.size;
 }
 
 /**
@@ -1272,11 +1271,12 @@ async function handleMessage(line) {
   // see /data/..., the host /tmp, or any path outside its confined view —
   // passing such paths through would fail attachment validation.
   // Reading on the bridge side and shipping base64 sidesteps the sandbox.
+  let inlinedLocalFiles = false;
   if (message.method === 'tools/call'
       && message.params
       && ATTACHMENT_TOOLS.has(message.params.name)) {
     try {
-      await inlineAttachmentPaths(message.params.arguments);
+      inlinedLocalFiles = (await inlineAttachmentPaths(message.params.arguments)) > 0;
     } catch (e) {
       return {
         jsonrpc: '2.0',
@@ -1286,11 +1286,12 @@ async function handleMessage(line) {
     }
   }
 
-  return forwardToThunderbird(message);
+  return forwardToThunderbird(message, { inlinedLocalFiles });
 }
 
 // BEGIN BRIDGE HTTP REQUEST HELPERS
 const REQUEST_TIMEOUT = 30000;
+const LOCAL_FILES_HEADER = 'X-Thunderbird-MCP-Local-Files';
 const MAIL_OPERATION_TIMEOUT = 150000;
 
 function getThunderbirdRequestPolicy(message) {
@@ -1341,6 +1342,9 @@ function tryRequest(hostname, postData, port, token, policy) {
       'Content-Type': 'application/json',
       'Content-Length': Buffer.byteLength(postData)
     };
+    if (policy.inlinedLocalFiles) {
+      headers[LOCAL_FILES_HEADER] = '1';
+    }
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -1448,15 +1452,41 @@ function compactToolResultJsonText(response) {
   return { ...response, result: { ...response.result, content: compactedContent } };
 }
 
-// BEGIN BRIDGE FORWARDING
-async function forwardToThunderbird(message) {
-  const postData = JSON.stringify(message);
-  const policy = getThunderbirdRequestPolicy(message);
+// The client token comes from THUNDERBIRD_MCP_TOKEN or a file named by
+// THUNDERBIRD_MCP_TOKEN_FILE (at most 4 KiB; surrounding whitespace such as a
+// trailing newline is ignored there). The discovery file holds no secret.
+function readClientToken(env = process.env, fsImpl = fs) {
+  let token = typeof env.THUNDERBIRD_MCP_TOKEN === 'string' ? env.THUNDERBIRD_MCP_TOKEN : '';
+  if (!token && env.THUNDERBIRD_MCP_TOKEN_FILE) {
+    const stat = fsImpl.statSync(env.THUNDERBIRD_MCP_TOKEN_FILE);
+    if (!stat.isFile() || stat.size > MAX_CONNECTION_FILE_BYTES) {
+      throw new Error('THUNDERBIRD_MCP_TOKEN_FILE must name a regular file of at most 4 KiB');
+    }
+    token = fsImpl.readFileSync(env.THUNDERBIRD_MCP_TOKEN_FILE, 'utf8').trim();
+  }
+  if (!token) {
+    throw new Error('No client token configured. Pair this client in Thunderbird (Add-ons > Thunderbird MCP (hardened fork) > Options > Clients) and set THUNDERBIRD_MCP_TOKEN.');
+  }
+  if (!isValidAuthToken(token)) {
+    throw new Error('Invalid client token: expected 64 lowercase hex characters');
+  }
+  return token;
+}
 
-  // Read connection info (port + auth token) from the file written by the extension.
+// BEGIN BRIDGE FORWARDING
+async function forwardToThunderbird(message, { inlinedLocalFiles = false } = {}) {
+  const postData = JSON.stringify(message);
+  // The extension requires files.attach when the bridge read local files for
+  // the client; the inline objects alone look like client-supplied data.
+  const policy = { ...getThunderbirdRequestPolicy(message), inlinedLocalFiles };
+
+  // Each paired client has its own token (Thunderbird MCP options > Clients).
+  // Never forward requests without it.
+  const clientToken = readClientToken();
+
+  // Read the port from the discovery file written by the extension.
   // Fail-closed: if no connection file exists, retry a few times (Thunderbird may
-  // still be starting), then fail with an error. Never forward requests without
-  // authentication.
+  // still be starting), then fail with an error.
   let connInfo = readConnectionInfo();
   if (!connInfo) {
     for (let attempt = 0; attempt < CONNECTION_MAX_RETRIES; attempt++) {
@@ -1478,7 +1508,7 @@ async function forwardToThunderbird(message) {
 
   while (connInfo) {
     try {
-      return await tryAllHosts(THUNDERBIRD_HOSTS, postData, connInfo.port, connInfo.token, policy);
+      return await tryAllHosts(THUNDERBIRD_HOSTS, postData, connInfo.port, clientToken, policy);
     } catch (err) {
       if (!isRetryableConnectionError(err)) {
         throw err;
@@ -1624,6 +1654,7 @@ module.exports = {
   inlineAttachmentPaths,
   isSensitiveFilePath,
   isValidAuthToken,
+  readClientToken,
   readConnectionInfo,
   startBridge,
   attachmentLimits: {

@@ -5,6 +5,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const { Core } = require("./helpers/core-modules.cjs");
+const { makeTestClient } = require("./helpers/test-client.cjs");
 
 const apiSource = fs.readFileSync(
   path.resolve(__dirname, "../extension/mcp_server/api.js"), "utf8"
@@ -28,7 +30,7 @@ function getConstantDeclaration(name) {
   return declaration[0];
 }
 
-function loadPrivacyRuntime({ initial = {}, unreadable = [], legacyAddonManager = false } = {}) {
+function loadPrivacyRuntime({ initial = {}, unreadable = [], legacyAddonManager = false, client = {} } = {}) {
   const values = new Map();
   const readErrors = new Set();
   const writes = [];
@@ -119,10 +121,12 @@ function loadPrivacyRuntime({ initial = {}, unreadable = [], legacyAddonManager 
       },
     },
     console: { warn: (...args) => warnings.push(args), error() {} },
+    Core,
+    __testClient: makeTestClient(Core, client),
   };
   const prefConstants = [
     "PREF_ALLOWED_ACCOUNTS", "PREF_DISABLED_TOOLS", "PREF_BLOCK_SKIPREVIEW",
-    "PREF_STABLE_AUTH_TOKEN", "PREF_GET_MESSAGES_LIMIT", "PREF_ALLOW_ENCRYPTED_MESSAGES",
+    "PREF_CLIENTS", "PREF_GET_MESSAGES_LIMIT", "PREF_ALLOW_ENCRYPTED_MESSAGES",
     "PREF_ALLOW_ALL_CALENDARS", "PREF_ALLOW_ALL_ADDRESS_BOOKS",
   ];
   const constants = [
@@ -148,11 +152,16 @@ function loadPrivacyRuntime({ initial = {}, unreadable = [], legacyAddonManager 
     `this.prefNames = { ${prefConstants.join(", ")} };`,
     "this.tools = buildTools();",
     "this.readAccessListPref = readAccessListPref;",
-    "this.isAccountAllowed = isAccountAllowed;",
+    // Checks that depend on the calling client run as the test client.
+    "const asTestClient = (fn) => (...args) => { const previous = activeClient; activeClient = __testClient; try { return fn(...args); } finally { activeClient = previous; } };",
+    "this.withoutClient = { isAccountAllowed, clientHasCapability, clientScopeAllows };",
+    "this.clientContext = { runAsClient, current: () => activeClient, isAccountAllowed };",
+    "this.isAccountAllowed = asTestClient(isAccountAllowed);",
     "this.isToolEnabled = isToolEnabled;",
     "this.isPrivacyOptInEnabled = isPrivacyOptInEnabled;",
-    "this.isAddressBookAccessRestricted = isAddressBookAccessRestricted;",
-    "this.callTool = callTool;",
+    "this.isAddressBookAccessRestricted = asTestClient(isAddressBookAccessRestricted);",
+    "const productionCallTool = callTool;",
+    "this.callTool = (name, args) => runAsClient(__testClient, () => productionCallTool(name, args));",
     "this.stripInvisibleCharacters = stripInvisibleCharacters;",
     "this.sanitizeToolResultText = sanitizeToolResultText;",
     "this.registerUninstallListener = function(context) {",
@@ -301,6 +310,93 @@ describe("Access preferences use the same production parser in options and serve
     assert.equal((await runtime.options.getToolAccessConfig()).mode, "restricted");
     assert.equal(runtime.isAccountAllowed("account2"), false);
     assert.equal(runtime.isToolEnabled("getMessage"), false);
+  });
+});
+
+describe("Per-client scope on top of the global settings", () => {
+  it("limits accounts to the client's own list even when all accounts are allowed globally", () => {
+    const runtime = loadPrivacyRuntime({ client: { accounts: ["account1"] } });
+    assert.equal(runtime.isAccountAllowed("account1"), true);
+    assert.equal(runtime.isAccountAllowed("account2"), false);
+  });
+
+  it("never widens the global account list", () => {
+    const runtime = loadPrivacyRuntime({ initial: { PREF_ALLOWED_ACCOUNTS: '["account1"]' }, client: { accounts: ["account1", "account2"] } });
+    assert.equal(runtime.isAccountAllowed("account2"), false);
+  });
+
+  for (const [group, grant, label] of [["calendar", "calendars", "calendars"], ["contacts", "addressBooks", "address books"]]) {
+    it(`refuses ${group} tools for a client without its ${grant} grant`, async () => {
+      const runtime = loadPrivacyRuntime({ client: { [grant]: false } });
+      for (const tool of runtime.tools.filter(t => t.group === group)) {
+        const result = await runtime.callTool(tool.name, {});
+        assert.equal(result.error, `This client has no access to ${label}. Grant it in the Thunderbird MCP options.`, tool.name);
+      }
+      assert.equal(runtime.calls.length, 0);
+    });
+  }
+
+  it("treats address books as restricted for a client without the grant", () => {
+    const runtime = loadPrivacyRuntime({ initial: { PREF_ALLOW_ALL_ADDRESS_BOOKS: true }, client: { addressBooks: false } });
+    assert.equal(runtime.isAddressBookAccessRestricted(), true);
+  });
+
+  it("never lets calls of different clients overlap", async () => {
+    const runtime = loadPrivacyRuntime();
+    const { runAsClient, current, isAccountAllowed } = runtime.clientContext;
+    const a = makeTestClient(Core, { id: "a".repeat(32), accounts: ["account1"] });
+    const b = makeTestClient(Core, { id: "b".repeat(32), accounts: ["account2"] });
+    const events = [];
+    let releaseA;
+    const gateA = new Promise(resolve => { releaseA = resolve; });
+    const first = runAsClient(a, async () => {
+      events.push("a1 start");
+      await gateA;
+      // Still client A after the other client queued up.
+      events.push(`a1 sees ${current().id[0]} ${isAccountAllowed("account1")} ${isAccountAllowed("account2")}`);
+    });
+    const second = runAsClient(b, async () => {
+      events.push(`b start ${isAccountAllowed("account1")} ${isAccountAllowed("account2")}`);
+    });
+    const third = runAsClient(a, async () => { events.push("a2 start"); });
+    await new Promise(resolve => setImmediate(resolve));
+    // B waits for A; A's later call queues behind B instead of starving it.
+    assert.deepEqual(events, ["a1 start"]);
+    releaseA();
+    await Promise.all([first, second, third]);
+    assert.deepEqual(events, ["a1 start", "a1 sees a true false", "b start false true", "a2 start"]);
+    assert.equal(current(), null);
+  });
+
+  it("runs calls of the same client concurrently while nobody waits", async () => {
+    const runtime = loadPrivacyRuntime();
+    const { runAsClient } = runtime.clientContext;
+    const a = makeTestClient(Core);
+    const events = [];
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const first = runAsClient(a, async () => { events.push("1 start"); await gate; events.push("1 end"); });
+    const second = runAsClient(a, async () => { events.push("2 start"); });
+    await second;
+    assert.deepEqual(events, ["1 start", "2 start"]);
+    release();
+    await first;
+  });
+
+  it("releases the client context when a call throws", async () => {
+    const runtime = loadPrivacyRuntime();
+    const { runAsClient, current } = runtime.clientContext;
+    await assert.rejects(runAsClient(makeTestClient(Core), async () => { throw new Error("boom"); }), /boom/);
+    assert.equal(current(), null);
+    const other = makeTestClient(Core, { id: "c".repeat(32) });
+    assert.equal(await runAsClient(other, async () => current().id), other.id);
+  });
+
+  it("allows nothing outside a client context", () => {
+    const runtime = loadPrivacyRuntime();
+    assert.equal(runtime.withoutClient.isAccountAllowed("account1"), false);
+    assert.equal(runtime.withoutClient.clientHasCapability("mail.body"), false);
+    assert.equal(runtime.withoutClient.clientScopeAllows("calendar"), false);
   });
 });
 
@@ -529,11 +625,11 @@ describe("Text returned by the production dispatcher", () => {
   });
 });
 
-describe("Stable-token cleanup during enabled uninstall", () => {
+describe("Client registry cleanup during enabled uninstall", () => {
   for (const legacyAddonManager of [false, true]) {
-    it(`clears only this add-on's stable token (legacy import: ${legacyAddonManager})`, () => {
+    it(`clears only this add-on's client registry (legacy import: ${legacyAddonManager})`, () => {
       const runtime = loadPrivacyRuntime({ legacyAddonManager, initial: {
-        PREF_STABLE_AUTH_TOKEN: "a".repeat(64),
+        PREF_CLIENTS: "a".repeat(64),
         PREF_ALLOWED_ACCOUNTS: '["account1"]',
         PREF_ALLOW_ENCRYPTED_MESSAGES: true,
       } });
@@ -544,18 +640,18 @@ describe("Stable-token cleanup during enabled uninstall", () => {
       assert.equal(runtime.addedListeners.length, 1, "repeated getAPI calls must reuse the listener");
       const listener = runtime.addedListeners[0];
       listener.onUninstalling({ id: "another-addon@example.com" });
-      assert.equal(runtime.values.get(runtime.prefNames.PREF_STABLE_AUTH_TOKEN), "a".repeat(64));
+      assert.equal(runtime.values.get(runtime.prefNames.PREF_CLIENTS), "a".repeat(64));
       assert.equal(runtime.writes.length, 0);
       listener.onUninstalling({ id });
-      assert.equal(runtime.values.has(runtime.prefNames.PREF_STABLE_AUTH_TOKEN), false);
+      assert.equal(runtime.values.has(runtime.prefNames.PREF_CLIENTS), false);
       assert.equal(runtime.values.get(runtime.prefNames.PREF_ALLOWED_ACCOUNTS), '["account1"]');
       assert.equal(runtime.values.get(runtime.prefNames.PREF_ALLOW_ENCRYPTED_MESSAGES), true);
-      assert.deepEqual(runtime.writes, [{ name: runtime.prefNames.PREF_STABLE_AUTH_TOKEN }]);
+      assert.deepEqual(runtime.writes, [{ name: runtime.prefNames.PREF_CLIENTS }]);
     });
   }
 
-  it("removes the registered listener on shutdown without clearing the token", () => {
-    const runtime = loadPrivacyRuntime({ initial: { PREF_STABLE_AUTH_TOKEN: "b".repeat(64) } });
+  it("removes the registered listener on shutdown without clearing the client registry", () => {
+    const runtime = loadPrivacyRuntime({ initial: { PREF_CLIENTS: "b".repeat(64) } });
     const owner = {};
     runtime.registerUninstallListener.call(owner, { extension: { id: manifest.browser_specific_settings.gecko.id } });
     const listener = runtime.addedListeners[0];
@@ -565,7 +661,7 @@ describe("Stable-token cleanup during enabled uninstall", () => {
     assert.equal(runtime.addonListeners.size, 0);
     assert.equal(owner._uninstallListener, null);
     assert.equal(owner._addonManager, null);
-    assert.equal(runtime.values.get(runtime.prefNames.PREF_STABLE_AUTH_TOKEN), "b".repeat(64));
+    assert.equal(runtime.values.get(runtime.prefNames.PREF_CLIENTS), "b".repeat(64));
     assert.equal(runtime.writes.length, 0);
   });
 });

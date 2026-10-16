@@ -16,15 +16,22 @@ const toolList = document.getElementById("toolList");
 const saveToolsBtn = document.getElementById("saveToolsBtn");
 const saveToolsStatus = document.getElementById("saveToolsStatus");
 
-const currentAuthTokenInput = document.getElementById("currentAuthToken");
-const copyAuthTokenBtn = document.getElementById("copyAuthTokenBtn");
-const copyAuthTokenStatus = document.getElementById("copyAuthTokenStatus");
-const useStableAuthTokenCheckbox = document.getElementById("useStableAuthToken");
-const stableAuthTokenControls = document.getElementById("stableAuthTokenControls");
-const stableAuthTokenInput = document.getElementById("stableAuthToken");
-const generateStableAuthTokenBtn = document.getElementById("generateStableAuthTokenBtn");
-const regenerateStableAuthTokenBtn = document.getElementById("regenerateStableAuthTokenBtn");
-const stableAuthTokenStatus = document.getElementById("stableAuthTokenStatus");
+// BEGIN OPTIONS CLIENT ELEMENTS
+const clientList = document.getElementById("clientList");
+const clientRegistryError = document.getElementById("clientRegistryError");
+const removeAllClientsBtn = document.getElementById("removeAllClientsBtn");
+const clientNameInput = document.getElementById("clientName");
+const clientProfileSelect = document.getElementById("clientProfile");
+const clientCapabilityList = document.getElementById("clientCapabilityList");
+const clientAccountList = document.getElementById("clientAccountList");
+const clientCalendarsCheckbox = document.getElementById("clientCalendars");
+const clientAddressBooksCheckbox = document.getElementById("clientAddressBooks");
+const createClientBtn = document.getElementById("createClientBtn");
+const clientStatus = document.getElementById("clientStatus");
+const clientTokenBox = document.getElementById("clientTokenBox");
+const clientTokenInput = document.getElementById("clientToken");
+const copyClientTokenBtn = document.getElementById("copyClientTokenBtn");
+// END OPTIONS CLIENT ELEMENTS
 
 // BEGIN OPTIONS ACCESS STATE
 let currentAccounts = [];
@@ -127,139 +134,154 @@ retryServerBtn.addEventListener("click", async () => {
 });
 // END OPTIONS SERVER STATUS
 
-function updateStableAuthTokenControls() {
-  stableAuthTokenControls.hidden = !useStableAuthTokenCheckbox.checked;
+// BEGIN OPTIONS CLIENTS
+// Pairing happens only here, in the trusted options page. Names come from
+// the user and account names from Thunderbird; both are inserted as text.
+let clientCatalogue = { capabilities: [], profiles: {}, accounts: [] };
+
+function setClientStatus(message, error = false) {
+  clientStatus.textContent = message;
+  clientStatus.className = error ? "save-status error" : "save-status";
 }
 
-function setStableAuthTokenBusy(busy) {
-  useStableAuthTokenCheckbox.disabled = busy;
-  stableAuthTokenInput.disabled = busy;
-  generateStableAuthTokenBtn.disabled = busy;
-  regenerateStableAuthTokenBtn.disabled = busy;
+function checkboxItem(list, value, label, checked = false) {
+  const li = document.createElement("li");
+  const lab = document.createElement("label");
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.value = value;
+  box.checked = checked;
+  const span = document.createElement("span");
+  span.textContent = label;
+  lab.append(box, " ", span);
+  li.append(lab);
+  list.append(li);
+  return box;
 }
 
-function setStableAuthTokenStatus(message, error = false) {
-  stableAuthTokenStatus.textContent = message;
-  stableAuthTokenStatus.className = error ? "save-status error" : "save-status";
+function checkedValues(list) {
+  return [...list.querySelectorAll("input[type=checkbox]")].filter(b => b.checked).map(b => b.value);
 }
 
-async function requestGeneratedAuthToken() {
-  const result = await browser.mcpServer.generateAuthToken();
-  if (result.error) {
-    throw new Error(result.error);
-  }
-  if (!result.authToken) {
-    throw new Error("Generated token was empty");
-  }
-  return result.authToken;
-}
-
-async function saveStableAuthTokenValue(value, successMessage = "Saved.") {
-  const stableAuthToken = value.trim();
-  setStableAuthTokenStatus("Saving...");
-  const result = await browser.mcpServer.setStableAuthToken(stableAuthToken);
-  if (result.error) {
-    setStableAuthTokenStatus(result.error, true);
-    return false;
-  }
-  stableAuthTokenInput.value = result.stableAuthToken || "";
-  setStableAuthTokenStatus(successMessage);
-  return true;
-}
-
-async function updateStoredStableAuthToken(value, successMessage) {
-  setStableAuthTokenBusy(true);
-  try {
-    await saveStableAuthTokenValue(value, successMessage);
-  } catch (e) {
-    setStableAuthTokenStatus("Error: " + e.message, true);
-  }
-  setStableAuthTokenBusy(false);
-  updateStableAuthTokenControls();
-}
-
-async function generateAndStoreStableAuthToken(successMessage) {
-  setStableAuthTokenBusy(true);
-  try {
-    const token = await requestGeneratedAuthToken();
-    stableAuthTokenInput.value = token;
-    await saveStableAuthTokenValue(token, successMessage);
-  } catch (e) {
-    setStableAuthTokenStatus("Error: " + e.message, true);
-  }
-  setStableAuthTokenBusy(false);
-  updateStableAuthTokenControls();
-}
-
-async function loadAuthenticationConfig() {
-  try {
-    const [current, stable] = await Promise.all([
-      browser.mcpServer.getCurrentAuthToken(),
-      browser.mcpServer.getStableAuthToken(),
-    ]);
-    currentAuthTokenInput.value = current.authToken || "";
-    copyAuthTokenBtn.disabled = !currentAuthTokenInput.value;
-    copyAuthTokenStatus.textContent = "";
-    copyAuthTokenStatus.className = "save-status";
-
-    stableAuthTokenInput.value = stable.stableAuthToken || "";
-    useStableAuthTokenCheckbox.checked = !!stableAuthTokenInput.value;
-    updateStableAuthTokenControls();
-    setStableAuthTokenStatus("");
-  } catch (e) {
-    copyAuthTokenStatus.textContent = "Error loading token: " + e.message;
-    copyAuthTokenStatus.className = "save-status error";
-    setStableAuthTokenStatus("Error loading setting: " + e.message, true);
+function applyProfileSelection() {
+  const granted = new Set(clientCatalogue.profiles[clientProfileSelect.value] || []);
+  const custom = clientProfileSelect.value === "custom";
+  for (const box of clientCapabilityList.querySelectorAll("input[type=checkbox]")) {
+    if (!custom) box.checked = granted.has(box.value);
+    box.disabled = !custom;
   }
 }
 
-copyAuthTokenBtn.addEventListener("click", async () => {
-  copyAuthTokenStatus.textContent = "";
-  copyAuthTokenStatus.className = "save-status";
-  copyAuthTokenBtn.disabled = true;
-  try {
-    await navigator.clipboard.writeText(currentAuthTokenInput.value);
-    copyAuthTokenStatus.textContent = "Copied.";
-  } catch (e) {
-    copyAuthTokenStatus.textContent = "Error: " + e.message;
-    copyAuthTokenStatus.className = "save-status error";
-  }
-  copyAuthTokenBtn.disabled = !currentAuthTokenInput.value;
-});
+function showClientToken(token) {
+  clientTokenInput.value = token;
+  clientTokenBox.hidden = false;
+}
 
-useStableAuthTokenCheckbox.addEventListener("change", async () => {
-  updateStableAuthTokenControls();
-  if (useStableAuthTokenCheckbox.checked) {
-    if (!stableAuthTokenInput.value.trim()) {
-      await generateAndStoreStableAuthToken("Generated and saved.");
-    } else {
-      await updateStoredStableAuthToken(stableAuthTokenInput.value, "Saved.");
-    }
-  } else {
-    stableAuthTokenInput.value = "";
-    await updateStoredStableAuthToken("", "Stable token cleared.");
-  }
-});
-
-stableAuthTokenInput.addEventListener("change", async () => {
-  if (!useStableAuthTokenCheckbox.checked) {
+function renderClients(clients) {
+  clientList.replaceChildren();
+  if (!clients.length) {
+    const li = document.createElement("li");
+    li.textContent = "No clients paired. MCP requests are refused until you pair one.";
+    clientList.append(li);
     return;
   }
-  if (!stableAuthTokenInput.value.trim()) {
-    await generateAndStoreStableAuthToken("Generated and saved.");
-  } else {
-    await updateStoredStableAuthToken(stableAuthTokenInput.value, "Saved.");
+  for (const client of clients) {
+    const li = document.createElement("li");
+    const title = document.createElement("strong");
+    title.textContent = client.name;
+    const details = document.createElement("span");
+    const accounts = client.accounts.length ? client.accounts.join(", ") : "none";
+    details.textContent = ` — ${client.profile}; ${client.capabilities.length} capabilities; accounts: ${accounts}` +
+      `${client.calendars ? "; calendars" : ""}${client.addressBooks ? "; address books" : ""}`;
+    const rotate = document.createElement("button");
+    rotate.textContent = "New token";
+    rotate.addEventListener("click", async () => {
+      const result = await browser.mcpServer.rotateClientToken(client.id);
+      if (result.error) return setClientStatus(result.error, true);
+      showClientToken(result.token);
+      setClientStatus(`New token for "${client.name}"; the old one no longer works.`);
+    });
+    const revoke = document.createElement("button");
+    revoke.textContent = "Revoke";
+    revoke.addEventListener("click", async () => {
+      const result = await browser.mcpServer.deleteClient(client.id);
+      if (result.error) return setClientStatus(result.error, true);
+      setClientStatus(`Revoked "${client.name}".`);
+      await loadAuthenticationConfig();
+    });
+    li.append(title, details, " ", rotate, " ", revoke);
+    clientList.append(li);
+  }
+}
+
+// Kept under this name: the server status Retry button refreshes it.
+async function loadAuthenticationConfig() {
+  try {
+    const data = await browser.mcpServer.listClients();
+    clientCatalogue = data;
+    clientRegistryError.hidden = !data.corrupt;
+    renderClients(data.clients || []);
+    clientProfileSelect.replaceChildren();
+    for (const name of [...Object.keys(data.profiles), "custom"]) {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      clientProfileSelect.append(option);
+    }
+    clientProfileSelect.value = "none";
+    clientCapabilityList.replaceChildren();
+    for (const cap of data.capabilities) checkboxItem(clientCapabilityList, cap.id, `${cap.description} (${cap.id})`);
+    clientAccountList.replaceChildren();
+    for (const account of data.accounts) checkboxItem(clientAccountList, account.id, account.name);
+    applyProfileSelection();
+  } catch (e) {
+    setClientStatus("Error loading clients: " + e.message, true);
+  }
+}
+
+clientProfileSelect.addEventListener("change", applyProfileSelection);
+
+createClientBtn.addEventListener("click", async () => {
+  createClientBtn.disabled = true;
+  try {
+    const result = await browser.mcpServer.createClient({
+      name: clientNameInput.value.trim(),
+      profile: clientProfileSelect.value,
+      capabilities: checkedValues(clientCapabilityList),
+      accounts: checkedValues(clientAccountList),
+      calendars: clientCalendarsCheckbox.checked,
+      addressBooks: clientAddressBooksCheckbox.checked,
+    });
+    if (result.error) {
+      setClientStatus(result.error, true);
+    } else {
+      showClientToken(result.token);
+      setClientStatus(`Paired "${result.client.name}".`);
+      clientNameInput.value = "";
+      await loadAuthenticationConfig();
+    }
+  } catch (e) {
+    setClientStatus("Error: " + e.message, true);
+  }
+  createClientBtn.disabled = false;
+});
+
+copyClientTokenBtn.addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(clientTokenInput.value);
+    setClientStatus("Token copied.");
+  } catch (e) {
+    setClientStatus("Error: " + e.message, true);
   }
 });
 
-generateStableAuthTokenBtn.addEventListener("click", async () => {
-  await generateAndStoreStableAuthToken("Generated and saved.");
+removeAllClientsBtn.addEventListener("click", async () => {
+  const result = await browser.mcpServer.removeAllClients();
+  if (result.error) return setClientStatus(result.error, true);
+  setClientStatus("All clients removed.");
+  await loadAuthenticationConfig();
 });
-
-regenerateStableAuthTokenBtn.addEventListener("click", async () => {
-  await generateAndStoreStableAuthToken("Regenerated and saved.");
-});
-
+// END OPTIONS CLIENTS
 // BEGIN OPTIONS ACCOUNT ACCESS
 async function loadAccountAccess() {
   saveBtn.disabled = true;

@@ -24,6 +24,7 @@ const BRIDGE_PATH = path.resolve(__dirname, '..', 'mcp-bridge.cjs');
 let CONN_DIR;
 let CONN_FILE;
 let BRIDGE_ENV;
+const DEFAULT_TOKEN = 'f'.repeat(64);
 
 beforeEach(() => {
   // Outgoing attachment fixtures need a path the policy allows. Every
@@ -31,7 +32,9 @@ beforeEach(() => {
   CONN_DIR = makeAllowedTempDir('tb-mcp-auth-');
   CONN_FILE = path.join(CONN_DIR, 'connection.json');
   // A missing/invalid pin must never fall through to a running instance.
-  BRIDGE_ENV = { ...process.env, THUNDERBIRD_MCP_CONNECTION_FILE: CONN_FILE };
+  // Every paired client brings its own token; the discovery file has none.
+  BRIDGE_ENV = { ...process.env, THUNDERBIRD_MCP_CONNECTION_FILE: CONN_FILE, THUNDERBIRD_MCP_TOKEN: DEFAULT_TOKEN };
+  delete BRIDGE_ENV.THUNDERBIRD_MCP_TOKEN_FILE;
 });
 
 afterEach(() => {
@@ -88,15 +91,17 @@ function sendToBridge(message, { timeout = 10000 } = {}) {
 }
 
 /**
- * Write a test connection.json file.
+ * Write a test connection.json file (discovery only, no secret) and give the
+ * bridge the client token the way a paired client receives it.
  */
 function writeTestConnectionInfo(port, token) {
   fs.mkdirSync(CONN_DIR, { recursive: true });
-  fs.writeFileSync(CONN_FILE, JSON.stringify({ port, token, pid: process.pid }), { encoding: 'utf8', mode: 0o600 });
+  fs.writeFileSync(CONN_FILE, JSON.stringify({ port, pid: process.pid }), { encoding: 'utf8', mode: 0o600 });
+  BRIDGE_ENV.THUNDERBIRD_MCP_TOKEN = token;
 }
 
 describe('Auth: connection info file', () => {
-  it('bridge reads port and token from connection.json', async () => {
+  it('bridge reads the port from connection.json and sends the client token', async () => {
     let TEST_PORT;
     const TEST_TOKEN = 'a'.repeat(64);
     let receivedHeaders = null;
@@ -383,22 +388,27 @@ describe('Auth: connection file corruption', () => {
 
     assert.equal(response.id, 22);
     assert.ok(response.error);
-    assert.match(response.error.message, /missing port or token|Bridge error/);
+    assert.match(response.error.message, /missing port|Bridge error/);
   });
 
-  it('rejects connection file with missing token', async () => {
-    fs.mkdirSync(CONN_DIR, { recursive: true });
-    fs.writeFileSync(CONN_FILE, JSON.stringify({ port: 19999 }), { encoding: 'utf8', mode: 0o600 });
-
-    const response = await sendToBridge({
-      jsonrpc: '2.0',
-      id: 23,
-      method: 'tools/list'
+  it('ignores a token left in an old discovery file and sends the client token', async () => {
+    let authorization;
+    const server = http.createServer((req, res) => {
+      authorization = req.headers.authorization;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: 23, result: { tools: [] } }));
     });
-
-    assert.equal(response.id, 23);
-    assert.ok(response.error);
-    assert.match(response.error.message, /missing port or token|Bridge error/);
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      fs.mkdirSync(CONN_DIR, { recursive: true });
+      fs.writeFileSync(CONN_FILE, JSON.stringify({ port: server.address().port, token: 'c'.repeat(64), pid: process.pid }), { encoding: 'utf8', mode: 0o600 });
+      const response = await sendToBridge({ jsonrpc: '2.0', id: 23, method: 'tools/list' });
+      assert.equal(response.id, 23);
+      assert.ok(response.result);
+      assert.equal(authorization, `Bearer ${DEFAULT_TOKEN}`);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   it('rejects connection file with null port', async () => {
@@ -415,18 +425,44 @@ describe('Auth: connection file corruption', () => {
     assert.ok(response.error);
   });
 
-  it('rejects connection file with empty string token', async () => {
-    fs.mkdirSync(CONN_DIR, { recursive: true });
-    fs.writeFileSync(CONN_FILE, JSON.stringify({ port: 19999, token: '' }), { encoding: 'utf8', mode: 0o600 });
+  it('refuses to forward without a client token', async () => {
+    let requests = 0;
+    const server = http.createServer((_req, res) => { requests++; res.end('{}'); });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      writeTestConnectionInfo(server.address().port, '');
+      delete BRIDGE_ENV.THUNDERBIRD_MCP_TOKEN;
+      const response = await sendToBridge({ jsonrpc: '2.0', id: 25, method: 'tools/list' });
+      assert.equal(response.id, 25);
+      assert.match(response.error.message, /No client token configured/);
+      assert.match(response.error.message, /Options > Clients/);
+      assert.equal(requests, 0);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
 
-    const response = await sendToBridge({
-      jsonrpc: '2.0',
-      id: 25,
-      method: 'tools/list'
+  it('reads the client token from THUNDERBIRD_MCP_TOKEN_FILE', async () => {
+    let authorization;
+    const server = http.createServer((req, res) => {
+      authorization = req.headers.authorization;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: 251, result: { tools: [] } }));
     });
-
-    assert.equal(response.id, 25);
-    assert.ok(response.error);
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      writeTestConnectionInfo(server.address().port, '');
+      delete BRIDGE_ENV.THUNDERBIRD_MCP_TOKEN;
+      const tokenFile = path.join(CONN_DIR, 'client-token');
+      fs.writeFileSync(tokenFile, `${'9'.repeat(64)}\n`, { mode: 0o600 });
+      BRIDGE_ENV.THUNDERBIRD_MCP_TOKEN_FILE = tokenFile;
+      const response = await sendToBridge({ jsonrpc: '2.0', id: 251, method: 'tools/list' });
+      assert.equal(response.id, 251);
+      assert.ok(response.result);
+      assert.equal(authorization, `Bearer ${'9'.repeat(64)}`);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   it('rejects connection file with port=0', async () => {
@@ -459,7 +495,7 @@ describe('Auth: connection file corruption', () => {
 
   it('accepts connection file with extra fields (forward compat)', async () => {
     let TEST_PORT;
-    const TEST_TOKEN = 'd'.repeat(64);
+    BRIDGE_ENV.THUNDERBIRD_MCP_TOKEN = 'd'.repeat(64);
 
     const server = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -475,7 +511,7 @@ describe('Auth: connection file corruption', () => {
     try {
       fs.mkdirSync(CONN_DIR, { recursive: true });
       fs.writeFileSync(CONN_FILE, JSON.stringify({
-        port: TEST_PORT, token: TEST_TOKEN, pid: 12345,
+        port: TEST_PORT, pid: 12345,
         version: '2.0', extraField: 'should be ignored'
       }), { encoding: 'utf8', mode: 0o600 });
 
@@ -533,7 +569,7 @@ describe('Auth: connection file corruption', () => {
 
         assert.equal(response.id, id, testCase.name);
         assert.ok(response.error, testCase.name);
-        assert.match(response.error.message, /token must be 64 lowercase hex characters/, testCase.name);
+        assert.match(response.error.message, /Invalid client token: expected 64 lowercase hex characters/, testCase.name);
         assert.equal(requestCount, 0, `${testCase.name} should be rejected before HTTP`);
       }
     } finally {

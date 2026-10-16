@@ -34,14 +34,16 @@ This project bridges three trust boundaries; any of them is in scope:
    includes malformed JSON, oversized payloads, control characters,
    prototype pollution attempts.
 2. **HTTP transport** between the bridge and the Thunderbird
-   extension (`http://localhost:<port>` with token auth). Token
+   extension (`http://localhost:<port>` with per-client token auth). Token
    handling, timing-safe comparison, port-binding hygiene.
 3. **Tool dispatch inside the extension** (`extension/mcp_server/api.js`).
    The permission engine + per-tool argument validation are the
    primary boundary. Any path that lets a caller exceed their
    declared permission scope, or that accesses Thunderbird state
    outside the permission's intent (e.g. reading another account's
-   mailbox via a tool that should only see Inbox), is in scope.
+   mailbox via a tool that should only see Inbox), is in scope. This
+   includes a paired client exceeding its capabilities, accounts or
+   calendar/address-book grants.
 4. **Native messaging / WebExtension experiment surface**. The
    extension runs in Thunderbird's chrome context with XPCOM
    privileges -- any path that leaks XPCOM capabilities to an

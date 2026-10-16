@@ -7,6 +7,7 @@ const { ReadableStream } = require("node:stream/web");
 const vm = require("node:vm");
 // Registers a before() hook that loads the real core modules.
 const { Core } = require("./core-modules.cjs");
+const { makeTestClient } = require("./test-client.cjs");
 
 const source = fs.readFileSync(path.resolve(__dirname, "../../extension/mcp_server/api.js"), "utf8");
 const CALENDAR_FILTERS = Object.freeze({
@@ -285,7 +286,7 @@ function loadCalendarRuntime({
   allowAllCalendars = false, parser = "cal", parserFailure,
   identity = { email: "organizer@example.com", fullName: "Organizer" },
   identityKey = "identity-1", unreadableIdentity = false, resolvedIdentity, organizerId,
-  disabled = false,
+  disabled = false, client = {},
 } = {}) {
   const prefValues = new Map();
   const prefTypes = { PREF_INVALID: 0, PREF_STRING: 32, PREF_BOOL: 128 };
@@ -423,6 +424,7 @@ function loadCalendarRuntime({
       return identity;
     } } },
     console: { warn() {}, error() {} },
+    __testClient: makeTestClient(Core, client),
   };
   const names = [
     "PREF_ALLOWED_ACCOUNTS", "PREF_DISABLED_TOOLS", "PREF_BLOCK_SKIPREVIEW",
@@ -444,7 +446,9 @@ function loadCalendarRuntime({
     snippet("// BEGIN CALENDAR TOOLS", "// END CALENDAR TOOLS"),
     snippet("// BEGIN TOOL CALL DISPATCH", "// END TOOL CALL DISPATCH"),
     "this.prefNames = { PREF_ALLOWED_ACCOUNTS, PREF_BLOCK_SKIPREVIEW, PREF_ALLOW_ALL_CALENDARS };",
-    "Object.assign(this, { callTool, validateToolArgs, coerceToolArgs, buildTools, normalizeRRule, extractRRuleFromItem, formatEvent, formatAttendee, formatOrganizer });",
+    "const productionCallTool = callTool;",
+    "const callToolAsClient = (name, args) => runAsClient(__testClient, () => productionCallTool(name, args));",
+    "Object.assign(this, { callTool: callToolAsClient, validateToolArgs, coerceToolArgs, buildTools, normalizeRRule, extractRRuleFromItem, formatEvent, formatAttendee, formatOrganizer });",
   ].join("\n"), sandbox);
   if (blockSkipReview !== undefined) prefValues.set(sandbox.prefNames.PREF_BLOCK_SKIPREVIEW, blockSkipReview);
   if (allowedAccounts !== undefined) {

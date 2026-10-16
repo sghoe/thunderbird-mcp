@@ -5,9 +5,12 @@
 ```text
 MCP client
   -> mcp-bridge.cjs (stdio)  or  direct local HTTP
-  -> MCP transport adapter (extension/mcp_server/api.js: HTTP handler, auth, limits)
-  -> validation, client context, authoritative policy (api.js + core/policy.sys.mjs)
-  -> use case (tool handler in api.js)
+  -> MCP transport adapter (extension/mcp_server/api.js: HTTP handler, limits)
+  -> client authentication: Bearer token -> paired client (core/client-registry.sys.mjs)
+  -> coercion and schema validation
+  -> authoritative policy on the effective arguments (core/policy.sys.mjs)
+  -> use case (tool handler in api.js), run as that client (runAsClient):
+     account/calendar/address-book scope and state-dependent capabilities
   -> narrow Thunderbird and file adapters (XPCOM calls in api.js)
 ```
 
@@ -16,16 +19,35 @@ additionally (it reads path attachments on the host and applies the same path
 policy), but every rule that decides access runs inside the extension, so a
 direct HTTP client is held to the same rules.
 
+### Clients and capabilities (Stage 4)
+
+* Each MCP client is paired in the options page and has its own token; the
+  registry (`extensions.thunderbird-mcp-hardened.clients`) stores a SHA-256
+  verifier, the capability list, explicit account keys and the calendar and
+  address-book grants. A corrupt registry admits nobody. The management API
+  is reachable only from the options page, never through MCP tools.
+* Global preferences stay upper limits: account list, disabled tools, Block
+  `skipReview`, encrypted mail, filter send actions, all calendars/address
+  books.
+* `runAsClient` sets the calling client for the handler; calls of different
+  clients never overlap (fair queue), because access checks run deep inside
+  asynchronous handlers. Without a client nothing is accessible.
+* The bridge marks requests whose inline attachments it read from local
+  paths (`X-Thunderbird-MCP-Local-Files: 1`); the policy then requires
+  `files.attach`. The marker only adds requirements, so a direct HTTP client
+  gains nothing by omitting it: it can only send content it already has.
+
 ## Module layout
 
 | Layer | Where | XPCOM | Tested |
 |---|---|---|---|
 | Contracts (tool names, input schemas) | `api.js` `buildTools()`; baseline `test/baseline/tools-v0.9.2.json` | constants only | `test/tool-contract.test.cjs` |
 | Policy (capabilities, per-call requirements) | `core/policy.sys.mjs` | **none** | `test/policy.test.cjs` (plain Node) |
+| Client registry (parse, validate, verify) | `core/client-registry.sys.mjs`; adapter and management API in `api.js` | **none** (hashing/randomness in the adapter) | `test/client-registry.test.cjs`, native `stage4-clients.native.cjs` |
 | Decisions extracted in Stage 3 | `core/attachment-source.sys.mjs`, `core/reply-template.sys.mjs`, `core/calendar-kind.sys.mjs` | **none** | direct imports + snippet tests of the api.js callers |
 | Use cases and Thunderbird adapters | `api.js` | yes | vm snippet tests + native tests |
 | Transport | `api.js` HTTP handler, `httpd.sys.mjs`, `mcp-bridge.cjs` | yes | unit + native |
-| Trusted UI | `options.html` / `options.js` | WebExtension | unit |
+| Trusted UI (pairing, rights) | `options.html` / `options.js` | WebExtension | unit + native UI test |
 
 ### Core module rules (mechanically enforced)
 

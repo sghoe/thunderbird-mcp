@@ -18,13 +18,6 @@
         "parameters": []
       },
       {
-        "name": "getCurrentAuthToken",
-        "type": "function",
-        "async": true,
-        "description": "Get the auth token currently used by the running MCP server",
-        "parameters": []
-      },
-      {
         "name": "getAccountAccessConfig",
         "type": "function",
         "async": true,
@@ -142,30 +135,50 @@
         ]
       },
       {
-        "name": "getStableAuthToken",
+        "name": "listClients",
         "type": "function",
         "async": true,
-        "description": "Get the stored stable auth token preference",
+        "description": "List paired MCP clients (without token verifiers), the capability catalogue, profiles and accounts. Extension pages only, never over MCP.",
         "parameters": []
       },
       {
-        "name": "setStableAuthToken",
+        "name": "createClient",
         "type": "function",
         "async": true,
-        "description": "Set the stored stable auth token preference",
+        "description": "Pair a new MCP client. Returns its token once; only a verifier is stored.",
         "parameters": [
-          {
-            "name": "stableAuthToken",
-            "type": "string",
-            "description": "Stable token to reuse across MCP server starts. Empty string clears the preference and restores per-startup rotation."
-          }
+          { "name": "settings", "type": "object", "additionalProperties": { "type": "any" }, "description": "{ name, profile, capabilities, accounts, calendars, addressBooks }" }
         ]
       },
       {
-        "name": "generateAuthToken",
+        "name": "updateClient",
         "type": "function",
         "async": true,
-        "description": "Generate a fresh auth token string",
+        "description": "Change a paired client's permissions.",
+        "parameters": [
+          { "name": "clientId", "type": "string" },
+          { "name": "settings", "type": "object", "additionalProperties": { "type": "any" }, "description": "{ name, profile, capabilities, accounts, calendars, addressBooks }" }
+        ]
+      },
+      {
+        "name": "rotateClientToken",
+        "type": "function",
+        "async": true,
+        "description": "Replace a client's token. Returns the new token once; the old one stops working.",
+        "parameters": [ { "name": "clientId", "type": "string" } ]
+      },
+      {
+        "name": "deleteClient",
+        "type": "function",
+        "async": true,
+        "description": "Revoke a paired client. Its token stops working for new requests.",
+        "parameters": [ { "name": "clientId", "type": "string" } ]
+      },
+      {
+        "name": "removeAllClients",
+        "type": "function",
+        "async": true,
+        "description": "Remove every paired client, also repairing a corrupt client registry.",
         "parameters": []
       },
       {
@@ -179,7 +192,7 @@
         "name": "setListenAll",
         "type": "function",
         "async": true,
-        "description": "Set whether the server listens on all network interfaces. When enabled, the server is accessible from other machines on your network (e.g. WSL, Docker) over plain HTTP. Warning: the authentication token and mail content travel in clear text on the LAN.",
+        "description": "Set whether the server listens on all network interfaces. When enabled, the server is accessible from other machines on your network (e.g. WSL, Docker) over plain HTTP. Warning: client tokens and mail content travel in clear text on the LAN.",
         "parameters": [
           {
             "name": "listenAll",

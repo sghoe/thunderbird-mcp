@@ -14,6 +14,7 @@ const {
   inlineAttachmentPaths,
   isSensitiveFilePath,
   isValidAuthToken,
+  readClientToken,
   readConnectionInfo,
 } = require('./helpers/bridge.cjs');
 const { makeAllowedTempDir } = require('./helpers/fixture-dir.cjs');
@@ -1098,12 +1099,13 @@ describe('Bridge discovery', () => {
   it('rejects invalid connection data before caching, even for explicit pins', () => {
     const file = path.join(root, 'pinned.json');
     const options = makeTestOptions(root, { env: { THUNDERBIRD_MCP_CONNECTION_FILE: file } });
-    for (const data of [null, [], {}, { port: 21000, token: 'invalid' }, { port: '21000', token: 'a'.repeat(64) }, { port: 65536, token: 'a'.repeat(64) }, { port: 1.5, token: 'a'.repeat(64) }]) {
+    for (const data of [null, [], {}, { token: 'a'.repeat(64) }, { port: '21000' }, { port: 65536 }, { port: 1.5 }]) {
       fs.writeFileSync(file, JSON.stringify(data), { mode: 0o600 });
       assert.equal(readConnectionInfo(options), null);
       assert.equal(advanceToNextCandidate(), null);
     }
-    writeConnectionFile(file, { port: 21000, token: 'a'.repeat(64) });
+    // The discovery file carries no secret; a leftover token field is ignored.
+    writeConnectionFile(file, { port: 21000, token: 'invalid' });
     assert.equal(readConnectionInfo(options).port, 21000);
   });
 
@@ -1436,5 +1438,38 @@ describe('Bridge discovery', () => {
       assert.equal(discoverConnectionInfo(options).candidates.length, 1);
       assert.deepEqual(opened, [pinned]);
     });
+  });
+});
+
+describe('Bridge client token', () => {
+  const token = 'c'.repeat(64);
+  const files = (entries) => ({
+    statSync(p) {
+      if (!Object.hasOwn(entries, p)) throw new Error('ENOENT');
+      const e = entries[p];
+      return { isFile: () => e.isFile !== false, size: e.size ?? Buffer.byteLength(e.text || '') };
+    },
+    readFileSync: (p) => entries[p].text,
+  });
+
+  it('reads the token from THUNDERBIRD_MCP_TOKEN', () => {
+    assert.equal(readClientToken({ THUNDERBIRD_MCP_TOKEN: token }, files({})), token);
+  });
+
+  it('reads a token file and ignores surrounding whitespace there', () => {
+    assert.equal(readClientToken({ THUNDERBIRD_MCP_TOKEN_FILE: '/t' }, files({ '/t': { text: `${token}\r\n` } })), token);
+  });
+
+  it('prefers the environment variable over the file', () => {
+    assert.equal(readClientToken({ THUNDERBIRD_MCP_TOKEN: token, THUNDERBIRD_MCP_TOKEN_FILE: '/t' }, files({ '/t': { text: 'd'.repeat(64) } })), token);
+  });
+
+  it('refuses missing, malformed, oversized and non-regular token sources', () => {
+    assert.throws(() => readClientToken({}, files({})), /No client token configured/);
+    assert.throws(() => readClientToken({ THUNDERBIRD_MCP_TOKEN: ` ${token}` }, files({})), /Invalid client token/);
+    assert.throws(() => readClientToken({ THUNDERBIRD_MCP_TOKEN: token.toUpperCase() }, files({})), /Invalid client token/);
+    assert.throws(() => readClientToken({ THUNDERBIRD_MCP_TOKEN_FILE: '/big' }, files({ '/big': { size: 5000 } })), /at most 4 KiB/);
+    assert.throws(() => readClientToken({ THUNDERBIRD_MCP_TOKEN_FILE: '/dir' }, files({ '/dir': { isFile: false } })), /regular file/);
+    assert.throws(() => readClientToken({ THUNDERBIRD_MCP_TOKEN_FILE: '/missing' }, files({})), /ENOENT/);
   });
 });

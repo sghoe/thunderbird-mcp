@@ -18,6 +18,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { Core } = require('./helpers/core-modules.cjs');
+const { makeTestClient } = require('./helpers/test-client.cjs');
 
 const apiSource = fs.readFileSync(
   path.resolve(__dirname, '../extension/mcp_server/api.js'),
@@ -1667,8 +1669,10 @@ function makeOutboundMailRuntime(options = {}) {
       }) },
     },
     server: options.dispatch ? { registerPathHandler(_path, handler) { state.dispatch = handler; } } : undefined,
-    authToken: 'fixture-token',
-    timingSafeEqual: (a, b) => a === b,
+    Core,
+    LOCAL_FILES_HEADER: 'X-Thunderbird-MCP-Local-Files',
+    authenticateClient: options.authenticateClient || (() => makeTestClient(Core)),
+    runAsClient: options.runAsClient || ((_client, fn) => fn()),
     MAX_REQUEST_BODY: 1024 * 1024,
     readRequestBody: req => req.body,
     isToolEnabled: () => true,
@@ -1689,6 +1693,98 @@ function makeOutboundMailRuntime(options = {}) {
   runtime._tempAttachFiles.add('/prior-call.txt');
   return { runtime, state };
 }
+
+// Sends one request through the production MCP HTTP handler.
+function dispatchHttp(state, message, headers = {}) {
+  const body = JSON.stringify(message);
+  const all = { Authorization: `Bearer ${'a'.repeat(64)}`, 'Content-Length': String(Buffer.byteLength(body)), ...headers };
+  return new Promise(resolve => {
+    let output = '';
+    let status = null;
+    state.dispatch({
+      method: 'POST', body,
+      hasHeader: key => Object.hasOwn(all, key),
+      getHeader: key => {
+        if (!Object.hasOwn(all, key)) throw new Error('missing header');
+        return all[key];
+      },
+    }, {
+      processAsync() {}, setHeader() {},
+      setStatusLine(_version, code) { status = code; },
+      write(text) { output += text; },
+      finish() { resolve({ status, json: JSON.parse(output) }); },
+    });
+  });
+}
+
+describe('Per-client authorization at the production HTTP handler', () => {
+  const profileClient = profile => makeTestClient(Core, { profile, capabilities: Core.policy.capabilitiesForProfile(profile) });
+  const callMessage = (name, args) => ({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name, arguments: args } });
+
+  it('answers 403 for unknown, revoked or malformed tokens before reading the body', async () => {
+    const { state } = makeOutboundMailRuntime({ dispatch: true, authenticateClient: () => null });
+    const { status, json } = await dispatchHttp(state, callMessage('sendMail', productionToolArgs.sendMail));
+    assert.equal(status, 403);
+    assert.equal(json.error.message, 'Invalid or missing auth token');
+    assert.equal(state.sent + state.drafts + state.windows, 0);
+  });
+
+  it('refuses calls whose effect the client was not granted, before the handler runs', async () => {
+    const ran = [];
+    const { state } = makeOutboundMailRuntime({
+      dispatch: true, authenticateClient: () => profileClient('drafts'),
+      runAsClient: (_client, fn) => { ran.push(true); return fn(); },
+    });
+    const { json } = await dispatchHttp(state, callMessage('sendMail', { ...productionToolArgs.sendMail, skipReview: true }));
+    assert.match(json.error.message, /Not permitted for client "test client": requires compose\.send/);
+    assert.equal(ran.length, 0);
+    assert.equal(state.sent + state.windows, 0);
+  });
+
+  it('evaluates the policy on coerced arguments', async () => {
+    const { state } = makeOutboundMailRuntime({ dispatch: true, authenticateClient: () => profileClient('drafts') });
+    // "true" is coerced to true before the decision: compose.send is required.
+    const { json } = await dispatchHttp(state, callMessage('sendMail', { ...productionToolArgs.sendMail, skipReview: 'true' }));
+    assert.match(json.error.message, /requires compose\.send/);
+  });
+
+  it('requires files.attach for attachments the bridge read from local files', async () => {
+    const { state } = makeOutboundMailRuntime({ dispatch: true, authenticateClient: () => profileClient('drafts') });
+    const args = { ...productionToolArgs.saveDraft, attachments: [{ name: 'id_rsa', base64: 'QQ==' }] };
+    const marked = await dispatchHttp(state, callMessage('saveDraft', args), { 'X-Thunderbird-MCP-Local-Files': '1' });
+    assert.match(marked.json.error.message, /requires files\.attach/);
+    assert.equal(state.drafts, 0);
+    const unmarked = await dispatchHttp(state, callMessage('saveDraft', args));
+    assert.equal(unmarked.json.error, undefined);
+    assert.equal(state.drafts, 1);
+  });
+
+  it('runs permitted calls as the authenticated client', async () => {
+    const seen = [];
+    const client = profileClient('automation');
+    const { state } = makeOutboundMailRuntime({
+      dispatch: true, authenticateClient: () => client,
+      runAsClient: (c, fn) => { seen.push(c); return fn(); },
+    });
+    const { json } = await dispatchHttp(state, callMessage('sendMail', { ...productionToolArgs.sendMail, skipReview: true }));
+    assert.equal(json.error, undefined);
+    assert.equal(state.sent, 1);
+    assert.deepEqual(seen, [client]);
+  });
+
+  it('lists only tools the client can legitimately use', async () => {
+    const { state } = makeOutboundMailRuntime({ dispatch: true, authenticateClient: () => profileClient('read-only') });
+    const { json } = await dispatchHttp(state, { jsonrpc: '2.0', id: 8, method: 'tools/list' });
+    const names = json.result.tools.map(t => t.name);
+    assert.ok(names.includes('getMessage'));
+    for (const name of ['sendMail', 'saveDraft', 'deleteMessages', 'emptyTrash', 'createFilter', 'displayMessage']) {
+      assert.equal(names.includes(name), false, name);
+    }
+    const none = makeOutboundMailRuntime({ dispatch: true, authenticateClient: () => profileClient('none') });
+    const empty = await dispatchHttp(none.state, { jsonrpc: '2.0', id: 9, method: 'tools/list' });
+    assert.deepEqual(empty.json.result.tools, []);
+  });
+});
 
 describe('Outbound attachment failures are atomic', () => {
   const calls = [
@@ -1866,7 +1962,7 @@ describe('Outbound attachment failures are atomic', () => {
         const response = await new Promise(resolve => {
           let output = '';
           state.dispatch({
-            method: 'POST', body,
+            method: 'POST', body, hasHeader: () => false,
             getHeader: key => key === 'Authorization' ? 'Bearer fixture-token' : String(Buffer.byteLength(body)),
           }, {
             processAsync() {}, setStatusLine() {}, setHeader() {},

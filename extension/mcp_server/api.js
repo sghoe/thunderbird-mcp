@@ -139,7 +139,6 @@ function stopConnectionInfoRefreshTimer() {
 
 function ensureFreshConnectionInfo({
   port,
-  token,
   expectedPid,
   readConnectionInfo,
   writeConnectionInfo,
@@ -151,8 +150,8 @@ function ensureFreshConnectionInfo({
     if (
       data &&
       data.port === port &&
-      data.token === token &&
-      data.pid === expectedPid
+      data.pid === expectedPid &&
+      !Object.hasOwn(data, "token")
     ) {
       return current.path;
     }
@@ -161,7 +160,7 @@ function ensureFreshConnectionInfo({
       onCheckError(e);
     }
   }
-  return writeConnectionInfo(port, token);
+  return writeConnectionInfo(port);
 }
 // END CONNECTION INFO REFRESH HELPERS
 
@@ -829,6 +828,8 @@ const MAX_ATTACHMENTS_PER_MESSAGE = 20;
 // Must be large enough to carry MAX_BASE64_SIZE plus JSON-RPC framing overhead.
 // The httpd.sys.mjs pre-buffer cap uses the same value.
 const MAX_REQUEST_BODY = 32 * 1024 * 1024; // 32 MB limit for incoming HTTP request bodies
+// Set by mcp-bridge.cjs when it read local file paths into inline attachments.
+const LOCAL_FILES_HEADER = "X-Thunderbird-MCP-Local-Files";
 
 // BEGIN INLINE IMAGE CONTENT HELPERS
 // MCP image payloads are base64 text, so budget the encoded representation that
@@ -1140,13 +1141,12 @@ const DEFAULT_MAX_RESULTS = 50;
 const PREF_ALLOWED_ACCOUNTS = "extensions.thunderbird-mcp-hardened.allowedAccounts";
 const PREF_DISABLED_TOOLS = "extensions.thunderbird-mcp-hardened.disabledTools";
 const PREF_BLOCK_SKIPREVIEW = "extensions.thunderbird-mcp-hardened.blockSkipReview";
-const PREF_STABLE_AUTH_TOKEN = "extensions.thunderbird-mcp-hardened.stableAuthToken";
+const PREF_CLIENTS = "extensions.thunderbird-mcp-hardened.clients";
 const PREF_GET_MESSAGES_LIMIT = "extensions.thunderbird-mcp-hardened.getMessagesLimit";
 const PREF_LISTEN_ALL = "extensions.thunderbird-mcp-hardened.listenAll";
 const PREF_ALLOW_ENCRYPTED_MESSAGES = "extensions.thunderbird-mcp-hardened.allowEncryptedMessages";
 const PREF_ALLOW_ALL_CALENDARS = "extensions.thunderbird-mcp-hardened.allowAllCalendars";
 const PREF_ALLOW_ALL_ADDRESS_BOOKS = "extensions.thunderbird-mcp-hardened.allowAllAddressBooks";
-const AUTH_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
 // Valid group and CRUD values for tool metadata validation
 const VALID_GROUPS = ["messages", "folders", "contacts", "calendar", "filters", "system"];
 const VALID_CRUD = ["create", "read", "update", "delete"];
@@ -1923,6 +1923,17 @@ function getFilterActionRestriction(filter, { allowSending = isFilterSendAllowed
   return sending && !allowSending ? "sending" : null;
 }
 
+// Capabilities a stored filter's actions need when it runs that the calling
+// client lacks (rules: core/policy.sys.mjs). Unknown actions never pass.
+function missingFilterCapabilities(filter, hasCapability) {
+  const names = [];
+  for (let i = 0; i < filter.actionCount; i++) {
+    const spec = ACTION_SPECS[filter.getActionAt(i).type];
+    names.push(spec ? spec.action : "custom");
+  }
+  return Core.policy.filterActionCapabilities(names).filter(cap => !hasCapability(cap));
+}
+
 // isInAB/isntInAB conditions consult an address book whenever the rule runs,
 // so they follow the same access policy as the contact tools.
 function getFilterConditionRestriction(filter, { addressBooksRestricted = false } = {}) {
@@ -2041,7 +2052,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
         const listener = {
           onUninstalling(addon) {
             if (addon.id !== addonId) return;
-            try { Services.prefs.clearUserPref(PREF_STABLE_AUTH_TOKEN); } catch { /* best effort */ }
+            // Paired clients' verifiers are removed with the add-on.
+            try { Services.prefs.clearUserPref(PREF_CLIENTS); } catch { /* best effort */ }
           },
         };
         AddonManager.addAddonListener(listener);
@@ -2077,6 +2089,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
       replyTemplate: loadCoreModule("reply-template"),
       calendarKind: loadCoreModule("calendar-kind"),
       policy: loadCoreModule("policy"),
+      clientRegistry: loadCoreModule("client-registry"),
     });
     // END CORE MODULE LOADER
 
@@ -2998,41 +3011,63 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
     // Group display labels
     const GROUP_LABELS = { system: "System", messages: "Messages", folders: "Folders", contacts: "Contacts", calendar: "Calendar", filters: "Filters" };
 
-    /**
-     * Generate a cryptographically random auth token (hex string).
-     * Used to authenticate bridge requests to the HTTP server.
-     */
-    function generateAuthToken() {
-      const bytes = new Uint8Array(32);
-      // crypto.getRandomValues is not available in Thunderbird experiment API scope;
-      // use the XPCOM random generator instead.
-      const rng = Cc["@mozilla.org/security/random-generator;1"]
-        .createInstance(Ci.nsIRandomGenerator);
-      const randomBytes = rng.generateRandomBytes(32);
-      for (let i = 0; i < 32; i++) bytes[i] = randomBytes[i];
-      return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
-    }
-
-    function getStableAuthTokenPref() {
+    // BEGIN CLIENT REGISTRY ADAPTER
+    // Paired clients live in one versioned preference (rules:
+    // core/client-registry.sys.mjs). Only SHA-256 verifiers of the tokens are
+    // stored. A corrupt registry admits no client and is never reset to
+    // permissive defaults; the options page reports it and lets the user
+    // explicitly remove all clients.
+    function readClientRegistry() {
+      let text = "";
       try {
-        const pref = Services.prefs.getStringPref(PREF_STABLE_AUTH_TOKEN, "");
-        const token = pref.trim();
-        if (!token) {
-          if (pref) {
-            console.warn("thunderbird-mcp: stableAuthToken preference is malformed; expected 64 lowercase hex characters, ignoring stored value");
-          }
-          return "";
+        if (Services.prefs.getPrefType(PREF_CLIENTS) !== Ci.nsIPrefBranch.PREF_INVALID) {
+          text = Services.prefs.getStringPref(PREF_CLIENTS, "");
         }
-        if (!AUTH_TOKEN_PATTERN.test(token)) {
-          console.warn("thunderbird-mcp: stableAuthToken preference is malformed; expected 64 lowercase hex characters, ignoring stored value");
-          return "";
-        }
-        return token;
       } catch {
-        return "";
+        return { clients: [], corrupt: true };
       }
+      return Core.clientRegistry.parseRegistry(text, Object.keys(Core.policy.CAPABILITIES));
     }
 
+    function writeClientRegistry(clients) {
+      Services.prefs.setStringPref(PREF_CLIENTS, Core.clientRegistry.serializeRegistry(clients));
+    }
+
+    function sha256Hex(asciiText) {
+      const hasher = Cc["@mozilla.org/security/hash;1"].createInstance(Ci.nsICryptoHash);
+      hasher.init(Ci.nsICryptoHash.SHA256);
+      const bytes = Array.from(asciiText, ch => ch.charCodeAt(0) & 0xff);
+      hasher.update(bytes, bytes.length);
+      return Array.from(hasher.finish(false), ch => ch.charCodeAt(0).toString(16).padStart(2, "0")).join("");
+    }
+
+    function randomHex(byteCount) {
+      const rng = Cc["@mozilla.org/security/random-generator;1"].createInstance(Ci.nsIRandomGenerator);
+      return Array.from(rng.generateRandomBytes(byteCount), b => b.toString(16).padStart(2, "0")).join("");
+    }
+
+    // Returns the paired client for an Authorization header, or null. The
+    // header is always hashed so malformed and unknown tokens take the same
+    // path; every stored verifier is compared in constant time.
+    function authenticateClient(authorizationHeader) {
+      const match = /^Bearer ([0-9a-f]{64})$/.exec(String(authorizationHeader || ""));
+      const verifier = sha256Hex(match ? match[1] : "0".repeat(64));
+      const registry = readClientRegistry();
+      if (!match || registry.corrupt) return null;
+      return Core.clientRegistry.findClientByVerifier(registry.clients, verifier, timingSafeEqualStrings);
+    }
+
+    function timingSafeEqualStrings(a, b) {
+      const aStr = String(a);
+      const bStr = String(b);
+      const len = Math.max(aStr.length, bStr.length);
+      let result = aStr.length ^ bStr.length;
+      for (let i = 0; i < len; i++) {
+        result |= (aStr.charCodeAt(i) || 0) ^ (bStr.charCodeAt(i) || 0);
+      }
+      return result === 0;
+    }
+    // END CLIENT REGISTRY ADAPTER
     function readConnectionInfo() {
       const tmpDir = Services.dirsvc.get("TmpD", Ci.nsIFile);
       tmpDir.append("thunderbird-mcp-hardened");
@@ -3339,11 +3374,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
             // BEGIN CONNECTION INFO WRITER
             /**
-             * Write connection info (port + auth token) to a well-known file
+             * Write discovery info (port + pid, no secret) to a well-known file
              * so the bridge can discover how to connect.
-             * File: <TmpD>/thunderbird-mcp/connection.json
+             * File: <TmpD>/thunderbird-mcp-hardened/connection.json
              */
-            function writeConnectionInfo(port, token) {
+            function writeConnectionInfo(port) {
               const tmpDir = Services.dirsvc.get("TmpD", Ci.nsIFile);
               tmpDir.append("thunderbird-mcp-hardened");
               if (!tmpDir.exists()) {
@@ -3382,7 +3417,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               if (connFile.exists()) {
                 connFile.remove(false);
               }
-              const data = JSON.stringify({ port, token, pid: Services.appinfo.processID });
+              // Discovery only: no shared secret. Each client presents its own
+              // token, paired in the options page (Stage 4).
+              const data = JSON.stringify({ port, pid: Services.appinfo.processID });
               const ostream = Cc["@mozilla.org/network/file-output-stream;1"]
                 .createInstance(Ci.nsIFileOutputStream);
               // 0x02 = O_WRONLY, 0x08 = O_CREAT, 0x80 = O_EXCL
@@ -3396,10 +3433,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             }
             // END CONNECTION INFO WRITER
 
-            function ensureConnectionInfo(port, token) {
+            function ensureConnectionInfo(port) {
               return ensureFreshConnectionInfo({
                 port,
-                token,
                 expectedPid: Services.appinfo.processID,
                 readConnectionInfo,
                 writeConnectionInfo,
@@ -3409,54 +3445,84 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               });
             }
 
-            function startConnectionInfoRefresh(port, token) {
+            function startConnectionInfoRefresh(port) {
               stopConnectionInfoRefreshTimer();
               const timer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
               // Track it before initialization so failed startup can cancel it.
               globalThis.__tbMcpHardenedConnectionInfoRefreshTimer = timer;
               timer.initWithCallback(() => {
                 try {
-                  ensureConnectionInfo(port, token);
+                  ensureConnectionInfo(port);
                 } catch (e) {
                   console.warn("thunderbird-mcp: failed to refresh connection info:", e);
                 }
               }, CONNECTION_FILE_REFRESH_MS, Ci.nsITimer.TYPE_REPEATING_SLACK);
             }
 
-            const authToken = getStableAuthTokenPref() || generateAuthToken();
-
-            /**
-             * Constant-time string comparison to prevent timing side-channel attacks.
-             */
-            function timingSafeEqual(a, b) {
-              const aStr = String(a);
-              const bStr = String(b);
-              const len = Math.max(aStr.length, bStr.length);
-              let result = aStr.length ^ bStr.length;
-              for (let i = 0; i < len; i++) {
-                result |= (aStr.charCodeAt(i) || 0) ^ (bStr.charCodeAt(i) || 0);
-              }
-              return result === 0;
-            }
 
             /**
              * Get the list of allowed account IDs from preferences.
              * Returns an empty array if no restriction is set (all accounts allowed).
              */
             // BEGIN SERVER ACCESS HELPERS
+            // The client whose tool call is running. Handlers are async and
+            // check access deep inside (isAccountAllowed, folder lookups), so
+            // calls of *different* clients never overlap: runAsClient waits
+            // until the other client's calls have finished. Calls of the same
+            // client may run concurrently, but once another client waits, new
+            // calls queue behind it (no starvation). Without a client, nothing
+            // is accessible (fail closed).
+            let activeClient = null;
+            let activeClientCalls = 0;
+            const clientWaiters = [];
+
+            async function runAsClient(client, fn) {
+              while (activeClientCalls > 0 && (activeClient?.id !== client.id || clientWaiters.length > 0)) {
+                await new Promise(resolve => clientWaiters.push(resolve));
+              }
+              activeClient = client;
+              activeClientCalls++;
+              try {
+                return await fn();
+              } finally {
+                activeClientCalls--;
+                if (activeClientCalls === 0) {
+                  activeClient = null;
+                  for (const resolve of clientWaiters.splice(0)) resolve();
+                }
+              }
+            }
+
             function getAllowedAccountIds() {
               const { values, corrupt } = readAccessListPref(PREF_ALLOWED_ACCOUNTS);
               return corrupt ? ["__invalid__"] : values;
             }
 
             /**
-             * Check if an account is accessible based on the allowed accounts list.
-             * When the list is empty, all accounts are accessible (default).
+             * Check if an account is accessible: the global account list (empty
+             * means all accounts) AND the calling client's own account scope.
              */
             function isAccountAllowed(accountKey) {
               const allowed = getAllowedAccountIds();
-              if (allowed.length === 0) return true;
-              return allowed.includes(accountKey);
+              if (allowed.length !== 0 && !allowed.includes(accountKey)) return false;
+              return !!activeClient && activeClient.accounts.includes(accountKey);
+            }
+
+            // Effects that depend on stored state (permanent deletion, stored
+            // filter actions, meetings) are checked by the handlers against the
+            // calling client's capabilities. Without a client: nothing.
+            function clientHasCapability(capability) {
+              return !!activeClient && activeClient.capabilities.includes(capability);
+            }
+
+
+
+            // Calendars and address books also need the client's own grant.
+            function clientScopeAllows(group) {
+              if (!activeClient) return false;
+              if (group === "calendar") return activeClient.calendars === true;
+              if (group === "contacts") return activeClient.addressBooks === true;
+              return true;
             }
 
             /**
@@ -3511,7 +3577,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             }
 
             function isAddressBookAccessRestricted() {
-              return isPrivacyScopeRestricted(PREF_ALLOW_ALL_ADDRESS_BOOKS);
+              return isPrivacyScopeRestricted(PREF_ALLOW_ALL_ADDRESS_BOOKS) || !clientScopeAllows("contacts");
             }
 
             // END SERVER ACCESS HELPERS
@@ -3599,11 +3665,13 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
              * Get the current account access control list.
              */
             function getAccountAccess() {
-              const allowed = getAllowedAccountIds();
-              // Only return accessible accounts — restricted accounts are hidden
+              // Only return accessible accounts — restricted accounts are hidden.
+              // The mode reflects the calling client's effective scope (global
+              // list AND the client's own accounts).
               const accessibleAccounts = [];
+              let hidden = 0;
               for (const account of MailServices.accounts.accounts) {
-                if (!isAccountAllowed(account.key)) continue;
+                if (!isAccountAllowed(account.key)) { hidden++; continue; }
                 const server = account.incomingServer;
                 accessibleAccounts.push({
                   id: account.key,
@@ -3612,7 +3680,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 });
               }
               return {
-                mode: allowed.length === 0 ? "all" : "restricted",
+                mode: hidden === 0 && getAllowedAccountIds().length === 0 ? "all" : "restricted",
                 accounts: accessibleAccounts,
               };
             }
@@ -6077,7 +6145,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             }
             function assertEventWriteAllowed(event, calendar, occurrence = null, attendees) {
               const blocked = isSkipReviewBlocked();
-              if (!blocked && attendees == null) return;
+              // Changing or deleting a meeting can notify attendees.
+              const scheduleGranted = clientHasCapability("calendar.schedule");
+              if (!blocked && scheduleGranted && attendees == null) return;
               const items = [];
               const ownEmail = normalizeCalendarEmail(getCalendarIdentity(calendar)?.email);
               let existing;
@@ -6107,6 +6177,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 throw new Error(blocked
                   ? `${ATTENDEE_REVIEW_ERROR} Could not verify the event's attendees or exceptions.`
                   : "Cannot manage attendees: could not verify the event's attendees or exceptions.");
+              }
+              if (!scheduleGranted && (attendees?.length > 0 || hasOtherAttendees)) {
+                throw new Error("Not permitted for this client: the event has attendees who may be notified, which requires calendar.schedule. Grant it in the Thunderbird MCP options.");
               }
               if (blocked && (attendees?.length > 0 || hasOtherAttendees)) {
                 throw new Error(ATTENDEE_REVIEW_ERROR);
@@ -10586,6 +10659,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   return { error: "No matching messages found" };
                 }
 
+                const permanentDeleteRefused = { error: "Not permitted for this client: this deletion is permanent and requires mail.deletePermanent. Grant it in the Thunderbird MCP options." };
                 // Drafts get moved to Trash instead of hard-deleted
                 const isDrafts = typeof folder.getFlag === "function" && folder.getFlag(Ci.nsMsgFolderFlags.Drafts);
                 let trashFolder = null;
@@ -10596,7 +10670,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   if (trashFolder) {
                     MailServices.copy.copyMessages(folder, found, trashFolder, true, null, null, false);
                   } else {
-                    // No trash found, fall back to regular delete
+                    // No trash found, fall back to regular (permanent) delete
+                    if (!clientHasCapability("mail.deletePermanent")) return permanentDeleteRefused;
                     folder.deleteMessages(found, null, false, true, null, false);
                   }
                 } else {
@@ -10612,6 +10687,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                     if (!trashFolder) {
                       return { error: "Trash folder not found" };
                     }
+                  } else if (!clientHasCapability("mail.deletePermanent")) {
+                    return permanentDeleteRefused;
                   }
                   folder.deleteMessages(found, null, false, true, null, false);
                 }
@@ -11244,6 +11321,16 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 if (filter.unparseable) {
                   return { error: "Cannot update an unparseable filter; repair it in Thunderbird or delete it" };
                 }
+                // Enabling, renaming or widening a stored rule changes what its
+                // existing actions do; only disabling is always allowed. New
+                // actions replace the stored ones and were checked by the policy.
+                const onlyDisables = enabled === false && name === undefined && type === undefined
+                  && conditions === undefined;
+                const missingForStored = onlyDisables || actions !== undefined
+                  ? [] : missingFilterCapabilities(filter, clientHasCapability);
+                if (missingForStored.length) {
+                  return { error: `Not permitted for this client: the filter's actions require ${missingForStored.join(", ")}. Grant it in the Thunderbird MCP options.` };
+                }
 
                 // Validate a detached replacement even for metadata-only updates.
                 const candidate = filterList.createFilter(name !== undefined ? name : filter.filterName);
@@ -11399,6 +11486,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   else if (!(filter.filterType & manualType)) reason = "non-manual";
                   else if (filter.unparseable) reason = "unparseable";
                   else reason = getFilterActionRestriction(filter, { allowSending, checkTargetFolder: getAccessibleFolder });
+                  // Rules run with this client's authority: skip rules whose
+                  // actions it may not perform (forward/reply, move, delete...).
+                  if (!reason && missingFilterCapabilities(filter, clientHasCapability).length) reason = "missing-capability";
                   if (reason === "custom") {
                     return { error: `Custom filter actions are unsupported (filter: ${filter.filterName})` };
                   }
@@ -11660,6 +11750,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             // BEGIN TOOL DISPATCH
             async function callTool(name, args) {
               const group = buildTools().find(tool => tool.name === name)?.group;
+              if ((group === "calendar" || group === "contacts") && !clientScopeAllows(group)) {
+                const label = group === "calendar" ? "calendars" : "address books";
+                return { error: `This client has no access to ${label}. Grant it in the Thunderbird MCP options.` };
+              }
               if ((group === "calendar" || group === "contacts") &&
                   isPrivacyScopeRestricted(group === "calendar" ? PREF_ALLOW_ALL_CALENDARS : PREF_ALLOW_ALL_ADDRESS_BOOKS)) {
                 const label = group === "calendar" ? "Allow all calendars" : "Allow all address books";
@@ -11772,7 +11866,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               } catch {
                 // getHeader throws if header is missing in httpd.sys.mjs
               }
-              if (!timingSafeEqual(reqToken, `Bearer ${authToken}`)) {
+              // Each paired client has its own token (Stage 4); unknown, revoked
+              // or malformed tokens and a corrupt registry are refused alike.
+              const client = authenticateClient(reqToken);
+              if (!client) {
                 res.setStatusLine("1.1", 403, "Forbidden");
                 res.setHeader("Content-Type", "application/json; charset=utf-8", false);
                 res.write(JSON.stringify({
@@ -11892,8 +11989,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                       result = { prompts: [] };
                       break;
                     case "tools/list":
-                      // Strip internal metadata (group, crud, title) — only expose MCP-spec fields
-                      result = { tools: buildTools().filter(t => isToolEnabled(t.name)).map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) };
+                      // Strip internal metadata (group, crud, title) — only expose MCP-spec fields.
+                      // Only tools this client could legitimately use are listed.
+                      result = { tools: buildTools()
+                        .filter(t => isToolEnabled(t.name) && Core.policy.isToolVisible(t.name, client.capabilities))
+                        .map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) };
                       break;
                     case "tools/call":
                       if (!params?.name) {
@@ -11908,8 +12008,24 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                         if (validationErrors.length > 0) {
                           throw new Error(`Invalid parameters for '${params.name}': ${validationErrors.join("; ")}`);
                         }
+                        // Positive permissions: the effect of this call (tool and
+                        // effective arguments) must be granted to this client.
+                        // The bridge marks requests whose inline attachments it read
+                        // from local paths; those need files.attach like paths do.
+                        let inlinedLocalFiles = false;
+                        if (req.hasHeader(LOCAL_FILES_HEADER)) {
+                          try {
+                            inlinedLocalFiles = req.getHeader(LOCAL_FILES_HEADER) === "1";
+                          } catch {
+                            inlinedLocalFiles = true; // unreadable marker: assume local files
+                          }
+                        }
+                        const decision = Core.policy.decide(params.name, toolArgs, client.capabilities, { inlinedLocalFiles });
+                        if (!decision.allowed) {
+                          throw new Error(`Not permitted for client "${client.name}": requires ${decision.missing.join(", ")}. Grant it in the Thunderbird MCP options.`);
+                        }
                         result = {
-                          content: buildToolResultContent(await callTool(params.name, toolArgs))
+                          content: buildToolResultContent(await runAsClient(client, () => callTool(params.name, toolArgs)))
                         };
                       }
                       break;
@@ -11981,8 +12097,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             // create path (0600 perms, directory checks) always runs. The
             // refresh timer self-heals it afterward via ensureConnectionInfo
             // if the OS deletes it while the server keeps running.
-            const connFilePath = writeConnectionInfo(boundPort, authToken);
-            startConnectionInfoRefresh(boundPort, authToken);
+            const connFilePath = writeConnectionInfo(boundPort);
+            startConnectionInfoRefresh(boundPort);
             console.log(`Thunderbird MCP server listening on port ${boundPort}`);
             console.log(`Connection info written to ${connFilePath}`);
             if (listenAll) {
@@ -12087,21 +12203,88 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
         // END SERVER LIFECYCLE
 
-        getCurrentAuthToken: async function() {
-          let authToken = "";
-          try {
-            const connInfo = readConnectionInfo();
-            if (connInfo.data && typeof connInfo.data.token === "string") {
-              authToken = connInfo.data.token;
-            }
-          } catch (e) {
-            if (e?.name !== "NS_ERROR_FILE_NOT_FOUND") {
-              console.warn("thunderbird-mcp: read auth token failed:", e);
-            }
-          }
-          return { authToken };
+        // BEGIN CLIENT MANAGEMENT API
+        // Only the options page (an extension page) can call these; they are
+        // not MCP tools, so an MCP client can never grant itself rights or
+        // create credentials. Tokens are returned once and never stored.
+        listClients: async function() {
+          const registry = readClientRegistry();
+          const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+          return {
+            corrupt: registry.corrupt,
+            clients: registry.clients.map(client => Core.clientRegistry.publicView(client)),
+            capabilities: Object.entries(Core.policy.CAPABILITIES).map(([id, description]) => ({ id, description })),
+            profiles: Object.fromEntries(Object.keys(Core.policy.PROFILES).map(name => [name, Core.policy.capabilitiesForProfile(name)])),
+            accounts: [...MailServices.accounts.accounts].map(account => ({
+              id: account.key, name: account.incomingServer?.prettyName || account.key,
+            })),
+          };
         },
 
+        createClient: async function(settings) {
+          const registry = readClientRegistry();
+          if (registry.corrupt) return { error: "The client registry is corrupt. Remove all clients to repair it." };
+          if (registry.clients.length >= Core.clientRegistry.MAX_CLIENTS) return { error: "Too many clients" };
+          const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+          const checked = Core.clientRegistry.validateClientSettings(settings, {
+            knownCapabilities: Object.keys(Core.policy.CAPABILITIES),
+            knownAccounts: [...MailServices.accounts.accounts].map(account => account.key),
+          });
+          if (checked.error) return { error: checked.error };
+          const token = randomHex(32);
+          const client = Core.clientRegistry.newClient({
+            id: randomHex(16), verifier: sha256Hex(token), createdAt: Date.now(), settings: checked.settings,
+          });
+          writeClientRegistry([...registry.clients, client]);
+          return { client: Core.clientRegistry.publicView(client), token };
+        },
+
+        updateClient: async function(clientId, settings) {
+          const registry = readClientRegistry();
+          if (registry.corrupt) return { error: "The client registry is corrupt. Remove all clients to repair it." };
+          const index = registry.clients.findIndex(client => client.id === clientId);
+          if (index < 0) return { error: "Unknown client" };
+          const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+          const checked = Core.clientRegistry.validateClientSettings(settings, {
+            knownCapabilities: Object.keys(Core.policy.CAPABILITIES),
+            knownAccounts: [...MailServices.accounts.accounts].map(account => account.key),
+          });
+          if (checked.error) return { error: checked.error };
+          const updated = { ...registry.clients[index], ...checked.settings };
+          const clients = registry.clients.slice();
+          clients[index] = updated;
+          writeClientRegistry(clients);
+          return { client: Core.clientRegistry.publicView(updated) };
+        },
+
+        rotateClientToken: async function(clientId) {
+          const registry = readClientRegistry();
+          if (registry.corrupt) return { error: "The client registry is corrupt. Remove all clients to repair it." };
+          const index = registry.clients.findIndex(client => client.id === clientId);
+          if (index < 0) return { error: "Unknown client" };
+          const token = randomHex(32);
+          const clients = registry.clients.slice();
+          clients[index] = { ...clients[index], verifier: sha256Hex(token) };
+          writeClientRegistry(clients);
+          return { client: Core.clientRegistry.publicView(clients[index]), token };
+        },
+
+        // Revocation takes effect for the next request; calls that already
+        // passed authorization run to completion (see migration notes).
+        deleteClient: async function(clientId) {
+          const registry = readClientRegistry();
+          if (registry.corrupt) return { error: "The client registry is corrupt. Remove all clients to repair it." };
+          if (!registry.clients.some(client => client.id === clientId)) return { error: "Unknown client" };
+          writeClientRegistry(registry.clients.filter(client => client.id !== clientId));
+          return { success: true };
+        },
+
+        // Explicit repair of a corrupt registry: removes every client.
+        removeAllClients: async function() {
+          try { Services.prefs.clearUserPref(PREF_CLIENTS); } catch { /* not set */ }
+          return { success: true };
+        },
+        // END CLIENT MANAGEMENT API
         // BEGIN OPTIONS ACCESS API
         getAccountAccessConfig: async function() {
           const { MailServices } = ChromeUtils.importESModule(
@@ -12296,30 +12479,6 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
           return { success: true };
         },
         // END PRIVACY OPTIONS API
-
-        getStableAuthToken: async function() {
-          return { stableAuthToken: getStableAuthTokenPref() };
-        },
-
-        setStableAuthToken: async function(stableAuthToken) {
-          if (typeof stableAuthToken !== "string") {
-            return { error: "stableAuthToken must be a string" };
-          }
-          stableAuthToken = stableAuthToken.trim();
-          if (stableAuthToken && !AUTH_TOKEN_PATTERN.test(stableAuthToken)) {
-            return { error: "stableAuthToken must be empty or 64 lowercase hex characters" };
-          }
-          if (stableAuthToken) {
-            Services.prefs.setStringPref(PREF_STABLE_AUTH_TOKEN, stableAuthToken);
-          } else {
-            try { Services.prefs.clearUserPref(PREF_STABLE_AUTH_TOKEN); } catch { /* ignore */ }
-          }
-          return { success: true, stableAuthToken };
-        },
-
-        generateAuthToken: async function() {
-          return { authToken: generateAuthToken() };
-        },
 
         getListenAll: async function() {
           let listenAll = false;

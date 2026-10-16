@@ -77,6 +77,15 @@ describe("attendee-bearing tasks follow the meeting guard", () => {
     assert.equal(result.success, true, result.error);
   });
 
+  it("refuses the update for a client without calendar.schedule even with Block skipReview off", async () => {
+    const { Core } = require("./helpers/core-modules.cjs");
+    const capabilities = Object.keys(Core.policy.CAPABILITIES).filter(cap => cap !== "calendar.schedule");
+    const rt = loadCalendarRuntime({ blockSkipReview: false, client: { capabilities } });
+    rt.seedTask({ id: "assigned", attendees: [rt.makeAttendee(OTHER)] });
+    const result = await rt.invoke("updateTask", { taskId: "assigned", calendarId: "calendar-1", completed: true });
+    assert.match(result.error, /requires calendar\.schedule/);
+    assert.equal(rt.calls.modifies.length, 0);
+  });
   it("allows tasks whose only attendee is the calendar user", async () => {
     const rt = loadCalendarRuntime();
     rt.seedTask({ id: "self", attendees: [rt.makeAttendee(SELF)] });

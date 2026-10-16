@@ -14,6 +14,7 @@ const net = require("node:net");
 const http = require("node:http");
 const { spawn } = require("node:child_process");
 const crypto = require("node:crypto");
+const { pathToFileURL } = require("node:url");
 const { Marionette } = require("./marionette.cjs");
 
 const REPO_ROOT = path.resolve(__dirname, "../..");
@@ -40,6 +41,41 @@ function runtimeSubdir(extensionDir = EXTENSION_DIR) {
   const source = fs.readFileSync(path.join(extensionDir, "mcp_server", "api.js"), "utf8");
   const writer = source.slice(source.indexOf("function writeConnectionInfo("));
   return writer.match(/tmpDir\.append\("([^"]+)"\)/)[1];
+}
+
+// ── Paired clients (Stage 4) ─────────────────────────────────────────────
+// Builds with a client registry authenticate per client; older builds
+// (upstream, negative controls) still publish one token in connection.json.
+function hasClientRegistry(extensionDir = EXTENSION_DIR) {
+  return fs.existsSync(path.join(extensionDir, "mcp_server", "core", "client-registry.sys.mjs"));
+}
+
+async function allCapabilities(extensionDir = EXTENSION_DIR) {
+  const policy = await import(pathToFileURL(path.join(extensionDir, "mcp_server", "core", "policy.sys.mjs")).href);
+  return Object.keys(policy.CAPABILITIES);
+}
+
+// clients: [{ name, capabilities?, profile?, accounts?, calendars?, addressBooks? }]
+// Missing fields mean full access. Returns { pref, tokens: { name: token } }.
+async function pairClients(clients, extensionDir = EXTENSION_DIR) {
+  const all = await allCapabilities(extensionDir);
+  const tokens = {};
+  const stored = clients.map((client, index) => {
+    const token = crypto.randomBytes(32).toString("hex");
+    tokens[client.name] = token;
+    return {
+      id: crypto.randomBytes(16).toString("hex"),
+      name: client.name,
+      verifier: crypto.createHash("sha256").update(token).digest("hex"),
+      createdAt: Date.now() + index,
+      profile: client.profile || "automation",
+      capabilities: client.capabilities || all,
+      accounts: client.accounts || ["account1", "account2", "account3"],
+      calendars: client.calendars ?? true,
+      addressBooks: client.addressBooks ?? true,
+    };
+  });
+  return { pref: JSON.stringify({ version: 1, clients: stored }), tokens };
 }
 
 // ── Local SMTP sink ──────────────────────────────────────────────────────
@@ -325,7 +361,7 @@ const REPARSE_SCRIPT = `
  * Starts a fully isolated Thunderbird. Returns an object with
  * call(tool, args), rpc(method, params), stop(), and the probe/sink.
  */
-async function startThunderbird({ mailboxes, extraPrefs, headless = true, authHeader, extensionDir = EXTENSION_DIR, extraAddons } = {}) {
+async function startThunderbird({ mailboxes, extraPrefs, headless = true, authHeader, extensionDir = EXTENSION_DIR, extraAddons, clients } = {}) {
   const bin = thunderbirdBinary();
   if (!bin) throw new Error("THUNDERBIRD_BIN is not set");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "tbmcp-native-"));
@@ -335,13 +371,22 @@ async function startThunderbird({ mailboxes, extraPrefs, headless = true, authHe
   const probe = await startProbeServer();
   const marionettePort = await freePort();
   const resolvedMailboxes = typeof mailboxes === "function" ? mailboxes({ probe, root }) : (mailboxes || {});
+  // The first client is the harness's default identity for call()/rpc().
+  const registry = hasClientRegistry(extensionDir)
+    ? await pairClients(clients || [{ name: "harness" }], extensionDir) : null;
+  const clientTokens = registry ? registry.tokens : {};
+  const defaultToken = registry ? Object.values(registry.tokens)[0] : null;
   const profileDir = buildProfile({
     root,
     smtpPort: smtp.port,
     mailboxes: resolvedMailboxes,
     extensionDir,
     extraAddons,
-    extraPrefs: { "marionette.port": marionettePort, ...extraPrefs },
+    extraPrefs: {
+      "marionette.port": marionettePort,
+      ...(registry ? { [`${prefNamespace(extensionDir)}clients`]: registry.pref } : {}),
+      ...extraPrefs,
+    },
   });
 
   const env = { ...process.env, TMP: tmpDir, TEMP: tmpDir, TMPDIR: tmpDir, MOZ_CRASHREPORTER_DISABLE: "1", MOZ_DISABLE_AUTO_SAFE_MODE: "1" };
@@ -366,7 +411,9 @@ async function startThunderbird({ mailboxes, extraPrefs, headless = true, authHe
   }
 
   let rpcId = 0;
-  async function rpc(method, params, { token = connection.token, header } = {}) {
+  const currentToken = () => connection.token || defaultToken;
+  async function rpc(method, params, { token = currentToken(), client, header } = {}) {
+    if (client !== undefined) token = clientTokens[client];
     const body = JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params });
     const res = await fetch(`http://127.0.0.1:${connection.port}/`, {
       method: "POST",
@@ -430,7 +477,7 @@ async function startThunderbird({ mailboxes, extraPrefs, headless = true, authHe
       try {
         const res = await fetch(`http://127.0.0.1:${info.port}/`, {
           method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${info.token}` },
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${info.token || defaultToken}` },
           body: JSON.stringify({ jsonrpc: "2.0", id: 0, method: "tools/list" }),
         });
         return res.status === 200 ? info : null;
@@ -455,7 +502,7 @@ async function startThunderbird({ mailboxes, extraPrefs, headless = true, authHe
     }
   }
 
-  return { root, tmpDir, profileDir, get connection() { return connection; }, smtp, probe, rpc, call, waitForMessages, reconnect, marionette, folderCounts, stop, log, child };
+  return { root, tmpDir, profileDir, clientTokens, get connection() { return connection; }, smtp, probe, rpc, call, waitForMessages, reconnect, marionette, folderCounts, stop, log, child };
 }
 
 function randomId(prefix) {

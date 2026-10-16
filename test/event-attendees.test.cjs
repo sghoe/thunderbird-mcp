@@ -118,6 +118,32 @@ describe("Attendee writes use the production Block skipReview preference", () =>
   }
 });
 
+describe("Stored meetings need calendar.schedule for the calling client", () => {
+  const withoutSchedule = (Core) => Object.keys(Core.policy.CAPABILITIES).filter(cap => cap !== "calendar.schedule");
+  const { Core } = require("./helpers/core-modules.cjs");
+
+  for (const name of ["updateEvent", "deleteEvent"]) {
+    for (const occurrence of [false, true]) {
+      it(`${name} refuses ${occurrence ? "occurrence" : "series"} writes to a meeting even with the preference off`, async () => {
+        const runtime = loadCalendarRuntime({ blockSkipReview: false, client: { capabilities: withoutSchedule(Core) } });
+        runtime.seedSeries({ attendees: [existingAttendee] });
+        const result = await runtime.invoke(name, {
+          ...updateArgs, ...(name === "updateEvent" ? { title: "New title" } : {}), ...(occurrence ? { recurrenceId } : {}),
+        });
+        assert.match(result.error, /requires calendar\.schedule/);
+        assertNoWrites(runtime);
+      });
+    }
+
+    it(`${name} still allows events without attendees`, async () => {
+      const runtime = loadCalendarRuntime({ blockSkipReview: false, client: { capabilities: withoutSchedule(Core) } });
+      runtime.seedSeries({ attendees: [] });
+      const result = await runtime.invoke(name, { ...updateArgs, ...(name === "updateEvent" ? { title: "New title" } : {}) });
+      assert.equal(result.error, undefined);
+    });
+  }
+});
+
 describe("Meetings are read-only while the production Block skipReview guard is active", () => {
   for (const [label, options] of [
     ["default", {}], ["enabled", { blockSkipReview: true }],

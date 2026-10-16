@@ -30,8 +30,9 @@ function loadRequests({ candidates = 1 } = {}) {
     CONNECTION_MAX_RETRIES: 0,
     CONNECTION_RETRY_DELAY_MS: 1000,
     readConnectionInfo: () => candidateIndex < candidates
-      ? { port: 8765 + candidateIndex, token: 'a'.repeat(64) }
+      ? { port: 8765 + candidateIndex }
       : null,
+    readClientToken: () => 'a'.repeat(64),
     advanceToNextCandidate() {
       candidateIndex++;
       return runtime.readConnectionInfo();
@@ -111,6 +112,30 @@ const mailOperations = [
   ['replyToMessage', { saveAsDraft: 'true' }, /Drafts/],
 ];
 
+describe('bridge marks inlined local files for the extension policy', () => {
+  it('sends the marker only when local files were inlined', async () => {
+    for (const inlinedLocalFiles of [true, false]) {
+      const { runtime, requests } = loadRequests();
+      const pending = runtime.forwardToThunderbird(toolCall('saveDraft', {}), { inlinedLocalFiles });
+      const headers = requests[0].options.headers;
+      assert.equal(headers['X-Thunderbird-MCP-Local-Files'], inlinedLocalFiles ? '1' : undefined);
+      requests[0].destroy();
+      await pending.catch(() => {});
+    }
+  });
+
+  it('uses the header name the extension reads', () => {
+    const api = fs.readFileSync(path.resolve(__dirname, '../extension/mcp_server/api.js'), 'utf8');
+    assert.match(api, /^const LOCAL_FILES_HEADER = "X-Thunderbird-MCP-Local-Files";$/m);
+    assert.match(source, /^const LOCAL_FILES_HEADER = 'X-Thunderbird-MCP-Local-Files';$/m);
+  });
+
+  it('reports how many paths it inlined', async () => {
+    const bridge = require('./helpers/bridge.cjs');
+    assert.equal(await bridge.inlineAttachmentPaths({}), 0);
+    assert.equal(await bridge.inlineAttachmentPaths({ attachments: [{ name: 'a', base64: 'QQ==' }] }), 0);
+  });
+});
 describe('bridge request outcomes', () => {
   for (const [name, args, folderAdvice] of mailOperations) {
     it(`${name} ${JSON.stringify(args)} waits 150 seconds and reports an uncertain timeout`, async () => {

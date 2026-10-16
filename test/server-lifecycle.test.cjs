@@ -134,7 +134,6 @@ function loadServerLifecycle(overrides = {}) {
         },
       },
     },
-    getStableAuthTokenPref: () => "a".repeat(64),
     isListenAllEnabled: () => false,
     isLoopbackPortInUse: async (port) => (state.probe ? state.probe(port) : (state.busyPorts || []).includes(port)),
     PREF_LISTEN_ALL: "extensions.thunderbird-mcp-hardened.listenAll",
@@ -398,7 +397,7 @@ describe("server startup lifecycle", () => {
     sandbox.__tbMcpHardenedShutdownGeneration = (sandbox.__tbMcpHardenedShutdownGeneration || 0) + 1;
     sandbox.__tbMcpHardenedStartPromise = null;
     // A replacement instance has meanwhile published its own discovery file.
-    const replacement = { port: 8777, token: "new", pid: 1 };
+    const replacement = { port: 8777, pid: 1 };
     state.connection = replacement;
     releaseProbe(false);
     const result = await start;
@@ -523,7 +522,7 @@ describe("server startup lifecycle", () => {
       if (rejects) oldStart.catch(() => {});
       await flushStartup();
       const newer = Promise.resolve({ success: true, port: 8770 });
-      const newerConnection = { port: 8770, token: "new", pid: 4242 };
+      const newerConnection = { port: 8770, pid: 4242 };
       sandbox.__tbMcpHardenedStartPromise = newer;
       sandbox.__tbMcpHardenedLastStartError = null;
       state.connection = newerConnection;
@@ -588,7 +587,7 @@ describe("server startup lifecycle", () => {
 
     const newerResult = { success: true, port: 8770 };
     const newer = Promise.resolve(newerResult);
-    const newerConnection = { port: 8770, token: "new", pid: 4242 };
+    const newerConnection = { port: 8770, pid: 4242 };
     sandbox.__tbMcpHardenedStartPromise = newer;
     state.connection = newerConnection;
     state.pendingStops.shift()();
@@ -602,7 +601,7 @@ describe("server startup lifecycle", () => {
   it("does not report running from a cached promise or stale connection file", async () => {
     const { api, sandbox, state } = loadServerLifecycle();
     sandbox.__tbMcpHardenedStartPromise = Promise.resolve({ success: false });
-    state.connection = { port: 8765, token: "old", pid: 1 };
+    state.connection = { port: 8765, pid: 1 };
     assert.equal((await api.getServerInfo()).running, false);
   });
 

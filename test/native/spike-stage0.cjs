@@ -134,7 +134,7 @@ function icacls(target) {
     }, { label: "fork connection after re-enable" });
     const res = await fetch(`http://127.0.0.1:${conn.port}/`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${conn.token}` },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${conn.token || Object.values(tb.clientTokens)[0]}` },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25" } }),
     });
     report.reload = { before, after: (await res.json()).result?.serverInfo?.version };

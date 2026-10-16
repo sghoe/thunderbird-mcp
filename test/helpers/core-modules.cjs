@@ -14,6 +14,7 @@ const MODULES = {
   replyTemplate: "reply-template",
   calendarKind: "calendar-kind",
   policy: "policy",
+  clientRegistry: "client-registry",
 };
 
 const Core = {};

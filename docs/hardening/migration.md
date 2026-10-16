@@ -28,3 +28,18 @@ v0.9.2 (enforced by `test/tool-contract.test.cjs` and the native parity run).
 | Tasks with attendees other than the calendar user follow Block `skipReview` like meetings | such tasks are read-only via MCP while the block is on | disable the block deliberately if needed |
 | `saveDraft` authorizes the identity's real Drafts destination before every save (exists, accessible, Drafts flag) | new drafts are refused when the identity saves into a restricted account, a missing folder or a folder without the Drafts flag; previously only replacements were checked | configure the identity's Drafts folder in an allowed account |
 | An ambiguous Message-ID (several messages in the folder) is refused by all message tools | previously an arbitrary match was read/changed/deleted | none yet; Stage 5 adds unique references |
+
+## Stage 4 – paired clients and positive permissions
+
+| Change | Effect for users | Migration |
+|---|---|---|
+| No shared token any more: each MCP client is paired in Options > Clients and gets its own token (shown once, only a SHA-256 verifier is stored) | after the update every request gets HTTP 403 until a client is paired; the stable-token setting and the "current token" display are gone | pair each client and put its token into its configuration |
+| `connection.json` holds only `{port, pid}`; a leftover `token` field from older versions is rewritten away | scripts that read the token from the file (`jq -r .token`) stop working | read the token from your own configuration instead |
+| The bridge reads the token from `THUNDERBIRD_MCP_TOKEN` or `THUNDERBIRD_MCP_TOKEN_FILE` | the bridge refuses to forward without it (`No client token configured`) | add the variable to the MCP client configuration |
+| Each call needs the capabilities of its effect (tool **and** arguments); `tools/list` shows only usable tools | a client without a capability gets `Not permitted for client "<name>": requires <capability>` | grant the capability or pick another profile |
+| Per-client account list (explicit keys, no wildcard) and calendar/address-book grants, on top of the global settings | a client sees only its accounts; calendar and contact tools need the grant; `getAccountAccess` reports `restricted` when the client sees fewer than all accounts | tick the accounts and grants for the client |
+| Attachments the bridge reads from local paths need `files.attach` (the bridge marks such requests) | the `drafts` profile cannot attach local files | use a `custom` profile with `files.attach` if needed |
+| State-dependent checks: permanent deletion (from Trash, IMAP without move-to-Trash, Drafts without Trash) needs `mail.deletePermanent`; `applyFilters` skips rules whose actions the client may not perform (reason `missing-capability`); changing a stored rule other than disabling it needs its actions' capabilities; changing or deleting meetings and assigned tasks with attendees needs `calendar.schedule` | such calls are refused for clients without the capability, even with Block `skipReview` off | grant the capability to clients that need it |
+| Calls of different clients never run concurrently (fair queue); calls of one client may | heavy parallel use by several clients is serialised | none |
+| A corrupt client list admits no client; the settings page offers "Remove all clients" | all requests get 403 until repaired | remove all clients and pair again |
+| Revocation and changed rights apply to the next request | calls already running finish | none |
