@@ -454,6 +454,7 @@ describe("native follow-up effects stay within the client's accounts (native)", 
         { name: "harness" },
         { name: "alice-local", accounts: ["account1", "account3"] },
         { name: "alice-only", accounts: ["account1"] },
+        { name: "no-contacts", addressBooks: false },
       ],
     });
     await tb.waitForMessages(`${ALICE}/Inbox`, 1);
@@ -481,6 +482,38 @@ describe("native follow-up effects stay within the client's accounts (native)", 
     await tb.call("deleteFilter", { accountId: "account1", filterIndex: 0 });
   });
 
+  it("refuses Forward rules whose triggered send would run such a Post-outgoing filter", async () => {
+    await tb.marionette.run(`
+      Services.prefs.setBoolPref(args.send, true);
+      Services.prefs.setIntPref("mail.forward_message_mode", 0);
+      return true;
+    `, { send: `${NS}allowFilterSendActions` });
+    const po = await tb.call("createFilter", {
+      accountId: "account1", name: "Copy sent to Bob", type: 64,
+      conditions: [{ attrib: "subject", op: "contains", value: "Original" }],
+      actions: [{ type: "copyToFolder", value: `${BOB}/Inbox` }],
+    });
+    assert.equal(po.result?.success, true, JSON.stringify(po));
+    try {
+      const refused = await tb.call("createFilter", {
+        accountId: "account1", name: "Forward", type: 16,
+        conditions: [{ attrib: "subject", op: "contains", value: "Original" }],
+        actions: [{ type: "forward", value: "target@sink.test" }],
+      }, { client: "alice-local" });
+      assert.match(refused.result?.error || "", /Post-outgoing filter "Copy sent to Bob"/, JSON.stringify(refused));
+      // A client that may use Bob's account can create the rule.
+      const ok = await tb.call("createFilter", {
+        accountId: "account1", name: "Forward", type: 16,
+        conditions: [{ attrib: "subject", op: "contains", value: "never 42" }],
+        actions: [{ type: "forward", value: "target@sink.test" }],
+      });
+      assert.equal(ok.result?.success, true, JSON.stringify(ok));
+    } finally {
+      const list = await tb.call("listFilters", { accountId: "account1" });
+      for (let i = (list.result?.[0]?.filters?.length || 0) - 1; i >= 0; i--) await tb.call("deleteFilter", { accountId: "account1", filterIndex: i });
+    }
+  });
+
   it("refuses review windows that would autosave into a restricted Drafts folder", async () => {
     await setCharPref("mail.identity.id1.draft_folder", `${BOB}/Drafts`);
     try {
@@ -493,6 +526,23 @@ describe("native follow-up effects stay within the client's accounts (native)", 
       await closeComposeWindows();
       await setCharPref("mail.identity.id1.draft_folder", `${ALICE}/Drafts`);
     }
+  });
+
+  it("refuses a direct send that would collect new contacts for a client without address-book access", async () => {
+    const collected = () => tb.marionette.run(`
+      const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+      Services.prefs.setBoolPref("mail.collect_email_address_outgoing", true);
+      const uri = Services.prefs.getStringPref("mail.collect_addressbook", "");
+      return uri ? MailServices.ab.getDirectory(uri).childCards.length : -1;
+    `);
+    const before = await collected();
+    assert.ok(before >= 0, "collected-addresses book configured");
+    const refused = await tb.call("sendMail", { to: "New Person <new.person@sink.test>", subject: "collect", body: "b", from: "id1", skipReview: true }, { client: "no-contacts" });
+    assert.match(refused.result?.error || "", /add or change contacts/, JSON.stringify(refused));
+    assert.equal(await collected(), before);
+    const ok = await tb.call("sendMail", { to: "New Person <new.person@sink.test>", subject: "collect ok", body: "b", from: "id1", skipReview: true });
+    assert.equal(ok.result?.success, true, JSON.stringify(ok));
+    await h.waitFor(async () => (await collected()) === before + 1, { label: "collected contact (positive control)" });
   });
 
   it("treats a missing Sent folder like Thunderbird: every fallback (incl. Local Folders) must be accessible", async () => {

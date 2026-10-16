@@ -3899,6 +3899,48 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               }
             }
 
+            // Every send passes the recipients to Thunderbird's address
+            // collector (MessageSend._collectAddressesToAddressBook ->
+            // AddressCollector.collectSingleAddress): unknown addresses become
+            // contacts while mail.collect_email_address_outgoing is on, and
+            // existing contacts without a name get the recipient's name.
+            // Without contacts.write and address-book access a send may only
+            // proceed when collection changes nothing. recipients:
+            // [{ email, name }]; name null = unknown (fail closed).
+            function addressCollectionRestriction(recipients) {
+              if (clientHasCapability("contacts.write") && !isAddressBookAccessRestricted()) return null;
+              const refusal = "Thunderbird would add or change contacts for the recipients (address collection), which needs contacts.write and address-book access";
+              try {
+                const createCards = Services.prefs.getBoolPref("mail.collect_email_address_outgoing", false) &&
+                  !!Services.prefs.getStringPref("mail.collect_addressbook", "");
+                for (const { email, name } of recipients) {
+                  if (!email) continue;
+                  const book = [...MailServices.ab.directories].find(d => d.cardForEmailAddress(email));
+                  if (!book) {
+                    if (createCards) return refusal;
+                    continue;
+                  }
+                  const card = book.cardForEmailAddress(email);
+                  if (card.primaryEmail?.toLowerCase() !== email.toLowerCase() || book.readOnly) continue;
+                  if (!card.displayName && name !== "") return refusal;
+                }
+                return null;
+              } catch {
+                return refusal;
+              }
+            }
+
+            function parseRecipientsForCollection(...headers) {
+              const result = [];
+              for (const header of headers) {
+                if (!header) continue;
+                for (const address of MailServices.headerParser.parseEncodedHeaderW(header)) {
+                  if (address.email) result.push({ email: address.email, name: address.name || "" });
+                }
+              }
+              return result;
+            }
+
             // Autosave writes client-populated review windows into Drafts
             // without a user decision (MsgComposeCommands.js AutoSave).
             function identityAutosaveAllowed(identity) {
@@ -4752,8 +4794,30 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               // that folder's account (MessageSend _filterSentMessage), with
               // this client's content and without a user decision.
               if (mode !== Ci.nsIMsgCompDeliverMode.SaveAsDraft) {
-                const restriction = postOutgoingFilterRestriction(identity);
+                // Replies may be filed in the original's folder
+                // (fccReplyFollowsParent, MimeMessageUtils getFcc).
+                const extraServers = [];
+                const replyTypes = ["Reply", "ReplyAll", "ReplyToSender", "ReplyToGroup", "ReplyToSenderAndGroup", "ReplyToList"]
+                  .map(name => Ci.nsIMsgCompType[name]).filter(value => value !== undefined);
+                if (originalMsgURI && replyTypes.includes(compType) && identity.fccReplyFollowsParent) {
+                  try {
+                    extraServers.push(MailServices.messageServiceFromURI(originalMsgURI).messageURIToMsgHdr(originalMsgURI).folder.server);
+                  } catch {
+                    return Promise.resolve({ error: "Not sent: the folder of the original message could not be determined for the reply copy" });
+                  }
+                }
+                const restriction = postOutgoingFilterRestriction(identity, { extraServers });
                 if (restriction) return Promise.resolve({ error: `Not sent: ${restriction}` });
+                let recipients;
+                try {
+                  recipients = parseRecipientsForCollection(composeFields.to, composeFields.cc, composeFields.bcc);
+                } catch {
+                  recipients = [{ email: "unparsed", name: null }];
+                }
+                // List replies drop names before collection.
+                if (compType === Ci.nsIMsgCompType.ReplyToList) recipients = recipients.map(r => ({ ...r, name: "" }));
+                const collection = addressCollectionRestriction(recipients);
+                if (collection) return Promise.resolve({ error: `Not sent: ${collection}` });
               }
               const bodyMimeType = bodyType || "text/html";
               const SEND_TIMEOUT_MS = 120000; // 2 min safety timeout
@@ -11387,7 +11451,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             }
             // Returns an error message, or null if the rule's sending actions
             // can only send through accounts this client may use.
-            function filterSenderRestriction(filter, server, { includeDeferred }) {
+            function filterSenderRestriction(filter, server, { includeDeferred, nested = false }) {
               const { forward, reply } = filterSendingActions(filter);
               if (!forward && !reply) return null;
               try {
@@ -11420,6 +11484,28 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   }
                   if (reply) identities.push(...sender.identities);
                   if (!identities.every(identitySentCopyAllowed)) return SENT_COPY_ERROR;
+                  // The triggered send collects its recipients: forward
+                  // targets are known, reply recipients (the senders of
+                  // future mail) are not.
+                  const collectionTargets = [];
+                  const forwardType = resolveXpcomConstant("nsMsgFilterAction", "Forward");
+                  for (let i = 0; i < filter.actionCount; i++) {
+                    const action = filter.getActionAt(i);
+                    if (action.type === forwardType) collectionTargets.push({ email: action.strValue, name: "" });
+                  }
+                  if (reply) collectionTargets.push({ email: "unknown-reply-recipient", name: null });
+                  const collection = addressCollectionRestriction(collectionTargets);
+                  if (collection) return `Forward/Reply filter actions are refused: ${collection}`;
+                  // The triggered send runs the Post-outgoing filters of the
+                  // copy's account; a reply may be filed next to the original.
+                  if (!nested) {
+                    for (const identity of identities) {
+                      const followsParent = reply && identity.fccReplyFollowsParent;
+                      const extraServers = followsParent ? [server, sender.incomingServer] : [];
+                      const restriction = postOutgoingFilterRestriction(identity, { extraServers, nested: true });
+                      if (restriction) return `Forward/Reply filter actions are refused: ${restriction}`;
+                    }
+                  }
                 }
                 return null;
               } catch {
@@ -11430,13 +11516,19 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             // run automatically after a direct send. They run with this
             // client's content, so they must stay within its rights like
             // applyFilters. Returns a reason or null.
-            function postOutgoingFilterRestriction(identity) {
+            // extraServers: other folders the copy may be filed in (replies
+            // with fccReplyFollowsParent go to the original's folder).
+            // nested: called for a send that a filter triggers; Post-outgoing
+            // filters that send again are refused there (no recursion).
+            function postOutgoingFilterRestriction(identity, { extraServers = [], nested = false } = {}) {
               try {
                 if (!identity.doFcc) return null;
                 const postOutgoing = resolveXpcomConstant("nsMsgFilterType", "PostOutgoing");
                 if (postOutgoing === undefined) return null;
-                const servers = identityFolderTargetServers(identity, identity.fccFolderURI || identity.fccFolder || "");
-                if (!servers) return "the Sent folder's account could not be determined";
+                const targets = identityFolderTargetServers(identity, identity.fccFolderURI || identity.fccFolder || "");
+                if (!targets) return "the Sent folder's account could not be determined";
+                const servers = [...targets];
+                for (const server of extraServers) if (server && !servers.includes(server)) servers.push(server);
                 const addressBooksRestricted = isAddressBookAccessRestricted();
                 for (const server of servers) {
                   if (server.canHaveFilters === false) continue;
@@ -11449,7 +11541,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                     if (!reason && missingFilterCapabilities(filter, clientHasCapability, { deletesPermanently: filterDeleteIsPermanent(server) }).length) {
                       reason = "missing-capability";
                     }
-                    if (!reason && filterSenderRestriction(filter, server, { includeDeferred: false })) reason = "unauthorized-sender";
+                    if (!reason && nested) {
+                      const sending = filterSendingActions(filter);
+                      if (sending.forward || sending.reply) reason = "sends again";
+                    }
+                    if (!reason && filterSenderRestriction(filter, server, { includeDeferred: false, nested: true })) reason = "unauthorized-sender";
                     if (!reason) reason = getFilterConditionRestriction(filter, { addressBooksRestricted });
                     if (reason) return `the Post-outgoing filter "${filter.filterName}" would run on the sent copy beyond this client's rights (${reason})`;
                   }

@@ -46,6 +46,8 @@ describe("account-bound policy for templates, drafts and calendar items (native)
         [`${NS}allowedAccounts`]: JSON.stringify(["account1", "account3"]),
         [`${NS}allowFilterSendActions`]: true,
         [`${NS}allowAllCalendars`]: true,
+        // Reply rules collect recipients into an address book (Stage 4).
+        [`${NS}allowAllAddressBooks`]: true,
       },
     });
     // Search de-duplicates by Message-ID: 3 stored messages, 2 rows.

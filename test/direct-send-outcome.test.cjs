@@ -21,7 +21,7 @@ function snippet(name) {
 
 function loadSend(options = {}) {
   const state = { calls: [], dispositions: [], result: undefined };
-  const identity = { key: "sender", email: "sender@example.test" };
+  const identity = { key: "sender", email: "sender@example.test", fccReplyFollowsParent: !!options.followsParent };
   const timer = {
     cancelled: false,
     initWithCallback(callback, delay) { this.callback = callback; this.delay = delay; },
@@ -63,14 +63,25 @@ function loadSend(options = {}) {
       importESModule: () => ({ MsgHdrToMimeMessage: (msg, _listener, callback) => callback(msg, {}) }),
     },
     Components: { isSuccessCode: status => status === 0 },
-    MailServices: { accounts: { accounts: [{ key: "account", identities: [identity] }] } },
+    MailServices: {
+      accounts: { accounts: [{ key: "account", identities: [identity] }] },
+      messageServiceFromURI: () => ({ messageURIToMsgHdr: () => hdr }),
+    },
     descsToMsgAttachments(descs) {
       if (options.attachmentError) throw options.attachmentError;
       return descs;
     },
     // Sent-copy (FCC) authorization of the identity.
     identitySentCopyAllowed: () => !options.sentCopyDenied,
-    postOutgoingFilterRestriction: () => options.postOutgoing || null,
+    parseRecipientsForCollection: (...headers) => headers.filter(Boolean).map(email => ({ email, name: "" })),
+    addressCollectionRestriction(recipients) {
+      state.collectionRecipients = recipients;
+      return options.collection || null;
+    },
+    postOutgoingFilterRestriction(_identity, context = {}) {
+      state.postOutgoingContexts = [...(state.postOutgoingContexts || []), context];
+      return options.postOutgoing || null;
+    },
     isSkipReviewBlocked: () => !!options.blocked,
     findMessage: () => ({ msgHdr: hdr, folder }),
     filePathsToAttachDescs: () => ({ descs: [] }),
@@ -185,6 +196,7 @@ describe("direct send SMTP completion", () => {
     ["synchronous creation failure", { createError: new Error("create threw") }, /create threw/],
     ["attachment failure", { attachmentError: new Error("attachments invalid") }, /attachments invalid/],
     ["Sent copy into a restricted account", { sentCopyDenied: true }, /files sent copies into an account this client may not use/],
+    ["address collection beyond the client's rights", { collection: "Thunderbird would add or change contacts" }, /Not sent: Thunderbird would add or change contacts/],
     ["Post-outgoing filter beyond the client's rights", { postOutgoing: "the Post-outgoing filter \"x\" would run" }, /Not sent: the Post-outgoing filter/],
   ]) {
     it(`reports ${label} without success`, async () => {
@@ -193,6 +205,24 @@ describe("direct send SMTP completion", () => {
       assert.match(result.error, pattern);
       assert.equal(result.success, undefined);
       if (!options.createError) assert.equal(h.state.calls.length, 0);
+    });
+  }
+});
+
+describe("Post-outgoing filters of the reply's copy folder", () => {
+  for (const followsParent of [false, true]) {
+    it(`checks the original's folder too when replies follow the parent: ${followsParent}`, async () => {
+      const h = loadSend({ followsParent });
+      const result = h.start("reply");
+      await new Promise(resolve => setImmediate(resolve));
+      const contexts = h.state.postOutgoingContexts || [];
+      assert.equal(contexts.length, 1);
+      const extra = contexts[0].extraServers || [];
+      assert.equal(extra.length, followsParent ? 1 : 0);
+      if (followsParent) assert.equal(extra[0], h.hdr.folder.server);
+      h.state.deliveryStarted();
+      h.state.listener.onStopSending("id", 0);
+      assert.equal((await result).success, true);
     });
   }
 });

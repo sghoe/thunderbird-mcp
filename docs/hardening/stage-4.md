@@ -178,3 +178,24 @@ All points verified against comm-central source before fixing.
   control copies), autosave into restricted Drafts refused, missing Sent
   folder with Local Folders fallback refused for a client without Local
   Folders. All three fail on 061327d.
+
+## Review round 5 – fixes
+
+* Post-outgoing filters of filter-triggered sends (Opus, Sol): Forward and
+  Reply actions send through `MessageSend`, which also runs the
+  Post-outgoing filters of the copy's account. Sending rules now check
+  them for every identity that can send; nested Post-outgoing filters that
+  send again are refused (no recursion).
+* Replies filed next to the original (Opus, Sol): with
+  `fccReplyFollowsParent` Thunderbird files a reply in the original's
+  folder (`MimeMessageUtils.getFcc`); direct replies and Reply rules also
+  check that folder's Post-outgoing filters.
+* Address collection (Sol): every send passes its recipients to
+  `AddressCollector.collectSingleAddress`, which creates contacts while
+  `mail.collect_email_address_outgoing` is on and names existing unnamed
+  contacts. Clients without `contacts.write` and address-book access may
+  only send when collection changes nothing; Reply rules (unknown future
+  recipients) need both. Full-access clients are unaffected.
+* Native: filter-triggered Post-outgoing copy and contact collection
+  refused (positive controls pass); both fail on 23a9d3a. The Stage 2
+  native profile now allows address books, as its Reply rule collects.

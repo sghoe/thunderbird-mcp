@@ -315,6 +315,8 @@ function makeFilterHarness({
   forwardMode = 0,
   // Whether an identity's Sent (FCC) folder is in an accessible account.
   sentCopyAllowed = () => true,
+  // Address collection effect of triggered sends (null = no restriction).
+  collection = () => null,
   defaultAccount = null,
   // Further accounts (e.g. POP accounts deferring into this one).
   otherAccounts = [],
@@ -392,6 +394,8 @@ function makeFilterHarness({
       isAccountAllowed: (id) => id === account.key,
       clientHasCapability: (capability) => granted.includes(capability),
       identitySentCopyAllowed: (identity) => sentCopyAllowed(identity),
+      addressCollectionRestriction: (recipients) => collection(recipients),
+      postOutgoingFilterRestriction: () => null,
       isAddressBookAccessRestricted: () => addressBooksRestricted,
       getAccessibleAccounts: () => [account],
       // Folders belong to the account's server unless a test says otherwise.
@@ -2269,6 +2273,17 @@ describe("stored filter actions need the calling client's capabilities", () => {
     const asAttachment = makeFilterHarness({ allowSend: true, forwardMode: 0, sentCopyAllowed });
     asAttachment.api.MailServices.accounts.getAccount("account").identities.push(second);
     assert.equal(asAttachment.api.createFilter("account", "fwd", true, undefined, conditions, forward).success, true);
+  });
+
+  it("sending rules are refused when the triggered send would change contacts", () => {
+    const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
+    const seen = [];
+    const h = makeFilterHarness({ allowSend: true, collection: (recipients) => { seen.push(recipients); return "Thunderbird would add or change contacts"; } });
+    const refused = h.api.createFilter("account", "fwd", true, undefined, conditions, [{ type: "forward", value: "t@example.invalid" }]);
+    assert.match(refused.error, /would add or change contacts/);
+    assert.deepEqual(JSON.parse(JSON.stringify(seen.at(-1))), [{ email: "t@example.invalid", name: "" }]);
+    h.api.createFilter("account", "reply", true, undefined, conditions, [{ type: "reply", value: REPLY_TEMPLATE }]);
+    assert.equal(seen.at(-1).at(-1).name, null, "reply recipients are unknown");
   });
 
   it("chained POP deferral counts: every account resolving into this one is checked", () => {
