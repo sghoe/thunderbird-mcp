@@ -689,6 +689,7 @@ describe("filter conditions and reply copies in Trash (native)", { skip: !h.thun
         { name: "harness" },
         { name: "no-contacts-read", capabilities: allCaps.filter((c) => c !== "contacts.read") },
         { name: "no-permanent-delete", capabilities: allCaps.filter((c) => c !== "mail.deletePermanent") },
+        { name: "no-autosend", capabilities: allCaps.filter((c) => c !== "filters.autosend") },
       ],
     });
     await tb.waitForMessages(`${ALICE}/Trash`, 1);
@@ -706,6 +707,31 @@ describe("filter conditions and reply copies in Trash (native)", { skip: !h.thun
     const ok = await tb.call("createFilter", args);
     assert.equal(ok.result?.success, true, JSON.stringify(ok));
     await tb.call("deleteFilter", { accountId: "account1", filterIndex: 0 });
+  });
+
+  it("refuses reordering/deleting a Stop rule that would let a Forward rule act without filters.autosend", async () => {
+    await tb.marionette.run("Services.prefs.setBoolPref(args.name, true); Services.prefs.setIntPref('mail.forward_message_mode', 0); return true;", { name: `${NS}allowFilterSendActions` });
+    const stop = await tb.call("createFilter", {
+      accountId: "account1", name: "Stop confidential", type: 17,
+      conditions: [{ attrib: "subject", op: "contains", value: "confidential" }], actions: [{ type: "stopExecution" }],
+    });
+    const forward = await tb.call("createFilter", {
+      accountId: "account1", name: "Forward all", type: 17,
+      conditions: [{ attrib: "subject", op: "contains", value: "a" }], actions: [{ type: "forward", value: "target@sink.test" }],
+    });
+    assert.equal(stop.result?.success && forward.result?.success, true, JSON.stringify([stop, forward]));
+    try {
+      const reorder = await tb.call("reorderFilters", { accountId: "account1", fromIndex: 1, toIndex: 0 }, { client: "no-autosend" });
+      assert.match(reorder.result?.error || "", /"Forward all" act on more messages/, JSON.stringify(reorder));
+      const del = await tb.call("deleteFilter", { accountId: "account1", filterIndex: 0 }, { client: "no-autosend" });
+      assert.match(del.result?.error || "", /"Forward all" act on more messages/, JSON.stringify(del));
+      const list = await tb.call("listFilters", { accountId: "account1" });
+      assert.deepEqual(list.result[0].filters.map((x) => x.name), ["Stop confidential", "Forward all"]);
+      const ok = await tb.call("reorderFilters", { accountId: "account1", fromIndex: 1, toIndex: 0 });
+      assert.equal(ok.result?.success, true, JSON.stringify(ok));
+    } finally {
+      for (let i = 1; i >= 0; i--) await tb.call("deleteFilter", { accountId: "account1", filterIndex: i });
+    }
   });
 
   it("refuses a direct reply whose copy in Trash a Post-outgoing Delete would purge", async () => {

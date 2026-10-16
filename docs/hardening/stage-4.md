@@ -251,3 +251,19 @@ Opus: no substantive findings. Sol:
   is recognised as permanent. The folder is part of the visited key.
 * Native: both refused for restricted clients, allowed for full access;
   both fail on 562726c.
+
+## Review round 9 – fixes
+
+Opus: no substantive findings. Sol:
+
+* Rule order is part of the effect: Stop, Move and Delete rules keep later
+  rules from acting. Reordering rules when a flow-controlling rule is in
+  the moved range, deleting a flow-controlling rule, or changing (also
+  disabling) one now requires that the client may run every enabled rule
+  whose reach can grow (same checks as `applyFilters`: actions,
+  capabilities, sender accounts, destinations, conditions). Full-access
+  clients are unaffected.
+* Native: reorder/delete of a Stop rule in front of a Forward rule refused
+  for a client without `filters.autosend`, allowed with full access. The
+  actual delivery path (POP) is not available in the harness; covered by
+  unit tests and the reviewer's native reproduction.

@@ -2330,6 +2330,48 @@ describe("stored filter actions need the calling client's capabilities", () => {
     assert.match(h.api.createFilter("account", "Delete", true, undefined, conditions, [{ type: "delete" }]).error, /require mail\.deletePermanent/);
   });
 
+  describe("changes that widen the reach of later rules", () => {
+    const seedStopThenForward = (h) => {
+      h.seed({ name: "Stop confidential", actions: [{ type: "stopExecution" }] });
+      h.seed({ name: "Forward all", actions: [{ type: "forward", value: "target@example.invalid" }] });
+    };
+    const names = (h) => h.filterList.filters.map((f) => f.filterName);
+
+    it("refuses reordering a Forward rule above a Stop rule without filters.autosend", () => {
+      const h = makeFilterHarness({ allowSend: true, granted: readOnlyRun });
+      seedStopThenForward(h);
+      const result = h.api.reorderFilters("account", 1, 0);
+      assert.match(result.error, /"Forward all" act on more messages.*missing-capability/);
+      assert.deepEqual(names(h), ["Stop confidential", "Forward all"]);
+      assert.equal(h.filterList.saveAttempts, 0);
+    });
+
+    it("refuses deleting or disabling the Stop rule without filters.autosend", () => {
+      const h = makeFilterHarness({ allowSend: true, granted: readOnlyRun });
+      seedStopThenForward(h);
+      assert.match(h.api.deleteFilter("account", 0).error, /"Forward all" act on more messages/);
+      assert.match(h.api.updateFilter("account", 0, undefined, false).error, /"Forward all" act on more messages/);
+      assert.deepEqual(names(h), ["Stop confidential", "Forward all"]);
+      assert.equal(h.filterList.filters[0].enabled, true);
+    });
+
+    it("allows such changes when no flow-controlling rule is involved", () => {
+      const h = makeFilterHarness({ allowSend: true, granted: [...readOnlyRun, "mail.flag"] });
+      h.seed({ name: "Flag A", actions: [{ type: "markRead" }] });
+      h.seed({ name: "Forward all", actions: [{ type: "forward", value: "target@example.invalid" }] });
+      assert.equal(h.api.reorderFilters("account", 1, 0).success, true);
+      assert.equal(h.api.deleteFilter("account", 1).success, true);
+    });
+
+    it("allows them for a client that may run the later rules", () => {
+      const h = makeFilterHarness({ allowSend: true });
+      seedStopThenForward(h);
+      assert.equal(h.api.reorderFilters("account", 1, 0).success, true);
+      assert.deepEqual(names(h), ["Forward all", "Stop confidential"]);
+      assert.equal(h.api.deleteFilter("account", 1).success, true);
+    });
+  });
+
   it("updateFilter always allows disabling such a rule", () => {
     const h = makeFilterHarness({ allowSend: true, granted: readOnlyRun });
     h.seed({ name: "Forward", actions: [{ type: "forward", value: "target@example.invalid" }] });

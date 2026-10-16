@@ -11592,6 +11592,45 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               return isAddressBookAccessRestricted() || !clientHasCapability("contacts.read");
             }
 
+            // Rules with these actions keep later rules from acting on a
+            // message; moving, deleting, disabling or changing them can let
+            // later rules (e.g. a user's Forward rule) act on more messages.
+            function filterControlsFlow(filter) {
+              const types = ["StopExecution", "MoveToFolder", "Delete"]
+                .map(name => resolveXpcomConstant("nsMsgFilterAction", name))
+                .filter(value => value !== undefined);
+              for (let i = 0; i < filter.actionCount; i++) {
+                if (types.includes(filter.getActionAt(i).type)) return true;
+              }
+              return false;
+            }
+
+            // Why this client may not run a stored rule (as applyFilters would
+            // check it), or null.
+            function storedRuleRestriction(filter, server) {
+              if (!filter.enabled) return null;
+              if (filter.unparseable) return "unparseable";
+              const actionRestriction = getFilterActionRestriction(filter, { allowSending: true, checkTargetFolder: getAccessibleFolder });
+              if (actionRestriction) return actionRestriction;
+              if (missingFilterCapabilities(filter, clientHasCapability, { deletesPermanently: filterDeleteIsPermanent(server) }).length) {
+                return "missing-capability";
+              }
+              if (filterSenderRestriction(filter, server, { includeDeferred: true })) return "unauthorized-sender";
+              return getFilterConditionRestriction(filter, { addressBooksRestricted: filterAddressBooksRestricted() });
+            }
+
+            // Every enabled rule in [start, end] must be runnable by this client.
+            function reachableRulesRestriction(filterList, server, start, end = filterList.filterCount - 1) {
+              for (let i = Math.max(0, start); i <= end && i < filterList.filterCount; i++) {
+                const rule = filterList.getFilterAt(i);
+                const reason = storedRuleRestriction(rule, server);
+                if (reason) {
+                  return { error: `Not permitted for this client: this change can let the filter "${rule.filterName}" act on more messages, and this client may not run it (${reason})` };
+                }
+              }
+              return null;
+            }
+
             function filterCapabilityError(missing) {
               return { error: `Not permitted for this client: the filter's actions require ${missing.join(", ")}. Grant it in the Thunderbird MCP options.` };
             }
@@ -11772,6 +11811,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 }
                 const onlyDisable = enabled === false && name === undefined && type === undefined
                   && conditions === undefined && actions === undefined;
+                // Changing a flow-controlling rule (also disabling it) can widen
+                // the reach of the rules after it.
+                if (filterControlsFlow(filter)) {
+                  const reach = reachableRulesRestriction(filterList, server, filterIndex + 1);
+                  if (reach) return reach;
+                }
                 // The resulting rule (new or retained actions) runs with this
                 // client's authority; only disabling is always allowed.
                 if (!onlyDisable) {
@@ -11813,7 +11858,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                 const fl = getFilterListForAccount(accountId);
                 if (fl.error) return fl;
-                const { filterList } = fl;
+                const { filterList, server } = fl;
 
                 if (filterIndex < 0 || filterIndex >= filterList.filterCount) {
                   return { error: `Invalid filter index: ${filterIndex}` };
@@ -11821,6 +11866,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                 const filter = filterList.getFilterAt(filterIndex);
                 const filterName = filter.filterName;
+                if (filterControlsFlow(filter)) {
+                  const reach = reachableRulesRestriction(filterList, server, filterIndex + 1);
+                  if (reach) return reach;
+                }
                 filterList.removeFilterAt(filterIndex);
                 try {
                   filterList.saveToDefaultFile();
@@ -11844,13 +11893,24 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                 const fl = getFilterListForAccount(accountId);
                 if (fl.error) return fl;
-                const { filterList } = fl;
+                const { filterList, server } = fl;
 
                 if (fromIndex < 0 || fromIndex >= filterList.filterCount) {
                   return { error: `Invalid source index: ${fromIndex}` };
                 }
                 if (toIndex < 0 || toIndex >= filterList.filterCount) {
                   return { error: `Invalid target index: ${toIndex}` };
+                }
+                // Only the rules between both positions change their place
+                // relative to each other; if one of them controls the flow,
+                // all of them must be runnable by this client.
+                const low = Math.min(fromIndex, toIndex);
+                const high = Math.max(fromIndex, toIndex);
+                let flowChanges = false;
+                for (let i = low; i <= high; i++) if (filterControlsFlow(filterList.getFilterAt(i))) flowChanges = true;
+                if (flowChanges) {
+                  const reach = reachableRulesRestriction(filterList, server, low, high);
+                  if (reach) return reach;
                 }
 
                 // moveFilterAt is unreliable — use remove + insert instead
