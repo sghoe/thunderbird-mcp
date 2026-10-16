@@ -2370,6 +2370,15 @@ describe("stored filter actions need the calling client's capabilities", () => {
       assert.equal(h.api.updateFilter("account", 2, undefined, undefined, h.ci.nsMsgFilterType.InboxRule).success, true);
     });
 
+    it("checks rules after the moved range too (reordering changes what they see)", () => {
+      const h = makeFilterHarness({ allowSend: true, granted: [...readOnlyRun, "mail.flag"] });
+      h.seed({ name: "Raise confidential", actions: [{ type: "changePriority", value: 6 }] });
+      h.seed({ name: "Stop if highest", actions: [{ type: "stopExecution" }] });
+      h.seed({ name: "Forward all", actions: [{ type: "forward", value: "target@example.invalid" }] });
+      assert.match(h.api.reorderFilters("account", 1, 0).error, /"Forward all" act on more messages/);
+      assert.deepEqual(h.filterList.filters.map((f) => f.filterName), ["Raise confidential", "Stop if highest", "Forward all"]);
+    });
+
     it("allows changes when every affected rule is runnable by the client", () => {
       const h = makeFilterHarness({ allowSend: true, granted: [...readOnlyRun, "mail.flag"] });
       h.seed({ name: "Flag A", actions: [{ type: "markRead" }] });

@@ -11941,10 +11941,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 if (toIndex < 0 || toIndex >= filterList.filterCount) {
                   return { error: `Invalid target index: ${toIndex}` };
                 }
-                // Only the rules between both positions change their place
-                // relative to each other; all of them must be runnable.
+                // A new order changes what every rule from the lower position
+                // on sees (also rules after the moved range).
                 if (fromIndex !== toIndex) {
-                  const reach = reachableRulesRestriction(filterList, server, Math.min(fromIndex, toIndex), Math.max(fromIndex, toIndex));
+                  const reach = reachableRulesRestriction(filterList, server, Math.min(fromIndex, toIndex));
                   if (reach) return reach;
                 }
 

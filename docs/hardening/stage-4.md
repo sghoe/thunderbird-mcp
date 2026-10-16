@@ -288,3 +288,15 @@ enough, and it blocked full-access clients:
   list next to a custom-action or stale rule).
 * Native: inserting a priority rule before a Forward rule refused for a
   client without `filters.autosend`.
+
+## Review round 11 – fix
+
+Both reviewers: `reorderFilters` checked only the moved range, but a new
+order changes what every later rule sees (e.g. two priority rules swapped
+before a "priority is highest → Forward" rule). The check now runs from
+the lower position to the end of the list; regression test with the
+Forward rule after the moved range.
+* `npm run test:native` now runs the native files one after another
+  (`--test-concurrency=1`): parallel Thunderbird instances made the
+  timing-based chain tests flaky under load (observed twice; isolated and
+  repeated runs passed).
