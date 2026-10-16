@@ -140,6 +140,19 @@ describe("account-bound policy for templates, drafts and calendar items (native)
     assert.ok(again.result.some((t) => t.id === task.id));
   });
 
+  it("detects a duplicate that arrives after the Message-ID was looked up (index invalidation)", async () => {
+    const first = await tb.call("getMessage", { messageId: "incoming@sender.test", folderPath: `${ALICE}/Inbox` });
+    assert.equal(first.result.subject, "Invoice");
+    await tb.marionette.run(`
+      const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+      const folder = MailServices.folderLookup.getFolderForURL(args.uri).QueryInterface(Ci.nsIMsgLocalMailFolder);
+      folder.addMessage(args.raw);
+      return true;
+    `, { uri: `${ALICE}/Inbox`, raw: f.simple({ id: "incoming@sender.test", from: "Mallory <m@attacker.test>", to: f.ALLOWED_EMAIL, subject: "Spoofed invoice", text: "SPOOF" }).replace(/^From - [^\n]*\n/, "") });
+    const second = await tb.call("getMessage", { messageId: "incoming@sender.test", folderPath: `${ALICE}/Inbox` });
+    assert.match(second.result.error, /Message-ID is ambiguous/);
+  });
+
   // ── Message-ID duplicates are refused instead of silently choosing ──
   for (const [tool, args] of [
     ["getMessage", { messageId: "dup@x.test", folderPath: `${ALICE}/Inbox` }],

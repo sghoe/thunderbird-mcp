@@ -5408,49 +5408,79 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	            // RFC Message-IDs are chosen by the sender and need not be
 	            // unique; message tools refuse ambiguous IDs instead of picking
 	            // one. Counting needs one pass over the folder, so per-folder
-	            // counts are reused while the database object, its message count
-	            // and highest message key are unchanged (an added message raises
-	            // the key, a removed one lowers the count), for at most 60 s.
+	            // counts are reused, but only while Thunderbird's own change
+	            // notifications for that database report no added, deleted or
+	            // changed header and the database is still open (a message-key
+	            // watermark is not reliable: IMAP offline headers use reusable
+	            // fake keys). Entries hold the database only weakly, are pruned
+	            // after 60 s, and nothing is cached where no listener can be
+	            // attached.
 	            const MESSAGE_ID_INDEX_TTL_MS = 60000;
 	            const MESSAGE_ID_INDEX_MAX_FOLDERS = 8;
 	            const _messageIdIndexes = new Map();
 
-	            function getMessageIdCounts(folder, db) {
-	              let stamp = null;
-	              try {
-	                const info = db.dBFolderInfo;
-	                if (Number.isFinite(info.numMessages) && Number.isFinite(info.highWater)) {
-	                  stamp = `${info.numMessages}:${info.highWater}`;
+	            function dropMessageIdIndex(key) {
+	              const entry = _messageIdIndexes.get(key);
+	              if (!entry) return;
+	              _messageIdIndexes.delete(key);
+	              try { entry.dbRef.deref()?.removeListener(entry.listener); } catch { /* database already closed */ }
+	            }
+
+	            function pruneMessageIdIndexes(now) {
+	              for (const [key, entry] of [..._messageIdIndexes]) {
+	                if (entry.stale || now - entry.at >= MESSAGE_ID_INDEX_TTL_MS || !entry.dbRef.deref()) {
+	                  dropMessageIdIndex(key);
 	                }
-	              } catch { /* no stamp: never cache */ }
+	              }
+	            }
+
+	            function getMessageIdCounts(folder, db) {
+	              const now = Date.now();
+	              pruneMessageIdIndexes(now);
 	              const key = typeof folder?.URI === "string" ? folder.URI : "";
 	              const cached = key ? _messageIdIndexes.get(key) : null;
-	              if (cached && stamp !== null && cached.db === db && cached.stamp === stamp &&
-	                  Date.now() - cached.at < MESSAGE_ID_INDEX_TTL_MS) {
+	              if (cached && cached.dbRef.deref() === db) {
 	                _messageIdIndexes.delete(key);
 	                _messageIdIndexes.set(key, cached);
 	                return cached.counts;
 	              }
+	              if (cached) dropMessageIdIndex(key);
 	              const counts = new Map();
 	              for (const hdr of db.enumerateMessages()) {
 	                counts.set(hdr.messageId, (counts.get(hdr.messageId) || 0) + 1);
 	              }
-	              if (key && stamp !== null) {
-	                _messageIdIndexes.delete(key);
-	                _messageIdIndexes.set(key, { db, stamp, counts, at: Date.now() });
-	                while (_messageIdIndexes.size > MESSAGE_ID_INDEX_MAX_FOLDERS) {
-	                  _messageIdIndexes.delete(_messageIdIndexes.keys().next().value);
-	                }
+	              if (key && typeof db.addListener === "function" && typeof WeakRef === "function") {
+	                const entry = { dbRef: new WeakRef(db), counts, at: now, stale: false, listener: null };
+	                const invalidate = () => { entry.stale = true; };
+	                entry.listener = {
+	                  QueryInterface: typeof ChromeUtils !== "undefined"
+	                    ? ChromeUtils.generateQI(["nsIDBChangeListener"]) : undefined,
+	                  onHdrAdded: invalidate,
+	                  onHdrDeleted: invalidate,
+	                  onHdrPropertyChanged: invalidate,
+	                  onAnnouncerGoingAway: invalidate,
+	                  onHdrFlagsChanged() {},
+	                  onParentChanged() {},
+	                  onReadChanged() {},
+	                  onJunkScoreChanged() {},
+	                  onEvent() {},
+	                };
+	                try {
+	                  db.addListener(entry.listener);
+	                  _messageIdIndexes.set(key, entry);
+	                  while (_messageIdIndexes.size > MESSAGE_ID_INDEX_MAX_FOLDERS) {
+	                    dropMessageIdIndex(_messageIdIndexes.keys().next().value);
+	                  }
+	                } catch { /* no listener: never cache */ }
 	              }
 	              return counts;
 	            }
-
 	            // { hdr } for a unique match, { ambiguous: true }, or {} if absent.
 	            function lookupUniqueMessage(folder, db, messageId) {
 	              const count = getMessageIdCounts(folder, db).get(messageId) || 0;
 	              if (count > 1) return { ambiguous: true };
 	              if (count === 0) return {};
-	              let hdr = null;
+	              let hdr;
 	              try { hdr = db.getMsgHdrForMessageID(messageId); } catch { hdr = null; }
 	              if (!hdr || hdr.messageId !== messageId) {
 	                const scanned = [...db.enumerateMessages()].find(candidate => candidate.messageId === messageId);
