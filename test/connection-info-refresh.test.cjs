@@ -45,7 +45,7 @@ describe("connection info refresh decision", () => {
   it("does not rewrite when connection.json already matches the running server", () => {
     const result = ensureFreshConnectionInfo(makeOptions({
       readConnectionInfo: () => ({
-        path: "/tmp/thunderbird-mcp/connection.json",
+        path: "/tmp/thunderbird-mcp-hardened/connection.json",
         data: { port: 8765, token: "token", pid: 1234 },
       }),
       writeConnectionInfo() {
@@ -53,23 +53,23 @@ describe("connection info refresh decision", () => {
       },
     }));
 
-    assert.equal(result, "/tmp/thunderbird-mcp/connection.json");
+    assert.equal(result, "/tmp/thunderbird-mcp-hardened/connection.json");
   });
 
   it("rewrites when connection.json is missing", () => {
     const writes = [];
     const result = ensureFreshConnectionInfo(makeOptions({
       readConnectionInfo: () => ({
-        path: "/tmp/thunderbird-mcp/connection.json",
+        path: "/tmp/thunderbird-mcp-hardened/connection.json",
         data: null,
       }),
       writeConnectionInfo(port, token) {
         writes.push({ port, token });
-        return "/tmp/thunderbird-mcp/connection.json";
+        return "/tmp/thunderbird-mcp-hardened/connection.json";
       },
     }));
 
-    assert.equal(result, "/tmp/thunderbird-mcp/connection.json");
+    assert.equal(result, "/tmp/thunderbird-mcp-hardened/connection.json");
     assert.deepEqual(writes, [{ port: 8765, token: "token" }]);
   });
 
@@ -91,18 +91,18 @@ describe("connection info refresh decision", () => {
       let writeCount = 0;
       const result = ensureFreshConnectionInfo(makeOptions({
         readConnectionInfo: () => ({
-          path: "/tmp/thunderbird-mcp/connection.json",
+          path: "/tmp/thunderbird-mcp-hardened/connection.json",
           data: staleCase.data,
         }),
         writeConnectionInfo(port, token) {
           writeCount++;
           assert.equal(port, 8765);
           assert.equal(token, "token");
-          return "/tmp/thunderbird-mcp/connection.json";
+          return "/tmp/thunderbird-mcp-hardened/connection.json";
         },
       }));
 
-      assert.equal(result, "/tmp/thunderbird-mcp/connection.json");
+      assert.equal(result, "/tmp/thunderbird-mcp-hardened/connection.json");
       assert.equal(writeCount, 1);
     });
   }
@@ -118,14 +118,14 @@ describe("connection info refresh decision", () => {
       },
       writeConnectionInfo() {
         writeCount++;
-        return "/tmp/thunderbird-mcp/connection.json";
+        return "/tmp/thunderbird-mcp-hardened/connection.json";
       },
       onCheckError(error) {
         errors.push(error);
       },
     }));
 
-    assert.equal(result, "/tmp/thunderbird-mcp/connection.json");
+    assert.equal(result, "/tmp/thunderbird-mcp-hardened/connection.json");
     assert.deepEqual(errors, [parseError]);
     assert.equal(writeCount, 1);
   });
@@ -136,7 +136,7 @@ describe("connection info refresh decision", () => {
     assert.throws(
       () => ensureFreshConnectionInfo(makeOptions({
         readConnectionInfo: () => ({
-          path: "/tmp/thunderbird-mcp/connection.json",
+          path: "/tmp/thunderbird-mcp-hardened/connection.json",
           data: null,
         }),
         writeConnectionInfo() {

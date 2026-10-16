@@ -14,6 +14,8 @@ Give your AI assistant full access to Thunderbird -- search mail, compose messag
 
 > Inspired by [bb1/thunderbird-mcp](https://github.com/bb1/thunderbird-mcp). Rewritten from scratch with a bundled HTTP server, proper MIME decoding, and UTF-8 handling throughout.
 
+> **Hardened fork.** This repository is an incrementally hardened fork of [TKasperczyk/thunderbird-mcp](https://github.com/TKasperczyk/thunderbird-mcp) `v0.9.2`. It uses its own add-on ID, preference namespace (`extensions.thunderbird-mcp-hardened.*`), runtime/export directories and port range (8775–8784), and has **no automatic update channel**. Upstream settings are not inherited. Security changes and their migration notes are documented in [docs/hardening](docs/hardening/). Tested only on Windows with Thunderbird 153.5.0esr.
+
 ---
 
 ## Why?
@@ -27,7 +29,7 @@ Compose sends and event/task creation require review by default because **Block 
 ## How it works
 
 ```
-                    stdio              HTTP (localhost:8765-8774)
+                    stdio              HTTP (localhost:8775-8784)
   MCP Client  <----------->  Bridge  <--------------------->  Thunderbird
   (Claude, etc.)           mcp-bridge.cjs                    Extension + HTTP Server
 ```
@@ -190,12 +192,14 @@ The separate "Filter Send Actions" section controls **Allow automatic Forward/Re
 ### 1. Install the extension
 
 ```bash
-git clone https://github.com/TKasperczyk/thunderbird-mcp.git
+git clone https://github.com/sghoe/thunderbird-mcp.git
+cd thunderbird-mcp
+node scripts/build-xpi.cjs
 ```
 
-Install `dist/thunderbird-mcp.xpi` in Thunderbird (Tools > Add-ons > Install from File), then restart. A pre-built XPI is included in the repo -- no build step needed.
+Uninstall the upstream *Thunderbird MCP* add-on first (recommended; both can technically coexist), then install `dist/thunderbird-mcp.xpi` in Thunderbird (Tools > Add-ons > Install from File) and restart.
 
-**Automatic updates:** From v0.7.3 on, the add-on auto-updates through Thunderbird's add-on update check. Thunderbird downloads updates in the background and applies them on the next restart; because this add-on uses an experiment API, updates are not live hot-swapped. v0.7.3 is the last build you need to install by hand because older builds have no `update_url` and cannot auto-discover it. Thunderbird ships with `xpinstall.signatures.required=false`, so unsigned auto-updates work out of the box; a profile hardened to require signatures blocks both manual and automatic installs. If updates do not arrive, check the Add-ons gear menu and make sure **Update Add-ons Automatically** is enabled.
+**Updates:** This fork has no automatic update channel: its `update_url` points at a reserved `.invalid` host that never resolves, so Thunderbird neither updates it nor falls back to addons.thunderbird.net. Install new builds by hand and keep the previous XPI as a rollback target. Thunderbird ships with `xpinstall.signatures.required=false`, so unsigned installs work; a profile hardened to require signatures blocks them.
 
 ### 2. Configure your MCP client
 
@@ -217,10 +221,10 @@ Add to your MCP client config (e.g. `~/.claude.json` for Claude Code):
 The extension serves MCP over HTTP itself (`POST /`: `initialize`, `tools/list`, `tools/call`, notifications), so clients that support HTTP transport can skip the bridge:
 
 ```bash
-claude mcp add --transport http thunderbird http://127.0.0.1:8765/ --header "Authorization: Bearer <token>"
+claude mcp add --transport http thunderbird http://127.0.0.1:8775/ --header "Authorization: Bearer <token>"
 ```
 
-- The port defaults to `8765` (8766-8774 if taken); the token is in `connection.json`, or set a stable token in the settings page so it survives restarts.
+- The port defaults to `8775` (8776-8784 if taken or already served by another listener); the token is in `connection.json`, or set a stable token in the settings page so it survives restarts.
 - Responses are plain JSON; there is no SSE stream and no `Mcp-Session-Id`, both optional in the Streamable HTTP spec.
 - Path attachments are then read by the extension itself, under the same attachment policy as the bridge, and inside the Snap/Flatpak sandbox where applicable (the bridge is what makes host paths work for sandboxed installs).
 - Keep this on localhost. For a client on another machine or container, prefer an SSH tunnel or a TLS proxy bound to loopback over "Listen on all interfaces": that mode is plain HTTP, so the token and mail content cross the network unencrypted.
@@ -230,10 +234,10 @@ claude mcp add --transport http thunderbird http://127.0.0.1:8765/ --header "Aut
 The bridge re-discovers `connection.json` on every cache miss. It tries these locations in order:
 
 1. `THUNDERBIRD_MCP_CONNECTION_FILE`, if set
-2. Native temp dir: `<os.tmpdir()>/thunderbird-mcp/connection.json`
-3. macOS fallback: `/var/folders/*/*/T/thunderbird-mcp/connection.json` owned by the current user
+2. Native temp dir: `<os.tmpdir()>/thunderbird-mcp-hardened/connection.json`
+3. macOS fallback: `/var/folders/*/*/T/thunderbird-mcp-hardened/connection.json` owned by the current user
 4. Linux Snap: Thunderbird's live `TMPDIR` from `/proc/<pid>/environ`, plus the official snap fallback under `~/Downloads/thunderbird.tmp`
-5. Linux Flatpak / Betterbird Flatpak: `$XDG_RUNTIME_DIR/app/<id>/thunderbird-mcp/connection.json` and `~/.var/app/<id>/cache/tmp/thunderbird-mcp/connection.json`
+5. Linux Flatpak / Betterbird Flatpak: `$XDG_RUNTIME_DIR/app/<id>/thunderbird-mcp-hardened/connection.json` and `~/.var/app/<id>/cache/tmp/thunderbird-mcp-hardened/connection.json`
 
 This covers native installs, the official Thunderbird snap, Thunderbird Flatpak, Thunderbird Beta Flatpak, and Betterbird Flatpak without changing the extension side. If multiple sandbox candidates exist at once, the bridge tries the newest file first. Flatpak discovery accepts only these application IDs: `org.mozilla.Thunderbird`, `org.mozilla.thunderbird`, `org.mozilla.thunderbird_esr`, `net.thunderbird.Thunderbird`, and `eu.betterbird.Betterbird`. Set `THUNDERBIRD_MCP_CONNECTION_FILE` to force a single explicit path.
 
@@ -267,15 +271,15 @@ UNC/network and device paths, dotfiles and dot-directories, application-data dir
 
 ## Security
 
-- **Auth tokens**: The HTTP server requires a session-scoped bearer token. Generated on startup, written to `<TmpD>/thunderbird-mcp/connection.json` with 0600 permissions. The bridge re-discovers that file automatically across native installs, Snap, Flatpak, Betterbird Flatpak, and macOS temp directories.
+- **Auth tokens**: The HTTP server requires a session-scoped bearer token. Generated on startup, written to `<TmpD>/thunderbird-mcp-hardened/connection.json` with 0600 permissions on POSIX; on Windows the file inherits the user-private ACL of `%LOCALAPPDATA%\Temp`. The bridge re-discovers that file automatically across native installs, Snap, Flatpak, Betterbird Flatpak, and macOS temp directories.
 - **Stable tokens**: Optional stable tokens persist across restarts. The stored token is cleared on uninstall only while the add-on is enabled (best effort). If you disable the add-on before uninstalling, regenerate the token before using it again.
-- **Dynamic port**: Tries ports 8765-8774, records the actual port in the connection file. No hardcoded port dependency.
+- **Dynamic port**: Tries ports 8775-8784 (upstream uses 8765-8774), skips ports another listener already serves, and records the actual port in the connection file. No hardcoded port dependency.
 - **Account access control**: Restrict which email accounts are visible to MCP clients via the settings page. Changes take effect immediately. A corrupt stored setting is shown as blocked, and saving it unchanged does not lift the restriction.
 - **Calendars and address books under account restrictions**: While any account restriction is active, calendar and address-book tools (listing, lookups by ID, and writes) are blocked unless you enable "Allow all calendars" or "Allow all address books" in the settings page. Both are off by default and grant access to all calendars or all address books respectively. Without an account restriction, calendars and address books behave as before.
 - **Tool access control**: Disable specific tools via the settings page. Disabled tools are hidden from `tools/list` and blocked at dispatch.
 - **Encrypted-message access**: "Allow MCP clients to read encrypted messages" is off by default. It gates full-message bodies, attachments, inline images, raw-source reads, and direct reply/forward; Thunderbird may still decrypt S/MIME locally. Opaque-signed S/MIME messages are also withheld while this setting is off. Clear-signed mail (`multipart/signed` with an OpenPGP or S/MIME detached signature) is not encrypted and stays readable. When Thunderbird hides such a message's signed parts as encrypted, the extension reads it from the stored message instead and never asks Thunderbird to decrypt; the message is withheld if anything inside the signature is encrypted, and a direct forward of it is refused when it has attachments. While it is off, `searchMessages` and `getRecentMessages` return the outer subject without a preview for messages Thunderbird has recorded as OpenPGP-encrypted, searches (including `searchBody`) do not match them, and `displayMessage` refuses encrypted messages. This relies on Thunderbird's recorded OpenPGP status, so a message decrypted without that status being recorded may still show a cached decrypted subject. Thunderbird has no reliable encryption signal on every message header: OpenPGP's `enigmail` property is cached display status, while S/MIME's URI registry only tracks currently displayed decrypted messages. In particular, OpenPGP can [update a protected subject during background processing](https://searchfox.org/comm-central/source/mail/extensions/openpgp/content/modules/mimeDecrypt.sys.mjs#563) without the display callback that records that property; the [S/MIME registry is scoped to the current display](https://searchfox.org/comm-central/source/mailnews/base/public/nsIEncryptedMsgURIsService.idl).
 - **Localhost only**: By default, the server binds to localhost only. The "Listen on all interfaces" option in settings binds to all IPv4 interfaces for WSL, Docker, or remote access. **This exposes the MCP server to every device on your local network.** Only enable on trusted networks. Auth token is always required.
-- **Auto-update integrity**: Auto-update is a code-delivery channel whose integrity depends on continued control of the GitHub repository, the GitHub Actions token, and the `tomaszkasperczyk.name` registration.
+- **No auto-update channel**: The fork deliberately has no update channel (see [Stage 0 decisions](docs/hardening/stage-0.md)); updates are manual.
 
 ---
 
@@ -313,7 +317,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | node mcp-bridge.cjs
 # Test the HTTP API directly.
 # On Snap / Flatpak / Betterbird Flatpak / macOS, point CONN_FILE at the
 # real file or export THUNDERBIRD_MCP_CONNECTION_FILE first.
-CONN_FILE="${THUNDERBIRD_MCP_CONNECTION_FILE:-/tmp/thunderbird-mcp/connection.json}"
+CONN_FILE="${THUNDERBIRD_MCP_CONNECTION_FILE:-/tmp/thunderbird-mcp-hardened/connection.json}"
 TOKEN=$(jq -r .token "$CONN_FILE")
 PORT=$(jq -r .port "$CONN_FILE")
 curl -X POST http://127.0.0.1:$PORT \

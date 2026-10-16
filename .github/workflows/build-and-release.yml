@@ -20,6 +20,10 @@ concurrency:
 
 jobs:
   build-and-release:
+    # The hardened fork never publishes releases or update manifests
+    # automatically (its update channel is deliberately disabled). This job
+    # only runs in the upstream repository.
+    if: github.repository == 'TKasperczyk/thunderbird-mcp'
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release and push the update manifest to gh-pages

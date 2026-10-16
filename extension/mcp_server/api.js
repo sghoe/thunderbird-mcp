@@ -26,13 +26,77 @@ try {
  * - IMAP folder sync (msgDatabase may be stale)
  */
 
+// FORK IDENTITY
+// This hardened fork never shares preferences, resource aliases, runtime
+// files or process-global state with the upstream add-on, so both can be told
+// apart and upstream settings are never silently inherited:
+//   preferences       extensions.thunderbird-mcp-hardened.*
+//   resource alias    resource://thunderbird-mcp-hardened/
+//   runtime directory <TmpD>/thunderbird-mcp-hardened/  (discovery, outgoing/)
+//   export directory  <TmpD>/thunderbird-mcp-hardened-exports/<message>/<file>
+//   process globals   globalThis.__tbMcpHardened*
+// Names are written as literals at each use site because tests evaluate
+// isolated snippets; test/fork-identity.test.cjs keeps every use consistent
+// with the manifest and mcp-bridge.cjs.
+
 const resProto = Cc[
   "@mozilla.org/network/protocol;1?name=resource"
 ].getService(Ci.nsISubstitutingProtocolHandler);
 
-const MCP_DEFAULT_PORT = 8765;
+// Upstream uses 8765-8774. Gecko server sockets allow address reuse, so on
+// Windows a second listener can bind a port that is already in use; a
+// separate range plus the probe below keeps the fork from sharing a port.
+const MCP_DEFAULT_PORT = 8775;
 const MCP_MAX_PORT_ATTEMPTS = 10;
+const MCP_PORT_PROBE_TIMEOUT_MS = 750;
 const CONNECTION_FILE_REFRESH_MS = 30 * 1000;
+
+// BEGIN LOOPBACK PORT PROBE
+/**
+ * Resolves true when something already accepts connections on
+ * 127.0.0.1:port. Binding would otherwise succeed on Windows and two servers
+ * would share the port. A refused or timed-out connection counts as free;
+ * the remaining start-up race between two instances is documented.
+ */
+function isLoopbackPortInUse(port, timeoutMs = MCP_PORT_PROBE_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let transport = null;
+    let input = null;
+    let timer = null;
+    const finish = (inUse) => {
+      if (settled) return;
+      settled = true;
+      try { timer?.cancel(); } catch { /* ignore */ }
+      try { input?.close(); } catch { /* ignore */ }
+      try { transport?.close(0); } catch { /* ignore */ }
+      resolve(inUse);
+    };
+    try {
+      const sts = Cc["@mozilla.org/network/socket-transport-service;1"]
+        .getService(Ci.nsISocketTransportService);
+      transport = sts.createTransport([], "127.0.0.1", port, null, null);
+      transport.setEventSink({
+        onTransportStatus(_transport, status) {
+          if (status === Ci.nsISocketTransport.STATUS_CONNECTED_TO) finish(true);
+        },
+      }, Services.tm.mainThread);
+      input = transport.openInputStream(0, 0, 0).QueryInterface(Ci.nsIAsyncInputStream);
+      input.asyncWait({
+        onInputStreamReady(stream) {
+          // A refused connection surfaces as an exception from available().
+          try { stream.available(); finish(true); } catch { finish(false); }
+        },
+      }, 0, 0, Services.tm.mainThread);
+      timer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
+      timer.initWithCallback({ notify: () => finish(false) }, timeoutMs, Ci.nsITimer.TYPE_ONE_SHOT);
+    } catch (e) {
+      console.warn("thunderbird-mcp: port probe failed; assuming the port is free:", e);
+      finish(false);
+    }
+  });
+}
+// END LOOPBACK PORT PROBE
 
 // Versions of the MCP protocol this server understands. Behavior never depends
 // on the negotiated version inside Thunderbird (the bridge intercepts initialize
@@ -56,13 +120,13 @@ function isListenAllEnabled() {
 
 // BEGIN CONNECTION INFO REFRESH HELPERS
 function stopConnectionInfoRefreshTimer() {
-  if (globalThis.__tbMcpConnectionInfoRefreshTimer) {
+  if (globalThis.__tbMcpHardenedConnectionInfoRefreshTimer) {
     try {
-      globalThis.__tbMcpConnectionInfoRefreshTimer.cancel();
+      globalThis.__tbMcpHardenedConnectionInfoRefreshTimer.cancel();
     } catch (e) {
       console.warn("thunderbird-mcp: failed to stop connection info refresh timer:", e);
     }
-    globalThis.__tbMcpConnectionInfoRefreshTimer = null;
+    globalThis.__tbMcpHardenedConnectionInfoRefreshTimer = null;
   }
 }
 
@@ -707,7 +771,7 @@ function shouldSynthesizePhoneDisplayName(fields) {
 function getExtVersion() {
   if (_cachedExtVersion) return _cachedExtVersion;
   try {
-    const uri = Services.io.newURI("resource://thunderbird-mcp/manifest.json");
+    const uri = Services.io.newURI("resource://thunderbird-mcp-hardened/manifest.json");
     const channel = Services.io.newChannelFromURI(uri, null,
       Services.scriptSecurityManager.getSystemPrincipal(), null,
       Ci.nsILoadInfo.SEC_ALLOW_CROSS_ORIGIN_SEC_CONTEXT_IS_NULL,
@@ -948,7 +1012,11 @@ const SENSITIVE_ATTACHMENT_PATTERNS = [
   /^\/\//,
   // macOS user Library remains denied even when used as a temp directory.
   /^\/users\/[^/]+\/library(\/|$)/,
-  /\/thunderbird-mcp\/(?:[^/]+\/)?connection\.json$/,
+  // The fork's runtime directory (discovery file, outbound staging) is never
+  // an attachment source. Connection files of this fork and of upstream are
+  // blocked wherever such a directory appears.
+  /\/thunderbird-mcp-hardened(\/|$)/,
+  /\/thunderbird-mcp[^/]*\/(?:[^/]+\/)?connection\.json$/,
   // Credential names also occur outside the usual profile directories.
   /(^|\/)id_[^/]+$/,
   /(^|\/)private[-_ ]?keys?(\.[^/]+)?$/,
@@ -1002,11 +1070,10 @@ function getAttachmentExportPathInfo(attachmentPath, exportRoots = [], windows =
   // Backslashes are literal filename characters on POSIX, not separators.
   const nativePath = windows ? attachmentPath.replace(/\\/g, '/') : attachmentPath;
   if (nativePath.startsWith('//') || nativePath.split('/').some(part => part === '.' || part === '..')) return null;
-  // getMessage exports exactly one sanitized message-id directory and one file.
-  // The sibling "attachments" directory is outbound inline staging, not exports.
-  const match = /^(.*\/thunderbird-mcp)\/([a-zA-Z0-9_]+)\/([^/]+)$/.exec(nativePath);
-  if (!match || match[2].toLowerCase() === 'attachments' ||
-      match[3].startsWith('.') || match[3].toLowerCase() === 'connection.json') return null;
+  // getMessage exports exactly one sanitized message-id directory and one
+  // file below the dedicated export directory.
+  const match = /^(.*\/thunderbird-mcp-hardened-exports)\/([a-zA-Z0-9_]+)\/([^/]+)$/.exec(nativePath);
+  if (!match || match[3].startsWith('.') || match[3].toLowerCase() === 'connection.json') return null;
   const roots = typeof exportRoots === 'function' ? exportRoots() : exportRoots;
   const root = roots.find(candidate => {
     const nativeRoot = (windows ? candidate.replace(/\\/g, '/') : candidate).replace(/\/$/, '');
@@ -1026,13 +1093,13 @@ function isWindowsReservedName(part) {
 }
 
 // Number of leading components that are the trusted temp directory, which
-// Windows may report in short form. Export roots are <temp>/thunderbird-mcp.
+// Windows may report in short form. Export roots are <temp>/thunderbird-mcp-hardened-exports.
 function getWindowsTempPrefixLength(parts, exportRoots) {
   const roots = typeof exportRoots === 'function' ? exportRoots() : exportRoots;
   let prefixLength = 0;
   for (const root of roots) {
     const rootParts = root.replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '').split('/');
-    if (rootParts.pop() !== 'thunderbird-mcp') continue;
+    if (rootParts.pop() !== 'thunderbird-mcp-hardened-exports') continue;
     if (rootParts.length > prefixLength && rootParts.length <= parts.length &&
         rootParts.every((part, index) => part === parts[index])) prefixLength = rootParts.length;
   }
@@ -1063,15 +1130,15 @@ function isSensitiveFilePath(attachmentPath, { windows = false, exportRoots = []
 // END SENSITIVE ATTACHMENT PATH HELPERS
 let _tempFileCounter = 0;
 const DEFAULT_MAX_RESULTS = 50;
-const PREF_ALLOWED_ACCOUNTS = "extensions.thunderbird-mcp.allowedAccounts";
-const PREF_DISABLED_TOOLS = "extensions.thunderbird-mcp.disabledTools";
-const PREF_BLOCK_SKIPREVIEW = "extensions.thunderbird-mcp.blockSkipReview";
-const PREF_STABLE_AUTH_TOKEN = "extensions.thunderbird-mcp.stableAuthToken";
-const PREF_GET_MESSAGES_LIMIT = "extensions.thunderbird-mcp.getMessagesLimit";
-const PREF_LISTEN_ALL = "extensions.thunderbird-mcp.listenAll";
-const PREF_ALLOW_ENCRYPTED_MESSAGES = "extensions.thunderbird-mcp.allowEncryptedMessages";
-const PREF_ALLOW_ALL_CALENDARS = "extensions.thunderbird-mcp.allowAllCalendars";
-const PREF_ALLOW_ALL_ADDRESS_BOOKS = "extensions.thunderbird-mcp.allowAllAddressBooks";
+const PREF_ALLOWED_ACCOUNTS = "extensions.thunderbird-mcp-hardened.allowedAccounts";
+const PREF_DISABLED_TOOLS = "extensions.thunderbird-mcp-hardened.disabledTools";
+const PREF_BLOCK_SKIPREVIEW = "extensions.thunderbird-mcp-hardened.blockSkipReview";
+const PREF_STABLE_AUTH_TOKEN = "extensions.thunderbird-mcp-hardened.stableAuthToken";
+const PREF_GET_MESSAGES_LIMIT = "extensions.thunderbird-mcp-hardened.getMessagesLimit";
+const PREF_LISTEN_ALL = "extensions.thunderbird-mcp-hardened.listenAll";
+const PREF_ALLOW_ENCRYPTED_MESSAGES = "extensions.thunderbird-mcp-hardened.allowEncryptedMessages";
+const PREF_ALLOW_ALL_CALENDARS = "extensions.thunderbird-mcp-hardened.allowAllCalendars";
+const PREF_ALLOW_ALL_ADDRESS_BOOKS = "extensions.thunderbird-mcp-hardened.allowAllAddressBooks";
 const AUTH_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
 // Valid group and CRUD values for tool metadata validation
 const VALID_GROUPS = ["messages", "folders", "contacts", "calendar", "filters", "system"];
@@ -1097,7 +1164,7 @@ const INTERNAL_KEYWORDS = new Set([
 
 
 // BEGIN FILTER SEARCH TERM HELPERS
-const PREF_ALLOW_FILTER_SEND_ACTIONS = "extensions.thunderbird-mcp.allowFilterSendActions";
+const PREF_ALLOW_FILTER_SEND_ACTIONS = "extensions.thunderbird-mcp-hardened.allowFilterSendActions";
 const FILTER_SEND_OPTION = '"Allow automatic Forward/Reply filter actions" in Thunderbird MCP Options';
 
 function isFilterSendAllowed() {
@@ -1927,7 +1994,7 @@ function sanitizeToolResultText(value, key = "") {
 var mcpServer = class extends ExtensionCommon.ExtensionAPI {
   getAPI(context) {
     const extensionRoot = context.extension.rootURI;
-    const resourceName = "thunderbird-mcp";
+    const resourceName = "thunderbird-mcp-hardened";
 
     // BEGIN UNINSTALL LISTENER REGISTRATION
     if (!this._uninstallListener) {
@@ -1954,10 +2021,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
     }
     // END UNINSTALL LISTENER REGISTRATION
 
+    // No ALLOW_CONTENT_ACCESS: only privileged code loads these resources;
+    // web content must not be able to read extension files through the alias.
     resProto.setSubstitutionWithFlags(
       resourceName,
       extensionRoot,
-      resProto.ALLOW_CONTENT_ACCESS
+      0
     );
 
     function normalizeGetMessagesLimit(value) {
@@ -2915,7 +2984,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
     function readConnectionInfo() {
       const tmpDir = Services.dirsvc.get("TmpD", Ci.nsIFile);
-      tmpDir.append("thunderbird-mcp");
+      tmpDir.append("thunderbird-mcp-hardened");
       const connFile = tmpDir.clone();
       connFile.append("connection.json");
       if (!connFile.exists()) {
@@ -2938,7 +3007,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
     function removeConnectionInfo() {
       try {
         const tmpDir = Services.dirsvc.get("TmpD", Ci.nsIFile);
-        tmpDir.append("thunderbird-mcp");
+        tmpDir.append("thunderbird-mcp-hardened");
         const connFile = tmpDir.clone();
         connFile.append("connection.json");
         if (connFile.exists()) {
@@ -2954,20 +3023,20 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
         // BEGIN SERVER LIFECYCLE
         start: async function() {
           // Guard against double-start on extension reload (port conflict)
-          if (globalThis.__tbMcpStartPromise) {
-            return await globalThis.__tbMcpStartPromise;
+          if (globalThis.__tbMcpHardenedStartPromise) {
+            return await globalThis.__tbMcpHardenedStartPromise;
           }
           const startPromise = (async () => {
           let startedServer = null;
           try {
             // Stop any previously running server (e.g. extension reload)
-            if (globalThis.__tbMcpServer) {
-              try { globalThis.__tbMcpServer.stop(() => {}); } catch { /* ignore */ }
-              globalThis.__tbMcpServer = null;
+            if (globalThis.__tbMcpHardenedServer) {
+              try { globalThis.__tbMcpHardenedServer.stop(() => {}); } catch { /* ignore */ }
+              globalThis.__tbMcpHardenedServer = null;
               stopConnectionInfoRefreshTimer();
             }
             const { HttpServer } = ChromeUtils.importESModule(
-              "resource://thunderbird-mcp/httpd.sys.mjs?" + Date.now()
+              "resource://thunderbird-mcp-hardened/httpd.sys.mjs?" + Date.now()
             );
             const { NetUtil } = ChromeUtils.importESModule(
               "resource://gre/modules/NetUtil.sys.mjs"
@@ -3224,7 +3293,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
              */
             function writeConnectionInfo(port, token) {
               const tmpDir = Services.dirsvc.get("TmpD", Ci.nsIFile);
-              tmpDir.append("thunderbird-mcp");
+              tmpDir.append("thunderbird-mcp-hardened");
               if (!tmpDir.exists()) {
                 tmpDir.create(Ci.nsIFile.DIRECTORY_TYPE, 0o700);
               } else if (tmpDir.isSymlink()) {
@@ -3292,7 +3361,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               stopConnectionInfoRefreshTimer();
               const timer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
               // Track it before initialization so failed startup can cancel it.
-              globalThis.__tbMcpConnectionInfoRefreshTimer = timer;
+              globalThis.__tbMcpHardenedConnectionInfoRefreshTimer = timer;
               timer.initWithCallback(() => {
                 try {
                   ensureConnectionInfo(port, token);
@@ -3701,8 +3770,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                           canonicalExportRoot = root.clone();
                           // Trust TmpD's canonical location, not symlinks below it.
                           canonicalExportRoot.normalize();
-                          root.append("thunderbird-mcp");
-                          canonicalExportRoot.append("thunderbird-mcp");
+                          root.append("thunderbird-mcp-hardened-exports");
+                          canonicalExportRoot.append("thunderbird-mcp-hardened-exports");
                           exportRoots = [root.path, canonicalExportRoot.path];
                         }
                         return exportRoots;
@@ -3859,8 +3928,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                       continue;
                     }
                     const tmpDir = Services.dirsvc.get("TmpD", Ci.nsIFile);
-                    tmpDir.append("thunderbird-mcp");
-                    tmpDir.append("attachments");
+                    tmpDir.append("thunderbird-mcp-hardened");
+                    tmpDir.append("outgoing");
                     if (!tmpDir.exists()) {
                       tmpDir.create(Ci.nsIFile.DIRECTORY_TYPE, 0o700);
                     }
@@ -9063,7 +9132,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                     // BEGIN ATTACHMENT EXPORT DIRECTORY
                     function ensureAttachmentDir(sanitizedId) {
                       const root = Services.dirsvc.get("TmpD", Ci.nsIFile);
-                      root.append("thunderbird-mcp");
+                      root.append("thunderbird-mcp-hardened-exports");
                       try {
                         root.create(Ci.nsIFile.DIRECTORY_TYPE, 0o700);
                       } catch (e) {
@@ -11611,12 +11680,16 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
             // END MCP HTTP HANDLER
 
-            // Try the default port first, then fall back to nearby ports
+            // Try the default port first, then fall back to nearby ports.
+            // Skip ports another listener already serves (see probe above).
             let boundPort = null;
             const listenAll = isListenAllEnabled();
             for (let attempt = 0; attempt < MCP_MAX_PORT_ATTEMPTS; attempt++) {
               const tryPort = MCP_DEFAULT_PORT + attempt;
               try {
+                if (await isLoopbackPortInUse(tryPort)) {
+                  throw new Error(`port ${tryPort} already accepts connections`);
+                }
                 if (listenAll) {
                   server.startAll(tryPort);
                 } else {
@@ -11645,7 +11718,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               console.error(`thunderbird-mcp: WARNING - server is listening on all interfaces (0.0.0.0/[::]). This exposes the MCP server to your local network. Only enable on trusted networks.`);
             }
             // Publish running state only after startup has fully succeeded.
-            globalThis.__tbMcpServer = server;
+            globalThis.__tbMcpHardenedServer = server;
             return { success: true, port: boundPort };
           } catch (e) {
             console.error("Failed to start MCP server:", e);
@@ -11662,25 +11735,25 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
           }
           })();
           // Set sentinel BEFORE awaiting to prevent race with concurrent start() calls
-          globalThis.__tbMcpStartPromise = startPromise;
+          globalThis.__tbMcpHardenedStartPromise = startPromise;
           let result;
           try {
             result = await startPromise;
-            if (globalThis.__tbMcpStartPromise === startPromise) {
-              globalThis.__tbMcpLastStartError = result.success ? null : result.error;
+            if (globalThis.__tbMcpHardenedStartPromise === startPromise) {
+              globalThis.__tbMcpHardenedLastStartError = result.success ? null : result.error;
             }
             return result;
           } catch (e) {
-            if (globalThis.__tbMcpStartPromise === startPromise) {
-              globalThis.__tbMcpLastStartError = String(e);
+            if (globalThis.__tbMcpHardenedStartPromise === startPromise) {
+              globalThis.__tbMcpHardenedLastStartError = String(e);
             }
             throw e;
           } finally {
             // The IIFE can fail synchronously before the assignment above.
             // Evict failures/rejections after settlement without clearing a
             // newer attempt installed by a restart or extension reload.
-            if (!result?.success && globalThis.__tbMcpStartPromise === startPromise) {
-              globalThis.__tbMcpStartPromise = null;
+            if (!result?.success && globalThis.__tbMcpHardenedStartPromise === startPromise) {
+              globalThis.__tbMcpHardenedStartPromise = null;
             }
           }
         },
@@ -11693,7 +11766,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
           // Read build info from bundled file via resource: protocol
           try {
-            const uri = Services.io.newURI("resource://thunderbird-mcp/buildinfo.json");
+            const uri = Services.io.newURI("resource://thunderbird-mcp-hardened/buildinfo.json");
             const channel = Services.io.newChannelFromURI(uri, null,
               Services.scriptSecurityManager.getSystemPrincipal(), null,
               Ci.nsILoadInfo.SEC_ALLOW_CROSS_ORIGIN_SEC_CONTEXT_IS_NULL,
@@ -11728,8 +11801,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
           }
 
           return {
-            running: !!globalThis.__tbMcpServer,
-            lastError: globalThis.__tbMcpLastStartError || null,
+            running: !!globalThis.__tbMcpHardenedServer,
+            lastError: globalThis.__tbMcpHardenedLastStartError || null,
             port,
             connectionFile,
             buildVersion,
@@ -11988,7 +12061,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
           }
           // Serialize settings changes through the entire restart, including
           // failure cleanup, so another setter cannot bypass a pending stop.
-          const previousRestart = globalThis.__tbMcpRestartPromise;
+          const previousRestart = globalThis.__tbMcpHardenedRestartPromise;
           const restartPromise = (async () => {
             try { await previousRestart; } catch { /* previous restart failed */ }
             console.log(`[MCP] setListenAll called with: ${listenAll}`);
@@ -11996,12 +12069,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             // newer attempt another caller installs while we are waiting.
             let startPromise;
             do {
-              startPromise = globalThis.__tbMcpStartPromise;
+              startPromise = globalThis.__tbMcpHardenedStartPromise;
               if (startPromise) {
                 try { await startPromise; } catch { /* startup failed */ }
               }
-            } while (globalThis.__tbMcpStartPromise &&
-                     globalThis.__tbMcpStartPromise !== startPromise);
+            } while (globalThis.__tbMcpHardenedStartPromise &&
+                     globalThis.__tbMcpHardenedStartPromise !== startPromise);
             if (listenAll) {
               Services.prefs.setBoolPref(PREF_LISTEN_ALL, true);
             } else {
@@ -12011,9 +12084,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             // Remove stale info before yielding so this stop cannot remove a
             // newer attempt's connection file.
             removeConnectionInfo();
-            if (globalThis.__tbMcpServer) {
-              const stopServer = globalThis.__tbMcpServer;
-              globalThis.__tbMcpServer = null;
+            if (globalThis.__tbMcpHardenedServer) {
+              const stopServer = globalThis.__tbMcpHardenedServer;
+              globalThis.__tbMcpHardenedServer = null;
               stopConnectionInfoRefreshTimer();
               // Wait for the socket close callback before rebinding the port.
               try {
@@ -12023,19 +12096,19 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               } catch { /* ignore */ }
             }
             // Only release the startup attempt this operation waited for.
-            if (globalThis.__tbMcpStartPromise === startPromise) {
-              globalThis.__tbMcpStartPromise = null;
+            if (globalThis.__tbMcpHardenedStartPromise === startPromise) {
+              globalThis.__tbMcpHardenedStartPromise = null;
             }
 
             console.log(`[MCP] Restarting server...`);
             return await this.start();
           })();
-          globalThis.__tbMcpRestartPromise = restartPromise;
+          globalThis.__tbMcpHardenedRestartPromise = restartPromise;
           try {
             return await restartPromise;
           } finally {
-            if (globalThis.__tbMcpRestartPromise === restartPromise) {
-              globalThis.__tbMcpRestartPromise = null;
+            if (globalThis.__tbMcpHardenedRestartPromise === restartPromise) {
+              globalThis.__tbMcpHardenedRestartPromise = null;
             }
           }
         },
@@ -12053,19 +12126,19 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
     }
     // END UNINSTALL LISTENER REMOVAL
     // Stop the HTTP server so the port is released
-    if (globalThis.__tbMcpServer) {
-      try { globalThis.__tbMcpServer.stop(() => {}); } catch { /* ignore */ }
-      globalThis.__tbMcpServer = null;
+    if (globalThis.__tbMcpHardenedServer) {
+      try { globalThis.__tbMcpHardenedServer.stop(() => {}); } catch { /* ignore */ }
+      globalThis.__tbMcpHardenedServer = null;
     }
     stopConnectionInfoRefreshTimer();
     // Clear the start promise so a fresh start can occur on reload
-    globalThis.__tbMcpStartPromise = null;
+    globalThis.__tbMcpHardenedStartPromise = null;
 
     // Always clean up the connection info file so stale tokens don't linger
     // (Inlined because getAPI() helpers are not in scope in onShutdown().)
     try {
       const tmpDir = Services.dirsvc.get("TmpD", Ci.nsIFile);
-      tmpDir.append("thunderbird-mcp");
+      tmpDir.append("thunderbird-mcp-hardened");
       const connFile = tmpDir.clone();
       connFile.append("connection.json");
       if (connFile.exists()) {
@@ -12086,7 +12159,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
     }
     _tempAttachFiles.clear();
     if (isAppShutdown) return;
-    resProto.setSubstitution("thunderbird-mcp", null);
+    resProto.setSubstitution("thunderbird-mcp-hardened", null);
     Services.obs.notifyObservers(null, "startupcache-invalidate");
   }
 };

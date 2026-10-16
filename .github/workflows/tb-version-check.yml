@@ -177,7 +177,8 @@ jobs:
 
           profile_dir="$(mktemp -d)" || fail_infra "failed to create test profile"
           mkdir -p "$profile_dir/extensions" || fail_infra "failed to create extension profile directory"
-          cp dist/thunderbird-mcp.xpi "$profile_dir/extensions/thunderbird-mcp@tkasperczyk.dev.xpi" \
+          addon_id="$(node -p "require('./extension/manifest.json').browser_specific_settings.gecko.id")" || fail_infra "failed to read add-on ID"
+          cp dist/thunderbird-mcp.xpi "$profile_dir/extensions/${addon_id}.xpi" \
             || fail_infra "failed to install XPI into test profile"
           cat > "$profile_dir/user.js" <<'PREFS'
           user_pref("extensions.experiments.enabled", true);
@@ -194,7 +195,7 @@ jobs:
           read_addon_state() {
             EXT_JSON="$ext_json" node <<'NODE'
           const fs = require('fs');
-          const addonId = 'thunderbird-mcp@tkasperczyk.dev';
+          const addonId = require(process.env.GITHUB_WORKSPACE + '/extension/manifest.json').browser_specific_settings.gecko.id;
 
           function done(result) {
             process.stdout.write(JSON.stringify(result));

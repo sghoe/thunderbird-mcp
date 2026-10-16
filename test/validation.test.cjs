@@ -1577,13 +1577,13 @@ describe('Attachment policy parity', () => {
   });
 
   it('accepts a short-form temp directory prefix but no short names below it in both runtimes', () => {
-    const policy = { windows: true, exportRoots: [WINDOWS_SHORT_TEMP + '\\thunderbird-mcp'] };
-    const exported = WINDOWS_SHORT_TEMP + '\\thunderbird-mcp\\message_1\\report.pdf';
+    const policy = { windows: true, exportRoots: [WINDOWS_SHORT_TEMP + '\\thunderbird-mcp-hardened-exports'] };
+    const exported = WINDOWS_SHORT_TEMP + '\\thunderbird-mcp-hardened-exports\\message_1\\report.pdf';
     for (const check of [isSensitiveFilePath, bridge.isSensitiveFilePath]) {
       assert.equal(check(exported, policy), false);
       assert.equal(check(exported.toLowerCase().replace(/\\/g, '/'), policy), false);
       for (const file of [
-        WINDOWS_SHORT_TEMP + '\\thunderbird-mcp\\message_1\\REPORT~1.PDF',
+        WINDOWS_SHORT_TEMP + '\\thunderbird-mcp-hardened-exports\\message_1\\REPORT~1.PDF',
         WINDOWS_SHORT_TEMP + '\\THUNDE~1\\message_1\\report.pdf',
         'C:\\Users\\ALICE~1\\Documents\\report.pdf',
         'C:\\Users\\ALICE~1\\AppData\\Local\\Temp2\\report.pdf',
@@ -1784,20 +1784,21 @@ describe('Outbound attachment failures are atomic', () => {
       const { descs } = runtime.filePathsToAttachDescs([exported.path]);
       assert.equal(descs.length, 1);
       assert.equal(descs[0].url, 'file://' + exported.path);
-      const base = tmpDir + '/thunderbird-mcp';
+      const base = tmpDir + '/thunderbird-mcp-hardened-exports';
       for (const file of [
-        base + '/connection.json', base + '/other.txt', base + '/attachments/report.pdf',
+        base + '/connection.json', base + '/other.txt',
+        tmpDir + '/thunderbird-mcp-hardened/outgoing/report.pdf', tmpDir + '/thunderbird-mcp-hardened/connection.json',
         base + '/message_1/secret.pem', base + '/message_1/.env', base + '/message_1/key4.db',
         base + '/message_1/connection.json', base + '/message_1/../connection.json',
         base + '/message_1/../message_1/report.pdf', base + '/message_1/../../report.pdf',
-        tmpDir + '/other-app/thunderbird-mcp/message_1/report.pdf',
+        tmpDir + '/other-app/thunderbird-mcp-hardened-exports/message_1/report.pdf',
       ]) {
         assert.throws(() => runtime.filePathsToAttachDescs([file]), /sensitive path blocked/, file);
       }
     });
 
     it(`rejects normalized symlink redirects both into and out of ${os} exports`, () => {
-      const exported = tmpDir + '/thunderbird-mcp/message_1/report.pdf';
+      const exported = tmpDir + '/thunderbird-mcp-hardened-exports/message_1/report.pdf';
       const outside = os === 'WINNT' ? 'C:/Users/user/Documents/report.pdf' : '/home/user/Documents/report.pdf';
       for (const [original, target] of [[exported, outside], [outside, exported]]) {
         const { runtime } = makeOutboundMailRuntime({ os, tmpDir, files: new Map([
@@ -1820,7 +1821,7 @@ describe('Outbound attachment failures are atomic', () => {
     it(`rejects crafted backslash filenames outside the ${os} export subtree`, () => {
       const tmpDir = '/home/user/.var/app/net.thunderbird.Thunderbird/cache/tmp';
       const { runtime, state } = makeOutboundMailRuntime({ os, tmpDir });
-      for (const suffix of ['thunderbird-mcp\\message_1\\auth.json', 'thunderbird-mcp\\message_1/auth.json']) {
+      for (const suffix of ['thunderbird-mcp-hardened-exports\\message_1\\auth.json', 'thunderbird-mcp-hardened-exports\\message_1/auth.json']) {
         assert.throws(() => runtime.filePathsToAttachDescs([tmpDir + '/' + suffix]), /sensitive path blocked/);
       }
       assert.equal(state.fileCalls, 0);
@@ -1832,11 +1833,11 @@ describe('Outbound attachment failures are atomic', () => {
       const { runtime } = makeOutboundMailRuntime({ os, tmpDir, realTmpDir });
       const exported = runtime.ensureAttachmentDir('message_1');
       exported.append('report.pdf');
-      const expected = realTmpDir + '/thunderbird-mcp/message_1/report.pdf';
+      const expected = realTmpDir + '/thunderbird-mcp-hardened-exports/message_1/report.pdf';
       assert.equal(runtime.filePathsToAttachDescs([exported.path]).descs[0].url, 'file://' + expected);
       assert.equal(runtime.filePathsToAttachDescs([expected]).descs[0].url, 'file://' + expected);
       for (const target of [
-        realTmpDir + '/thunderbird-mcp/message_2/report.pdf',
+        realTmpDir + '/thunderbird-mcp-hardened-exports/message_2/report.pdf',
         realTmpDir + '/elsewhere/message_1/report.pdf',
       ]) {
         const redirected = makeOutboundMailRuntime({ os, tmpDir, realTmpDir, files: new Map([
@@ -1894,13 +1895,13 @@ describe('Outbound attachment failures are atomic', () => {
   it('accepts Windows exports below a short-form TmpD', () => {
     const tmpDir = WINDOWS_SHORT_TEMP.replace(/\\/g, '/');
     const { runtime } = makeOutboundMailRuntime({ os: 'WINNT', tmpDir });
-    assert.equal(runtime.filePathsToAttachDescs([tmpDir + '/thunderbird-mcp/message_1/report.pdf']).descs.length, 1);
-    assert.throws(() => runtime.filePathsToAttachDescs([tmpDir + '/thunderbird-mcp/message_1/REPORT~1.PDF']), /sensitive path blocked/);
+    assert.equal(runtime.filePathsToAttachDescs([tmpDir + '/thunderbird-mcp-hardened-exports/message_1/report.pdf']).descs.length, 1);
+    assert.throws(() => runtime.filePathsToAttachDescs([tmpDir + '/thunderbird-mcp-hardened-exports/message_1/REPORT~1.PDF']), /sensitive path blocked/);
   });
 
   it('allows Windows exports through ordinary AppData ancestors but refuses redirected ones', () => {
     const tmpDir = 'C:/Users/user/AppData/Local/Temp';
-    const file = tmpDir + '/thunderbird-mcp/message_1/report.pdf';
+    const file = tmpDir + '/thunderbird-mcp-hardened-exports/message_1/report.pdf';
     for (const redirected of [false, true]) {
       const appData = makeMockLocalFile('C:/Users/user/AppData', redirected ? { target: 'C:/Elsewhere' } : {});
       const { runtime } = makeOutboundMailRuntime({ os: 'WINNT', tmpDir, files: new Map([

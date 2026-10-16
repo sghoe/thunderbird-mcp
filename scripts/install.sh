@@ -333,9 +333,11 @@ echo "Installing to profile: $PROFILE_DIR"
 # Create extensions directory if needed
 mkdir -p "$EXTENSIONS_DIR"
 
-# Copy extension
-echo "Warning: Re-running install.sh overwrites the AddonManager-managed file and can downgrade an auto-updated build; to bootstrap once, use Tools > Add-ons > Install from File, then let auto-update handle the rest."
-cp "$XPI_FILE" "$EXTENSIONS_DIR/thunderbird-mcp@tkasperczyk.dev.xpi"
+# Copy extension under the add-on ID from the manifest (the hardened fork has
+# its own ID and no automatic update channel).
+ADDON_ID=$(node -p "require('$PROJECT_DIR/extension/manifest.json').browser_specific_settings.gecko.id")
+echo "Warning: Re-running install.sh overwrites the AddonManager-managed file and can downgrade an installed build."
+cp "$XPI_FILE" "$EXTENSIONS_DIR/$ADDON_ID.xpi"
 
 echo "Installed! Restart Thunderbird to activate."
 echo ""

@@ -1682,8 +1682,8 @@ describe("filter sending preference methods", () => {
     assert.equal((await second.setAllowFilterSendActions(false)).success, true);
     assert.equal((await first.getAllowFilterSendActions()).allowFilterSendActions, false);
     assert.deepEqual(writes, [
-      ["extensions.thunderbird-mcp.allowFilterSendActions", true],
-      ["extensions.thunderbird-mcp.allowFilterSendActions", false],
+      ["extensions.thunderbird-mcp-hardened.allowFilterSendActions", true],
+      ["extensions.thunderbird-mcp-hardened.allowFilterSendActions", false],
     ]);
   });
 
@@ -1719,7 +1719,7 @@ describe("filter sending requires an explicit preference", () => {
           assert.equal(h.filterList.filterCount, 0);
           assert.equal(h.filterList.saveAttempts, 0);
           assert.ok(h.prefReads.length > 0);
-          assert.ok(h.prefReads.every((pref) => pref === "extensions.thunderbird-mcp.allowFilterSendActions"));
+          assert.ok(h.prefReads.every((pref) => pref === "extensions.thunderbird-mcp-hardened.allowFilterSendActions"));
         }
       }
     });

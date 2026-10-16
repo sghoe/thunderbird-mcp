@@ -69,7 +69,7 @@ function makeTestOptions(root, overrides = {}) {
 // Connection file path for a discovery layout; 'pin' also sets the override.
 function prepareConnectionLayout(layout, options, root) {
   switch (layout) {
-    case 'native': return path.join(root, 'tmp', 'thunderbird-mcp', 'connection.json');
+    case 'native': return path.join(root, 'tmp', 'thunderbird-mcp-hardened', 'connection.json');
     case 'pin': {
       const file = path.join(root, 'pinned.json');
       options.env.THUNDERBIRD_MCP_CONNECTION_FILE = file;
@@ -78,10 +78,10 @@ function prepareConnectionLayout(layout, options, root) {
     case 'snap':
       fs.mkdirSync(options.procRoot, { recursive: true });
       fs.mkdirSync(path.join(options.homeDir, 'snap', 'thunderbird'), { recursive: true });
-      return path.join(options.homeDir, 'Downloads', 'thunderbird.tmp', 'thunderbird-mcp', 'connection.json');
-    case 'flatpak-runtime': return path.join(options.runtimeDir, 'app', 'org.mozilla.thunderbird', 'thunderbird-mcp', 'connection.json');
-    case 'flatpak-cache': return path.join(options.homeDir, '.var', 'app', 'net.thunderbird.Thunderbird', 'cache', 'tmp', 'thunderbird-mcp', 'connection.json');
-    case 'macOS': return path.join(options.darwinFoldersRoot, 'aa', 'bb', 'T', 'thunderbird-mcp', 'connection.json');
+      return path.join(options.homeDir, 'Downloads', 'thunderbird.tmp', 'thunderbird-mcp-hardened', 'connection.json');
+    case 'flatpak-runtime': return path.join(options.runtimeDir, 'app', 'org.mozilla.thunderbird', 'thunderbird-mcp-hardened', 'connection.json');
+    case 'flatpak-cache': return path.join(options.homeDir, '.var', 'app', 'net.thunderbird.Thunderbird', 'cache', 'tmp', 'thunderbird-mcp-hardened', 'connection.json');
+    case 'macOS': return path.join(options.darwinFoldersRoot, 'aa', 'bb', 'T', 'thunderbird-mcp-hardened', 'connection.json');
   }
   throw new Error(`unknown layout: ${layout}`);
 }
@@ -359,7 +359,7 @@ describe('Bridge attachment path policy', () => {
     const tmpDir = path.join(root, '.temporary');
     fs.mkdirSync(tmpDir);
     const options = makeTestOptions(root, { osImpl: { tmpdir: () => tmpDir } });
-    for (const name of ['thunderbird-mcp\\message_1\\auth.json', 'thunderbird-mcp\\message_1/auth.json']) {
+    for (const name of ['thunderbird-mcp-hardened-exports\\message_1\\auth.json', 'thunderbird-mcp-hardened-exports\\message_1/auth.json']) {
       const file = path.join(tmpDir, name);
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, 'not an exported attachment');
@@ -371,7 +371,7 @@ describe('Bridge attachment path policy', () => {
     it(`accepts ${platform} exports below a symlinked temp ancestor but rejects redirects below TmpD`, { skip: process.platform === 'win32' }, async () => {
       const canonicalTmp = path.join(root, 'private', 'var', 'folders', '.temporary');
       const lexicalTmp = path.join(root, 'var', 'folders', '.temporary');
-      const exportDir = path.join(canonicalTmp, 'thunderbird-mcp');
+      const exportDir = path.join(canonicalTmp, 'thunderbird-mcp-hardened-exports');
       fs.mkdirSync(path.join(exportDir, 'message_1'), { recursive: true });
       fs.symlinkSync(path.join(root, 'private', 'var'), path.join(root, 'var'), 'dir');
       fs.writeFileSync(path.join(exportDir, 'message_1', 'report.pdf'), 'exported attachment');
@@ -383,17 +383,17 @@ describe('Bridge attachment path policy', () => {
           : fs.realpathSync(path.join(exportDir, 'message_1', 'report.pdf')),
       };
       for (const tmp of [lexicalTmp, canonicalTmp]) {
-        const args = { attachments: [path.join(tmp, 'thunderbird-mcp', 'message_1', 'report.pdf')] };
+        const args = { attachments: [path.join(tmp, 'thunderbird-mcp-hardened-exports', 'message_1', 'report.pdf')] };
         await inlineAttachmentPaths(args, options);
         assert.equal(args.attachments[0].base64, Buffer.from('exported attachment').toString('base64'));
       }
       // A symlink within the export subtree is different from a trusted root alias.
       fs.symlinkSync(path.join(exportDir, 'message_1'), path.join(exportDir, 'message_2'), 'dir');
-      await assert.rejects(inlineAttachmentPaths({ attachments: [path.join(lexicalTmp, 'thunderbird-mcp/message_2/report.pdf')] }, options), /export path is redirected/);
+      await assert.rejects(inlineAttachmentPaths({ attachments: [path.join(lexicalTmp, 'thunderbird-mcp-hardened-exports/message_2/report.pdf')] }, options), /export path is redirected/);
       const elsewhere = path.join(canonicalTmp, 'elsewhere');
       fs.renameSync(exportDir, elsewhere);
       fs.symlinkSync(elsewhere, exportDir, 'dir');
-      await assert.rejects(inlineAttachmentPaths({ attachments: [path.join(lexicalTmp, 'thunderbird-mcp/message_1/report.pdf')] }, options), /Sensitive attachment path blocked|export path is redirected/);
+      await assert.rejects(inlineAttachmentPaths({ attachments: [path.join(lexicalTmp, 'thunderbird-mcp-hardened-exports/message_1/report.pdf')] }, options), /Sensitive attachment path blocked|export path is redirected/);
     });
   }
 
@@ -409,7 +409,7 @@ describe('Bridge attachment path policy', () => {
       const options = makeTestOptions(root);
       const parent = path.join(root, 'Documents');
       const denied = destination === 'denied-directory' ? path.join(root, '.secrets')
-        : path.join(options.homeDir, '.var/app/net.thunderbird.Thunderbird/cache/tmp/thunderbird-mcp/message_1');
+        : path.join(options.homeDir, '.var/app/net.thunderbird.Thunderbird/cache/tmp/thunderbird-mcp-hardened-exports/message_1');
       fs.mkdirSync(path.dirname(denied), { recursive: true });
       const file = path.join(parent, 'report.txt');
       fs.mkdirSync(parent);
@@ -481,9 +481,9 @@ describe('Bridge attachment path policy', () => {
         platform: layout === 'windows-temp' ? 'win32' : 'linux',
         osImpl: { tmpdir: () => tmpDir },
       });
-      const exportRoot = layout === 'windows-temp' ? path.join(tmpDir, 'thunderbird-mcp')
-        : layout === 'flatpak-cache' ? path.join(options.homeDir, '.var/app/net.thunderbird.Thunderbird/cache/tmp/thunderbird-mcp')
-          : path.join(options.runtimeDir, 'app/net.thunderbird.Thunderbird/thunderbird-mcp');
+      const exportRoot = layout === 'windows-temp' ? path.join(tmpDir, 'thunderbird-mcp-hardened-exports')
+        : layout === 'flatpak-cache' ? path.join(options.homeDir, '.var/app/net.thunderbird.Thunderbird/cache/tmp/thunderbird-mcp-hardened-exports')
+          : path.join(options.runtimeDir, 'app/net.thunderbird.Thunderbird/thunderbird-mcp-hardened-exports');
       const file = path.join(exportRoot, 'message_1', 'report.pdf');
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, 'exported attachment');
@@ -501,7 +501,7 @@ describe('Bridge attachment path policy', () => {
         path.join(exportRoot, 'message_1') + '/../message_1/report.pdf',
       ];
       if (layout !== 'flatpak-runtime') {
-        refused.push(path.join(exportRoot, 'other.txt'), path.join(exportRoot, 'attachments', 'report.pdf'));
+        refused.push(path.join(exportRoot, 'other.txt'), path.join(path.dirname(exportRoot), 'thunderbird-mcp-hardened', 'outgoing', 'report.pdf'));
       }
       for (const denied of refused) {
         await assert.rejects(inlineAttachmentPaths({ attachments: [denied] }, options), /Sensitive attachment path blocked/);
@@ -511,13 +511,13 @@ describe('Bridge attachment path policy', () => {
 
   it('does not exempt exports from unrelated Flatpak applications', async () => {
     const options = makeTestOptions(root);
-    const file = path.join(options.homeDir, '.var/app/org.example.App/cache/tmp/thunderbird-mcp/message_1/report.pdf');
+    const file = path.join(options.homeDir, '.var/app/org.example.App/cache/tmp/thunderbird-mcp-hardened-exports/message_1/report.pdf');
     await assert.rejects(inlineAttachmentPaths({ attachments: [file] }, options), /Sensitive attachment path blocked/);
   });
 
   it('refuses symlinks into and out of an export directory', async (t) => {
     const options = makeTestOptions(root);
-    const exportRoot = path.join(options.homeDir, '.var/app/net.thunderbird.Thunderbird/cache/tmp/thunderbird-mcp');
+    const exportRoot = path.join(options.homeDir, '.var/app/net.thunderbird.Thunderbird/cache/tmp/thunderbird-mcp-hardened-exports');
     const exported = path.join(exportRoot, 'message_1');
     const documents = path.join(root, 'Documents');
     const alias = path.join(root, 'export-alias');
@@ -691,7 +691,7 @@ describe('Bridge attachment path policy', () => {
 
     it('accepts exports below a short-form temp directory', async () => {
       const options = makeWindowsAttachmentOptions(expandShortNames);
-      const exportDir = shortTemp + '\\thunderbird-mcp\\message_1';
+      const exportDir = shortTemp + '\\thunderbird-mcp-hardened-exports\\message_1';
       const args = { attachments: [exportDir + '\\report.pdf'] };
       await inlineAttachmentPaths(args, options);
       assert.equal(args.attachments[0].base64, content.toString('base64'));
@@ -718,7 +718,7 @@ describe('Bridge discovery', () => {
       env: { THUNDERBIRD_MCP_CONNECTION_FILE: path.join(root, 'env', 'connection.json') },
     });
 
-    writeConnectionFile(path.join(root, 'tmp', 'thunderbird-mcp', 'connection.json'), {
+    writeConnectionFile(path.join(root, 'tmp', 'thunderbird-mcp-hardened', 'connection.json'), {
       port: 20001,
       token: '01'.repeat(32),
     });
@@ -756,7 +756,7 @@ describe('Bridge discovery', () => {
       'utf8'
     );
 
-    writeConnectionFile(path.join(snapTmpDir, 'thunderbird-mcp', 'connection.json'), {
+    writeConnectionFile(path.join(snapTmpDir, 'thunderbird-mcp-hardened', 'connection.json'), {
       port: 20003,
       token: '03'.repeat(32),
     });
@@ -779,7 +779,7 @@ describe('Bridge discovery', () => {
     fs.mkdirSync(procDir, { recursive: true });
     fs.writeFileSync(path.join(procDir, 'cmdline'), 'thunderbird\0');
     fs.writeFileSync(path.join(procDir, 'environ'), `TMPDIR=${decoyTmpDir}\0`);
-    writeConnectionFile(path.join(decoyTmpDir, 'thunderbird-mcp', 'connection.json'), { port: 29999, token: '04'.repeat(32) });
+    writeConnectionFile(path.join(decoyTmpDir, 'thunderbird-mcp-hardened', 'connection.json'), { port: 29999, token: '04'.repeat(32) });
     for (const executable of ['/app/bin/thunderbird', '/usr/bin/thunderbird', '/snap/thunderbird-evil/123/thunderbird']) {
       let environmentReads = 0;
       const result = discoverConnectionInfo({ ...options, fsImpl: {
@@ -819,7 +819,7 @@ describe('Bridge discovery', () => {
       'utf8'
     );
     // If the decoy was picked up, the bridge would read this file and succeed.
-    writeConnectionFile(path.join(decoyTmpDir, 'thunderbird-mcp', 'connection.json'), {
+    writeConnectionFile(path.join(decoyTmpDir, 'thunderbird-mcp-hardened', 'connection.json'), {
       port: 29999,
       token: '04'.repeat(32),
     });
@@ -840,7 +840,7 @@ describe('Bridge discovery', () => {
       options.runtimeDir,
       'app',
       'eu.betterbird.Betterbird',
-      'thunderbird-mcp',
+      'thunderbird-mcp-hardened',
       'connection.json'
     );
     writeConnectionFile(flatpakConnFile, {
@@ -863,7 +863,7 @@ describe('Bridge discovery', () => {
       'net.thunderbird.Thunderbird',
       'cache',
       'tmp',
-      'thunderbird-mcp',
+      'thunderbird-mcp-hardened',
       'connection.json'
     );
     writeConnectionFile(flatpakConnFile, {
@@ -889,8 +889,8 @@ describe('Bridge discovery', () => {
       uid: currentUid,
     });
 
-    const ownedConnFile = path.join(darwinRoot, 'aa', 'bb', 'T', 'thunderbird-mcp', 'connection.json');
-    const foreignConnFile = path.join(darwinRoot, 'cc', 'dd', 'T', 'thunderbird-mcp', 'connection.json');
+    const ownedConnFile = path.join(darwinRoot, 'aa', 'bb', 'T', 'thunderbird-mcp-hardened', 'connection.json');
+    const foreignConnFile = path.join(darwinRoot, 'cc', 'dd', 'T', 'thunderbird-mcp-hardened', 'connection.json');
 
     writeConnectionFile(ownedConnFile, {
       port: 20005,
@@ -931,7 +931,7 @@ describe('Bridge discovery', () => {
       options.runtimeDir,
       'app',
       'org.mozilla.thunderbird',
-      'thunderbird-mcp',
+      'thunderbird-mcp-hardened',
       'connection.json'
     );
     writeConnectionFile(delayedConnFile, {
@@ -963,14 +963,14 @@ describe('Bridge discovery', () => {
     });
 
     // Native /tmp file (first group, winner)
-    writeConnectionFile(path.join(root, 'tmp', 'thunderbird-mcp', 'connection.json'), {
+    writeConnectionFile(path.join(root, 'tmp', 'thunderbird-mcp-hardened', 'connection.json'), {
       port: 20100,
       token: '0a'.repeat(32),
     });
 
     // Flatpak runtime file (later group, also valid)
     writeConnectionFile(
-      path.join(options.runtimeDir, 'app', 'org.mozilla.thunderbird', 'thunderbird-mcp', 'connection.json'),
+      path.join(options.runtimeDir, 'app', 'org.mozilla.thunderbird', 'thunderbird-mcp-hardened', 'connection.json'),
       { port: 20101, token: '0b'.repeat(32) }
     );
 
@@ -986,12 +986,12 @@ describe('Bridge discovery', () => {
       runtimeDir: path.join(root, 'runtime'),
     });
 
-    writeConnectionFile(path.join(root, 'tmp', 'thunderbird-mcp', 'connection.json'), {
+    writeConnectionFile(path.join(root, 'tmp', 'thunderbird-mcp-hardened', 'connection.json'), {
       port: 20200,
       token: '0c'.repeat(32),
     });
     writeConnectionFile(
-      path.join(options.runtimeDir, 'app', 'org.mozilla.thunderbird', 'thunderbird-mcp', 'connection.json'),
+      path.join(options.runtimeDir, 'app', 'org.mozilla.thunderbird', 'thunderbird-mcp-hardened', 'connection.json'),
       { port: 20201, token: '0d'.repeat(32) }
     );
 
@@ -1022,7 +1022,7 @@ describe('Bridge discovery', () => {
       port: 20300,
       token: '0e'.repeat(32),
     });
-    writeConnectionFile(path.join(root, 'tmp', 'thunderbird-mcp', 'connection.json'), {
+    writeConnectionFile(path.join(root, 'tmp', 'thunderbird-mcp-hardened', 'connection.json'), {
       port: 20301,
       token: '0f'.repeat(32),
     });
@@ -1073,7 +1073,7 @@ describe('Bridge discovery', () => {
     it(`rejects a ${kind} connection pin without falling back`, (t) => {
       const file = path.join(root, 'pinned.json');
       const options = makeTestOptions(root, { env: { THUNDERBIRD_MCP_CONNECTION_FILE: file } });
-      writeConnectionFile(path.join(root, 'tmp', 'thunderbird-mcp', 'connection.json'), { port: 21000, token: 'a'.repeat(64) });
+      writeConnectionFile(path.join(root, 'tmp', 'thunderbird-mcp-hardened', 'connection.json'), { port: 21000, token: 'a'.repeat(64) });
       if (kind === 'directory') fs.mkdirSync(file);
       if (kind === 'oversized') fs.writeFileSync(file, ' '.repeat(4097), { mode: 0o600 });
       if (kind === 'FIFO') {
@@ -1082,7 +1082,7 @@ describe('Bridge discovery', () => {
       }
       if (kind === 'symlink') {
         if (process.platform === 'win32') return t.skip('POSIX O_NOFOLLOW');
-        try { fs.symlinkSync(path.join(root, 'tmp', 'thunderbird-mcp', 'connection.json'), file, 'file'); }
+        try { fs.symlinkSync(path.join(root, 'tmp', 'thunderbird-mcp-hardened', 'connection.json'), file, 'file'); }
         catch (error) {
           if (error.code === 'EPERM' || error.code === 'EACCES') return t.skip('symlinks unavailable');
           throw error;
@@ -1112,8 +1112,8 @@ describe('Bridge discovery', () => {
       it(`Flatpak ${layout} ${appId} uses the exact application allow-list`, () => {
         const options = makeTestOptions(root, { runtimeDir: layout === 'cache' ? null : path.join(root, 'runtime') });
         const file = layout === 'runtime'
-          ? path.join(options.runtimeDir, 'app', appId, 'thunderbird-mcp', 'connection.json')
-          : path.join(options.homeDir, '.var', 'app', appId, 'cache', 'tmp', 'thunderbird-mcp', 'connection.json');
+          ? path.join(options.runtimeDir, 'app', appId, 'thunderbird-mcp-hardened', 'connection.json')
+          : path.join(options.homeDir, '.var', 'app', appId, 'cache', 'tmp', 'thunderbird-mcp-hardened', 'connection.json');
         writeConnectionFile(file, { port: 21000, token: 'a'.repeat(64) });
         const result = discoverConnectionInfo(options);
         const allowed = !['org.example.Unrelated', 'org.mozilla.Thunderbird.attacker'].includes(appId);
@@ -1337,7 +1337,7 @@ describe('Bridge discovery', () => {
 
   describe('Windows connection file confinement', () => {
     const shortTemp = 'C:\\Users\\ALICE~1\\AppData\\Local\\Temp';
-    const candidate = shortTemp + '\\thunderbird-mcp\\connection.json';
+    const candidate = shortTemp + '\\thunderbird-mcp-hardened\\connection.json';
     const expandShortNames = filePath => filePath.replace(/^C:\\Users\\ALICE~1(?=\\|$)/i, 'C:\\Users\\alice');
     const content = Buffer.from(JSON.stringify({ port: 21000, token: 'a'.repeat(64), pid: 4242 }));
 
@@ -1385,8 +1385,8 @@ describe('Bridge discovery', () => {
     });
 
     for (const outside of [
-      'C:\\Users\\Public\\thunderbird-mcp\\connection.json',
-      'C:\\Users\\alice\\AppData\\Local\\Temp2\\thunderbird-mcp\\connection.json',
+      'C:\\Users\\Public\\thunderbird-mcp-hardened\\connection.json',
+      'C:\\Users\\alice\\AppData\\Local\\Temp2\\thunderbird-mcp-hardened\\connection.json',
       'C:\\Users\\alice\\AppData\\Local\\Temp',
     ]) {
       it(`refuses a candidate resolving to ${outside} before opening it`, () => {

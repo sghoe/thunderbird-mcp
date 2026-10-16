@@ -60,15 +60,15 @@ This project bridges three trust boundaries; any of them is in scope:
 
 ## Update channel
 
-Installed copies update themselves from
-`https://updates.tomaszkasperczyk.name/thunderbird-mcp/updates.json`,
-which the release workflow publishes to the `gh-pages` branch when a
-`v*` tag is pushed. Only the maintainer can push tags or change
-`gh-pages`; both are protected by repository rulesets, and releases are
-immutable. The domain is the maintainer's personal domain and will stay
-registered. If the project is ever handed over, the maintainer will ship
-a final release that moves `update_url` to the new maintainer's channel,
-and keep the domain serving the last manifest until installs have moved.
+This hardened fork has **no** automatic update channel. Its manifest
+`update_url` points at a reserved `.invalid` host, so Thunderbird can
+neither fetch fork updates nor fall back to addons.thunderbird.net for the
+fork's add-on ID. The release workflow only runs in the upstream repository.
+Install new builds manually and keep the previous XPI as a rollback target.
+See [docs/hardening/stage-0.md](docs/hardening/stage-0.md).
+
+Issues in unmodified upstream code should also be reported upstream via
+[private vulnerability reporting](https://github.com/TKasperczyk/thunderbird-mcp/security/advisories/new).
 
 ## Coordinated disclosure
 

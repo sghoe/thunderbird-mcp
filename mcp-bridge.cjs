@@ -18,7 +18,9 @@ const CONNECTION_CACHE_TTL_MS = 5000; // 5 seconds
 
 const DEFAULT_PROC_ROOT = '/proc';
 const DEFAULT_DARWIN_FOLDERS_ROOT = '/var/folders';
-const THUNDERBIRD_MCP_SUBDIR = 'thunderbird-mcp';
+// Keep in sync with RUNTIME_SUBDIR / EXPORT_SUBDIR in extension/mcp_server/api.js.
+const THUNDERBIRD_MCP_SUBDIR = 'thunderbird-mcp-hardened';
+const THUNDERBIRD_MCP_EXPORT_SUBDIR = 'thunderbird-mcp-hardened-exports';
 const SNAP_TMP_SUBDIR = ['Downloads', 'thunderbird.tmp'];
 const CONNECTION_FILE_BASENAME = 'connection.json';
 const MAX_CONNECTION_FILE_BYTES = 4096;
@@ -706,7 +708,11 @@ const SENSITIVE_ATTACHMENT_PATTERNS = [
   /^\/\//,
   // macOS user Library remains denied even when used as a temp directory.
   /^\/users\/[^/]+\/library(\/|$)/,
-  /\/thunderbird-mcp\/(?:[^/]+\/)?connection\.json$/,
+  // The fork's runtime directory (discovery file, outbound staging) is never
+  // an attachment source. Connection files of this fork and of upstream are
+  // blocked wherever such a directory appears.
+  /\/thunderbird-mcp-hardened(\/|$)/,
+  /\/thunderbird-mcp[^/]*\/(?:[^/]+\/)?connection\.json$/,
   // Credential names also occur outside the usual profile directories.
   /(^|\/)id_[^/]+$/,
   /(^|\/)private[-_ ]?keys?(\.[^/]+)?$/,
@@ -760,11 +766,10 @@ function getAttachmentExportPathInfo(attachmentPath, exportRoots = [], windows =
   // Backslashes are literal filename characters on POSIX, not separators.
   const nativePath = windows ? attachmentPath.replace(/\\/g, '/') : attachmentPath;
   if (nativePath.startsWith('//') || nativePath.split('/').some(part => part === '.' || part === '..')) return null;
-  // getMessage exports exactly one sanitized message-id directory and one file.
-  // The sibling "attachments" directory is outbound inline staging, not exports.
-  const match = /^(.*\/thunderbird-mcp)\/([a-zA-Z0-9_]+)\/([^/]+)$/.exec(nativePath);
-  if (!match || match[2].toLowerCase() === 'attachments' ||
-      match[3].startsWith('.') || match[3].toLowerCase() === 'connection.json') return null;
+  // getMessage exports exactly one sanitized message-id directory and one
+  // file below the dedicated export directory.
+  const match = /^(.*\/thunderbird-mcp-hardened-exports)\/([a-zA-Z0-9_]+)\/([^/]+)$/.exec(nativePath);
+  if (!match || match[3].startsWith('.') || match[3].toLowerCase() === 'connection.json') return null;
   const roots = typeof exportRoots === 'function' ? exportRoots() : exportRoots;
   const root = roots.find(candidate => {
     const nativeRoot = (windows ? candidate.replace(/\\/g, '/') : candidate).replace(/\/$/, '');
@@ -784,13 +789,13 @@ function isWindowsReservedName(part) {
 }
 
 // Number of leading components that are the trusted temp directory, which
-// Windows may report in short form. Export roots are <temp>/thunderbird-mcp.
+// Windows may report in short form. Export roots are <temp>/thunderbird-mcp-hardened-exports.
 function getWindowsTempPrefixLength(parts, exportRoots) {
   const roots = typeof exportRoots === 'function' ? exportRoots() : exportRoots;
   let prefixLength = 0;
   for (const root of roots) {
     const rootParts = root.replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '').split('/');
-    if (rootParts.pop() !== 'thunderbird-mcp') continue;
+    if (rootParts.pop() !== 'thunderbird-mcp-hardened-exports') continue;
     if (rootParts.length > prefixLength && rootParts.length <= parts.length &&
         rootParts.every((part, index) => part === parts[index])) prefixLength = rootParts.length;
   }
@@ -914,21 +919,21 @@ function validateAttachmentStat(filePath, stat) {
 // Recognize only Thunderbird temp roots, never a root supplied in tool arguments.
 function getAttachmentExportRoots(context) {
   const { pathImpl, homeDir, platform } = context;
-  const roots = [pathImpl.dirname(getDefaultConnectionFile(context))];
+  const roots = [pathImpl.join(context.osImpl.tmpdir(), THUNDERBIRD_MCP_EXPORT_SUBDIR)];
   if (platform === 'linux') {
-    if (homeDir) roots.push(pathImpl.join(homeDir, ...SNAP_TMP_SUBDIR, THUNDERBIRD_MCP_SUBDIR));
+    if (homeDir) roots.push(pathImpl.join(homeDir, ...SNAP_TMP_SUBDIR, THUNDERBIRD_MCP_EXPORT_SUBDIR));
     for (const root of getFlatpakScanRoots(context)) {
       if (!root.base) continue;
       for (const appId of FLATPAK_APP_IDS) {
-        roots.push(pathImpl.join(root.appRoot, appId, ...root.tmpSuffix, THUNDERBIRD_MCP_SUBDIR));
+        roots.push(pathImpl.join(root.appRoot, appId, ...root.tmpSuffix, THUNDERBIRD_MCP_EXPORT_SUBDIR));
       }
     }
   }
   // Resolve only the trusted temp root. A redirect below it (including the
-  // thunderbird-mcp directory itself) must not become a trusted export root.
+  // export directory itself) must not become a trusted export root.
   const canonicalRoots = roots.flatMap(root => {
     try {
-      return [pathImpl.join(realpathNative(context.fsImpl, pathImpl.dirname(root)), THUNDERBIRD_MCP_SUBDIR)];
+      return [pathImpl.join(realpathNative(context.fsImpl, pathImpl.dirname(root)), THUNDERBIRD_MCP_EXPORT_SUBDIR)];
     } catch {
       return []; // An unavailable temp layout cannot provide an exemption.
     }
@@ -968,7 +973,7 @@ async function inspectAttachmentPath(filePath, context) {
     let expectedPath = pathImpl.resolve(filePath);
     if (exportInfo) {
       const canonicalTempRoot = realpathNative(fsImpl, pathImpl.dirname(exportInfo.root));
-      expectedPath = pathImpl.join(canonicalTempRoot, THUNDERBIRD_MCP_SUBDIR, ...exportInfo.parts);
+      expectedPath = pathImpl.join(canonicalTempRoot, THUNDERBIRD_MCP_EXPORT_SUBDIR, ...exportInfo.parts);
     }
     if (pathImpl.relative(expectedPath, realPath) !== '') {
       throw new Error(`Attachment export path is redirected: ${filePath}`);

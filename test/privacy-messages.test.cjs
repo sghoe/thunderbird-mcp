@@ -1539,8 +1539,8 @@ describe("Clear-signed mail with the encrypted-message preference off", () => {
     }) };
     const result = await api.getMessage("message-1", "folder", true, "text");
     assert.equal(result.attachments[0].error, undefined);
-    assert.equal(result.attachments[0].filePath, "/tmp/thunderbird-mcp/message_1/report.pdf");
-    assert.deepEqual(written, [{ path: "/tmp/thunderbird-mcp/message_1/report.pdf", data: "%PDF-" }]);
+    assert.equal(result.attachments[0].filePath, "/tmp/thunderbird-mcp-hardened-exports/message_1/report.pdf");
+    assert.deepEqual(written, [{ path: "/tmp/thunderbird-mcp-hardened-exports/message_1/report.pdf", data: "%PDF-" }]);
   });
 
   it("withholds signed mail whose raw message exceeds the read cap", async () => {

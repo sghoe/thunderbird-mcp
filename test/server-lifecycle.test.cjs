@@ -6,6 +6,10 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
+// start() probes each port asynchronously before binding; let it reach the
+// bind/write step before a test changes the mocked failure conditions.
+const flushStartup = () => new Promise(resolve => setImmediate(resolve));
+
 // The existing marker loaders cover individual helpers, not start/status.
 // Load the complete production methods; only Thunderbird services are mocked.
 function loadServerLifecycle(overrides = {}) {
@@ -63,7 +67,7 @@ function loadServerLifecycle(overrides = {}) {
     }
   }
 
-  const connectionPath = "/mock-tmp/thunderbird-mcp/connection.json";
+  const connectionPath = "/mock-tmp/thunderbird-mcp-hardened/connection.json";
   const sandbox = {
     MCP_DEFAULT_PORT: 8765,
     MCP_MAX_PORT_ATTEMPTS: 10,
@@ -75,7 +79,7 @@ function loadServerLifecycle(overrides = {}) {
     },
     ChromeUtils: {
       importESModule(uri) {
-        if (uri.startsWith("resource://thunderbird-mcp/httpd.sys.mjs")) {
+        if (uri.startsWith("resource://thunderbird-mcp-hardened/httpd.sys.mjs")) {
           state.attempts++;
           if (state.importError) throw state.importError;
           return { HttpServer };
@@ -132,7 +136,8 @@ function loadServerLifecycle(overrides = {}) {
     },
     getStableAuthTokenPref: () => "a".repeat(64),
     isListenAllEnabled: () => false,
-    PREF_LISTEN_ALL: "extensions.thunderbird-mcp.listenAll",
+    isLoopbackPortInUse: async (port) => (state.busyPorts || []).includes(port),
+    PREF_LISTEN_ALL: "extensions.thunderbird-mcp-hardened.listenAll",
     readConnectionInfo: () => ({ path: connectionPath, data: state.connection }),
     removeConnectionInfo() {
       state.removals++;
@@ -213,7 +218,7 @@ describe("options server status", () => {
     assert.equal(ui.statusText.textContent, "Running");
     assert.equal(ui.statusDot.className, "status-dot running");
     assert.equal(ui.serverPort.textContent, 8765);
-    assert.equal(ui.connFile.textContent, "/mock-tmp/thunderbird-mcp/connection.json");
+    assert.equal(ui.connFile.textContent, "/mock-tmp/thunderbird-mcp-hardened/connection.json");
     assert.equal((await api.getServerInfo()).lastError, null);
     assert.equal(ui.authRefreshes, 1);
   });
@@ -275,7 +280,7 @@ describe("server startup lifecycle", () => {
     const result = await api.start();
     assert.equal(result.success, false);
     assert.match(result.error, /import failed/);
-    assert.equal(sandbox.__tbMcpStartPromise, null);
+    assert.equal(sandbox.__tbMcpHardenedStartPromise, null);
     assert.equal((await api.getServerInfo()).running, false);
     assert.equal((await api.getServerInfo()).lastError, result.error);
     assert.equal(state.servers.length, 0);
@@ -291,14 +296,14 @@ describe("server startup lifecycle", () => {
   it("coalesces concurrent starts and memoizes a successful start", async () => {
     const { api, sandbox, state } = loadServerLifecycle();
     const first = api.start();
-    const cached = sandbox.__tbMcpStartPromise;
+    const cached = sandbox.__tbMcpHardenedStartPromise;
     const second = api.start();
     const [firstResult, secondResult] = await Promise.all([first, second]);
 
     assert.equal(firstResult.success, true);
     assert.strictEqual(secondResult, firstResult);
     assert.strictEqual(await api.start(), firstResult);
-    assert.strictEqual(sandbox.__tbMcpStartPromise, cached);
+    assert.strictEqual(sandbox.__tbMcpHardenedStartPromise, cached);
     assert.equal(state.attempts, 1);
     assert.equal(state.servers.length, 1);
     assert.equal(state.timers.length, 1);
@@ -309,7 +314,7 @@ describe("server startup lifecycle", () => {
       writeError: new Error("disk full"), holdStops: true,
     });
     const first = api.start();
-    const cached = sandbox.__tbMcpStartPromise;
+    const cached = sandbox.__tbMcpHardenedStartPromise;
     const concurrent = api.start();
     let settled = false;
     first.then(() => { settled = true; }).catch(() => {});
@@ -319,7 +324,7 @@ describe("server startup lifecycle", () => {
     await new Promise(resolve => setImmediate(resolve));
     assert.equal((await api.getServerInfo()).running, false);
     assert.equal(settled, false, "failed startup must await socket closure");
-    assert.strictEqual(sandbox.__tbMcpStartPromise, cached);
+    assert.strictEqual(sandbox.__tbMcpHardenedStartPromise, cached);
     assert.equal(state.attempts, 1);
     assert.equal(state.servers[0].listening, true);
     assert.equal(state.pendingStops.length, 1);
@@ -331,7 +336,7 @@ describe("server startup lifecycle", () => {
     assert.equal(state.servers[0].listening, false);
     assert.equal(state.servers[0].stops, 1);
     assert.equal(state.connection, null);
-    assert.equal(sandbox.__tbMcpStartPromise, null);
+    assert.equal(sandbox.__tbMcpHardenedStartPromise, null);
     assert.equal((await api.getServerInfo()).running, false);
 
     state.writeError = null;
@@ -347,7 +352,7 @@ describe("server startup lifecycle", () => {
     const start = api.start();
     assert.equal((await api.getServerInfo()).running, false);
     assert.equal(state.timers[0].cancelled, true);
-    assert.equal(sandbox.__tbMcpConnectionInfoRefreshTimer, null);
+    assert.equal(sandbox.__tbMcpHardenedConnectionInfoRefreshTimer, null);
 
     state.pendingStops.shift()();
     assert.equal((await start).success, false);
@@ -366,11 +371,28 @@ describe("server startup lifecycle", () => {
     assert.deepEqual(state.servers[0].binds, Array.from({ length: 10 }, (_, i) => 8765 + i));
     assert.equal(state.servers[0].listening, false);
     assert.equal(state.timers.length, 0);
-    assert.equal(sandbox.__tbMcpStartPromise, null);
+    assert.equal(sandbox.__tbMcpHardenedStartPromise, null);
     assert.equal((await api.getServerInfo()).running, false);
 
     state.bindError = null;
     assert.equal((await api.start()).success, true);
+  });
+
+  it("skips ports another listener already serves instead of sharing them", async () => {
+    const { api, state } = loadServerLifecycle({ busyPorts: [8765, 8766] });
+    const result = await api.start();
+    assert.equal(result.success, true);
+    assert.equal(result.port, 8767);
+    assert.deepEqual(state.servers[0].binds, [8767]);
+    assert.equal(state.connection.port, 8767);
+  });
+
+  it("fails when every port in the range already has a listener", async () => {
+    const { api, state } = loadServerLifecycle({ busyPorts: Array.from({ length: 10 }, (_, i) => 8765 + i) });
+    const result = await api.start();
+    assert.equal(result.success, false);
+    assert.match(result.error, /already accepts connections/);
+    assert.deepEqual(state.servers[0].binds, []);
   });
 
   it("evicts a rejected attempt after cleaning up its listener", async () => {
@@ -379,7 +401,7 @@ describe("server startup lifecycle", () => {
       writeError: { toString() { throw rejection; } },
     });
     await assert.rejects(api.start(), error => error === rejection);
-    assert.equal(sandbox.__tbMcpStartPromise, null);
+    assert.equal(sandbox.__tbMcpHardenedStartPromise, null);
     assert.equal((await api.getServerInfo()).lastError, String(rejection));
     assert.equal(state.servers[0].listening, false);
     assert.equal(state.connection, null);
@@ -415,13 +437,13 @@ describe("server startup lifecycle", () => {
       assert.equal(state.attempts, 2, "second setter must wait for the first restart's teardown");
       assert.equal(state.pendingStops.length, 1);
       assert.equal(state.servers[1].listening, true);
-      const cached = sandbox.__tbMcpStartPromise;
+      const cached = sandbox.__tbMcpHardenedStartPromise;
       assert.ok(cached, "the failed restart must remain cached while stopping");
       const joinedStart = api.start();
       const checkedJoined = rejects
         ? assert.rejects(joinedStart, error => error === rejection)
         : joinedStart;
-      assert.strictEqual(sandbox.__tbMcpStartPromise, cached);
+      assert.strictEqual(sandbox.__tbMcpHardenedStartPromise, cached);
       assert.equal((await api.getServerInfo()).running, false);
 
       state.writeError = null;
@@ -449,13 +471,14 @@ describe("server startup lifecycle", () => {
       });
       const start = api.start();
       const checkedStart = rejects ? assert.rejects(start, error => error === rejection) : start;
-      const cached = sandbox.__tbMcpStartPromise;
+      await flushStartup();
+      const cached = sandbox.__tbMcpHardenedStartPromise;
       state.writeError = null;
       const restart = api.setListenAll(false);
 
       assert.equal((await api.getServerInfo()).running, false);
       assert.equal(state.attempts, 1, "settings must not bypass pending failure cleanup");
-      assert.strictEqual(sandbox.__tbMcpStartPromise, cached);
+      assert.strictEqual(sandbox.__tbMcpHardenedStartPromise, cached);
       state.pendingStops.shift()();
       await checkedStart;
       assert.equal((await restart).success, true);
@@ -473,16 +496,18 @@ describe("server startup lifecycle", () => {
         holdStops: true,
       });
       const oldStart = api.start();
+      if (rejects) oldStart.catch(() => {});
+      await flushStartup();
       const newer = Promise.resolve({ success: true, port: 8770 });
       const newerConnection = { port: 8770, token: "new", pid: 4242 };
-      sandbox.__tbMcpStartPromise = newer;
-      sandbox.__tbMcpLastStartError = null;
+      sandbox.__tbMcpHardenedStartPromise = newer;
+      sandbox.__tbMcpHardenedLastStartError = null;
       state.connection = newerConnection;
       state.pendingStops.shift()();
 
       if (rejects) await assert.rejects(oldStart, error => error === rejection);
       else assert.equal((await oldStart).success, false);
-      assert.strictEqual(sandbox.__tbMcpStartPromise, newer);
+      assert.strictEqual(sandbox.__tbMcpHardenedStartPromise, newer);
       assert.equal((await api.getServerInfo()).lastError, null);
       assert.strictEqual(state.connection, newerConnection);
     });
@@ -528,7 +553,7 @@ describe("server startup lifecycle", () => {
     assert.equal(state.servers[1].listening, true);
     assert.equal(state.connection.port, 8765);
     assert.equal((await api.getServerInfo()).running, true);
-    assert.equal(sandbox.__tbMcpRestartPromise, null);
+    assert.equal(sandbox.__tbMcpHardenedRestartPromise, null);
   });
 
   it("does not clear a newer startup promise or connection while a setter stops its listener", async () => {
@@ -540,19 +565,19 @@ describe("server startup lifecycle", () => {
     const newerResult = { success: true, port: 8770 };
     const newer = Promise.resolve(newerResult);
     const newerConnection = { port: 8770, token: "new", pid: 4242 };
-    sandbox.__tbMcpStartPromise = newer;
+    sandbox.__tbMcpHardenedStartPromise = newer;
     state.connection = newerConnection;
     state.pendingStops.shift()();
 
     assert.strictEqual(await restart, newerResult);
-    assert.strictEqual(sandbox.__tbMcpStartPromise, newer);
+    assert.strictEqual(sandbox.__tbMcpHardenedStartPromise, newer);
     assert.strictEqual(state.connection, newerConnection);
     assert.equal(state.attempts, 1);
   });
 
   it("does not report running from a cached promise or stale connection file", async () => {
     const { api, sandbox, state } = loadServerLifecycle();
-    sandbox.__tbMcpStartPromise = Promise.resolve({ success: false });
+    sandbox.__tbMcpHardenedStartPromise = Promise.resolve({ success: false });
     state.connection = { port: 8765, token: "old", pid: 1 };
     assert.equal((await api.getServerInfo()).running, false);
   });
