@@ -14,12 +14,23 @@ const source = fs.readFileSync(path.resolve(__dirname, "../extension/mcp_server/
 const START = "// BEGIN MESSAGE-ID INDEX";
 const snippet = source.slice(source.indexOf(START), source.indexOf("// END MESSAGE-ID INDEX"));
 
-function load() {
+// Each load() is one server instance; `shared` plays the process global.
+function load(shared = {}) {
   const clock = { now: 1000 };
-  const sandbox = { Date: { now: () => clock.now }, WeakRef };
-  vm.createContext(sandbox);
-  vm.runInContext(`${snippet}\nthis.lookupUniqueMessage = lookupUniqueMessage; this.indexes = _messageIdIndexes;`, sandbox);
-  return { lookup: sandbox.lookupUniqueMessage, clock, indexes: sandbox.indexes };
+  const timers = [];
+  const sandbox = Object.assign(shared, {
+    Date: { now: () => clock.now },
+    Ci: { nsITimer: { TYPE_ONE_SHOT: 0 } },
+    Cc: { "@mozilla.org/timer;1": { createInstance: () => {
+      const timer = { cancelled: false, initWithCallback(cb) { this.cb = cb; }, cancel() { this.cancelled = true; } };
+      timers.push(timer);
+      return timer;
+    } } },
+  });
+  if (!vm.isContext(sandbox)) vm.createContext(sandbox);
+  // A fresh function scope per instance, like each server start().
+  const instance = vm.runInContext(`(() => { ${snippet}\nreturn { lookupUniqueMessage, _messageIdIndexes }; })()`, sandbox);
+  return { lookup: instance.lookupUniqueMessage, clock, indexes: instance._messageIdIndexes, timers, sandbox };
 }
 
 // Mimics nsIMsgDatabase: headers, change listeners, Message-ID lookup.
@@ -102,12 +113,26 @@ describe("Message-ID index", () => {
     assert.equal(indexes.has(folder.URI), false);
   });
 
-  it("holds the database only weakly", () => {
-    const { lookup, indexes } = load();
-    lookup(folder, makeDb(["a@x"]), "a@x");
+  it("releases the database and its listener when the expiry timer fires", () => {
+    const { lookup, indexes, timers } = load();
+    const db = makeDb(["a@x"]);
+    lookup(folder, db, "a@x");
     const entry = indexes.get(folder.URI);
-    assert.equal(Object.values(entry).some((v) => v && typeof v.enumerateMessages === "function"), false);
-    assert.equal(typeof entry.dbRef.deref, "function");
+    assert.equal(db.listeners.size, 1);
+    timers[0].cb.notify();
+    assert.equal(db.listeners.size, 0);
+    assert.equal(indexes.size, 0);
+    assert.equal(entry.db, null);
+    assert.equal(entry.counts, null);
+  });
+
+  it("a new server instance detaches the previous instance's listeners", () => {
+    const shared = {};
+    const db = makeDb(["a@x"]);
+    for (let i = 0; i < 10; i++) load(shared).lookup(folder, db, "a@x");
+    assert.equal(db.listeners.size, 1);
+    shared.__tbMcpHardenedClearMessageIdIndexes();
+    assert.equal(db.listeners.size, 0);
   });
 
   it("does not reuse counts for a reopened database", () => {

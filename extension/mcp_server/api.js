@@ -5412,9 +5412,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	            // notifications for that database report no added, deleted or
 	            // changed header and the database is still open (a message-key
 	            // watermark is not reliable: IMAP offline headers use reusable
-	            // fake keys). Entries hold the database only weakly, are pruned
-	            // after 60 s, and nothing is cached where no listener can be
-	            // attached.
+	            // fake keys). An entry holds its database strongly, so its
+	            // listener can always be removed, but for at most 60 s: a timer
+	            // and every later call drop expired entries. Nothing is cached
+	            // where no listener can be attached.
 	            const MESSAGE_ID_INDEX_TTL_MS = 60000;
 	            const MESSAGE_ID_INDEX_MAX_FOLDERS = 8;
 	            const _messageIdIndexes = new Map();
@@ -5423,23 +5424,31 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	              const entry = _messageIdIndexes.get(key);
 	              if (!entry) return;
 	              _messageIdIndexes.delete(key);
-	              try { entry.dbRef.deref()?.removeListener(entry.listener); } catch { /* database already closed */ }
+	              try { entry.timer?.cancel(); } catch { /* ignore */ }
+	              try { entry.db.removeListener(entry.listener); } catch { /* database already closed */ }
+	              entry.db = null;
+	              entry.counts = null;
 	            }
 
 	            function pruneMessageIdIndexes(now) {
 	              for (const [key, entry] of [..._messageIdIndexes]) {
-	                if (entry.stale || now - entry.at >= MESSAGE_ID_INDEX_TTL_MS || !entry.dbRef.deref()) {
-	                  dropMessageIdIndex(key);
-	                }
+	                if (entry.stale || now - entry.at >= MESSAGE_ID_INDEX_TTL_MS) dropMessageIdIndex(key);
 	              }
 	            }
 
+	            // A previous server instance (restart, reload) must not leave
+	            // listeners or count snapshots behind; onShutdown clears too.
+	            function clearMessageIdIndexes() {
+	              for (const key of [..._messageIdIndexes.keys()]) dropMessageIdIndex(key);
+	            }
+	            try { globalThis.__tbMcpHardenedClearMessageIdIndexes?.(); } catch { /* best effort */ }
+	            globalThis.__tbMcpHardenedClearMessageIdIndexes = clearMessageIdIndexes;
 	            function getMessageIdCounts(folder, db) {
 	              const now = Date.now();
 	              pruneMessageIdIndexes(now);
 	              const key = typeof folder?.URI === "string" ? folder.URI : "";
 	              const cached = key ? _messageIdIndexes.get(key) : null;
-	              if (cached && cached.dbRef.deref() === db) {
+	              if (cached && cached.db === db) {
 	                _messageIdIndexes.delete(key);
 	                _messageIdIndexes.set(key, cached);
 	                return cached.counts;
@@ -5449,8 +5458,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	              for (const hdr of db.enumerateMessages()) {
 	                counts.set(hdr.messageId, (counts.get(hdr.messageId) || 0) + 1);
 	              }
-	              if (key && typeof db.addListener === "function" && typeof WeakRef === "function") {
-	                const entry = { dbRef: new WeakRef(db), counts, at: now, stale: false, listener: null };
+	              if (key && typeof db.addListener === "function") {
+	                const entry = { db, counts, at: now, stale: false, listener: null, timer: null };
 	                const invalidate = () => { entry.stale = true; };
 	                entry.listener = {
 	                  QueryInterface: typeof ChromeUtils !== "undefined"
@@ -5467,11 +5476,19 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	                };
 	                try {
 	                  db.addListener(entry.listener);
-	                  _messageIdIndexes.set(key, entry);
-	                  while (_messageIdIndexes.size > MESSAGE_ID_INDEX_MAX_FOLDERS) {
-	                    dropMessageIdIndex(_messageIdIndexes.keys().next().value);
-	                  }
-	                } catch { /* no listener: never cache */ }
+	                } catch {
+	                  return counts; // no listener: never cache
+	                }
+	                _messageIdIndexes.set(key, entry);
+	                try {
+	                  entry.timer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
+	                  entry.timer.initWithCallback({
+	                    notify: () => { if (_messageIdIndexes.get(key) === entry) dropMessageIdIndex(key); },
+	                  }, MESSAGE_ID_INDEX_TTL_MS, Ci.nsITimer.TYPE_ONE_SHOT);
+	                } catch { /* later calls still prune expired entries */ }
+	                while (_messageIdIndexes.size > MESSAGE_ID_INDEX_MAX_FOLDERS) {
+	                  dropMessageIdIndex(_messageIdIndexes.keys().next().value);
+	                }
 	              }
 	              return counts;
 	            }
@@ -12440,6 +12457,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
       this._addonManager = null;
     }
     // END UNINSTALL LISTENER REMOVAL
+    // Detach Message-ID index listeners of the running server instance.
+    try { globalThis.__tbMcpHardenedClearMessageIdIndexes?.(); } catch { /* best effort */ }
+    globalThis.__tbMcpHardenedClearMessageIdIndexes = null;
     // Stop the HTTP server so the port is released
     // Invalidate a startup that is still suspended in the port probe; it
     // re-checks this generation before binding (see SERVER LIFECYCLE).
