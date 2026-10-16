@@ -352,3 +352,16 @@ Forward rule after the moved range.
   custom Post-outgoing action no longer blocks their direct sends (Sol).
 * Native: display of an unread Inbox message and a send whose copy lands
   in the Inbox refused for a client without `filters.autosend`.
+
+## Review round 15 – fixes
+
+* Filter conditions (Sol): a rule's effect reveals whether its conditions
+  matched, so conditions need the read rights for what they inspect:
+  `mail.metadata` for any condition (not "match all"), `mail.body` for
+  body conditions. Applies to create/update, `applyFilters` and the
+  implicit checks of periodic, Post-outgoing and reachable rules.
+* Drafts in an Inbox (Opus): a Drafts folder set to the Inbox is processed
+  by periodic rules; `saveDraft`, reply drafts and review-window autosave
+  check that Inbox's periodic rules.
+* Native: body-probe rule refused without `mail.body`; draft into a
+  Drafts-flagged Inbox refused for a drafts-only client.

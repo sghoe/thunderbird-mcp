@@ -54,6 +54,7 @@ function loadSaveDraft(identity, options = {}) {
     resolveComposeFormat: () => ({ useHtml: false, format: 1 }),
     buildBodyWithSignature: body => body || "",
     filePathsToAttachDescs: () => ({ descs: [], failed: [] }),
+    draftFolderPeriodicRestriction: () => null,
     getAccessibleFolder(uri) {
       lookups.push(uri);
       return options.getAccessibleFolder

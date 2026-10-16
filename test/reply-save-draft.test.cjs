@@ -34,6 +34,7 @@ function loadReply(options = {}) {
     getFlag(flag) { calls.flags.push(flag); return true; },
   };
   const sandbox = {
+    draftFolderPeriodicRestriction: () => null,
     TextDecoder,
     Uint8Array,
     atob,

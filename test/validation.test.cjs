@@ -1680,6 +1680,7 @@ function makeOutboundMailRuntime(options = {}) {
     // An authorized, Drafts-flagged destination so saveDraft reaches attachment handling.
     setComposeIdentity(params) { params.identity = { draftFolder: 'imap://user@example.com/Drafts' }; },
     getAccessibleFolder: uri => ({ folder: { URI: uri, getFlag: flag => flag === 0x400 } }),
+    draftFolderPeriodicRestriction: () => null,
     resolveComposeFormat: () => ({ useHtml: false, format: 0 }),
     buildBodyWithSignature: body => body || '',
     findMessage: () => ({ msgHdr: {}, folder: { server: {}, getUriForMsg: () => 'message://fixture' } }),

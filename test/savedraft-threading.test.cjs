@@ -59,6 +59,7 @@ function loadSaveDraft() {
     resolveComposeFormat: () => ({ useHtml: false, format: 1 }),
     buildBodyWithSignature: body => body || "",
     getAccessibleFolder: uri => ({ folder: { URI: uri, getFlag: flag => flag === Ci.nsMsgFolderFlags.Drafts } }),
+    draftFolderPeriodicRestriction: () => null,
     filePathsToAttachDescs() {
       calls.attachments++;
       return { descs: [], failed: [] };

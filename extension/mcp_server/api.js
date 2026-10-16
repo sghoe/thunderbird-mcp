@@ -1935,6 +1935,18 @@ function missingFilterCapabilities(filter, hasCapability, { deletesPermanently =
   }
   const needed = Core.policy.filterActionCapabilities(names);
   if (deletesPermanently && names.includes("delete")) needed.push("mail.deletePermanent");
+  // A rule's effect reveals whether its conditions matched, so conditions
+  // need the read rights for what they inspect: message metadata, and the
+  // body for body conditions. "Match all" inspects nothing.
+  try {
+    for (const term of filter.searchTerms) {
+      if (term.matchAll) continue;
+      needed.push("mail.metadata");
+      if (term.attrib === ATTRIB_MAP.body) needed.push("mail.body");
+    }
+  } catch {
+    needed.push("mail.metadata", "mail.body");
+  }
   return [...new Set(needed)].filter(cap => !hasCapability(cap));
 }
 
@@ -3952,12 +3964,27 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               return result;
             }
 
+            // A Drafts folder that is also an Inbox is processed by periodic
+            // rules; client-written drafts must stay within their rights.
+            function draftFolderPeriodicRestriction(uriOrFolder) {
+              try {
+                const folder = typeof uriOrFolder === "string"
+                  ? (uriOrFolder ? MailServices.folderLookup.getFolderForURL(uriOrFolder) : null)
+                  : uriOrFolder;
+                return folder ? periodicFolderRestriction(folder) : null;
+              } catch {
+                return { error: "Not permitted for this client: the Drafts folder could not be checked" };
+              }
+            }
+
             // Autosave writes client-populated review windows into Drafts
             // without a user decision (MsgComposeCommands.js AutoSave).
             function identityAutosaveAllowed(identity) {
               try {
                 if (!Services.prefs.getBoolPref("mail.compose.autosave", true)) return true;
-                return identityFolderTargetAllowed(identity, getIdentityDraftFolderURI(identity) || "");
+                const uri = getIdentityDraftFolderURI(identity) || "";
+                if (!identityFolderTargetAllowed(identity, uri)) return false;
+                return !draftFolderPeriodicRestriction(uri);
               } catch {
                 return false;
               }
@@ -4570,6 +4597,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   if (!destinationAllowed) {
                     // Access errors may contain a restricted URI; do not expose it.
                     settle({ error: "Cannot save reply draft: the compose identity must have an accessible Drafts-flagged destination" });
+                    return;
+                  }
+                  const draftPeriodic = draftFolderPeriodicRestriction(getIdentityDraftFolderURI(composeWin.gCurrentIdentity || compose.identity));
+                  if (draftPeriodic) {
+                    settle({ error: draftPeriodic.error });
                     return;
                   }
                   originalWindowState = {
@@ -10216,6 +10248,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 if (msgToReplace && destination.folder.URI !== replaceFolder.URI) {
                   return { error: "Cannot replace draft outside the selected identity's configured Drafts folder; select the matching from identity" };
                 }
+                const draftPeriodic = draftFolderPeriodicRestriction(destination.folder);
+                if (draftPeriodic) return draftPeriodic;
 
                 const { useHtml, format } = resolveComposeFormat(msgComposeParams.identity, isHtml, msgComposeParams.type);
                 msgComposeParams.format = format;

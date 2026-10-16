@@ -699,6 +699,8 @@ describe("filter conditions and reply copies in Trash (native)", { skip: !h.thun
         { name: "no-contacts-read", capabilities: allCaps.filter((c) => c !== "contacts.read") },
         { name: "no-permanent-delete", capabilities: allCaps.filter((c) => c !== "mail.deletePermanent") },
         { name: "no-autosend", capabilities: allCaps.filter((c) => c !== "filters.autosend") },
+        { name: "drafts-only", capabilities: ["accounts.read", "mail.metadata", "mail.body", "compose.draft", "compose.review"] },
+        { name: "filters-no-read", capabilities: ["accounts.read", "mail.flag", "filters.manage", "filters.run"] },
       ],
     });
     await tb.waitForMessages(`${ALICE}/Trash`, 1);
@@ -731,6 +733,24 @@ describe("filter conditions and reply copies in Trash (native)", { skip: !h.thun
       } finally {
         await tb.marionette.run("Services.prefs.setCharPref('mail.identity.id1.fcc_folder', args.uri); return true;", { uri: `${ALICE}/Sent` });
       }
+      // A Drafts folder set to the Inbox: client-written drafts land there.
+      await tb.marionette.run(`
+        const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+        MailServices.folderLookup.getFolderForURL(args.inbox).setFlag(Ci.nsMsgFolderFlags.Drafts);
+        Services.prefs.setCharPref("mail.identity.id1.draft_folder", args.inbox);
+        return true;
+      `, { inbox: `${ALICE}/Inbox` });
+      try {
+        const draft = await tb.call("saveDraft", { to: "x@sink.test", subject: "periodic-x draft", body: "b", from: "id1" }, { client: "drafts-only" });
+        assert.match(draft.result?.error || "", /periodic filter "Periodic forward"/, JSON.stringify(draft));
+      } finally {
+        await tb.marionette.run(`
+          const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+          MailServices.folderLookup.getFolderForURL(args.inbox).clearFlag(Ci.nsMsgFolderFlags.Drafts);
+          Services.prefs.setCharPref("mail.identity.id1.draft_folder", args.drafts);
+          return true;
+        `, { inbox: `${ALICE}/Inbox`, drafts: `${ALICE}/Drafts` });
+      }
       const off = await tb.call("updateFilter", { accountId: "account1", filterIndex: 0, enabled: false }, { client: "no-autosend" });
       assert.equal(off.result?.success, true, JSON.stringify(off));
     } finally {
@@ -738,6 +758,14 @@ describe("filter conditions and reply copies in Trash (native)", { skip: !h.thun
     }
   });
   after(async () => { await tb?.stop(); });
+
+  it("refuses filter conditions on message content without the matching read rights", async () => {
+    const probe = await tb.call("createFilter", {
+      accountId: "account1", name: "Body probe", type: 16,
+      conditions: [{ attrib: "body", op: "contains", value: "cobalt" }], actions: [{ type: "markRead" }],
+    }, { client: "filters-no-read" });
+    assert.match(probe.result?.error || "", /mail\.body/, JSON.stringify(probe));
+  });
 
   it("refuses address-book filter conditions without contacts.read", async () => {
     const args = {

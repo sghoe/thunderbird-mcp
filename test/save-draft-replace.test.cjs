@@ -72,6 +72,7 @@ function loadDraftTools(options = {}) {
       if (options.findError) return { error: options.findError };
       return { msgHdr: hdr, folder };
     },
+    draftFolderPeriodicRestriction: () => null,
     getAccessibleFolder(uri) {
       calls.accessible.push(uri);
       if (options.accessThrows) throw options.accessThrows;

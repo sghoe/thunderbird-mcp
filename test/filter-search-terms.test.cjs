@@ -2487,6 +2487,22 @@ describe("stored filter actions need the calling client's capabilities", () => {
     });
   });
 
+  it("conditions need the read rights for what they inspect (no content probing)", () => {
+    const granted = ["filters.manage", "filters.run", "mail.flag"];
+    const h = makeFilterHarness({ granted });
+    const markRead = [{ type: "markRead" }];
+    const body = h.api.createFilter("account", "Body probe", true, undefined, [{ attrib: "body", op: "contains", value: "cobalt" }], markRead);
+    assert.match(body.error, /mail\.body/);
+    assert.match(body.error, /mail\.metadata/);
+    const subject = h.api.createFilter("account", "Subject probe", true, undefined, [{ attrib: "subject", op: "contains", value: "x" }], markRead);
+    assert.match(subject.error, /mail\.metadata/);
+    h.seed({ name: "Stored body rule", conditions: [{ attrib: "body", op: "contains", value: "cobalt" }] });
+    const applied = h.api.applyFilters("account", h.folder.URI);
+    assert.deepEqual(Array.from(applied.skipped, (e) => `${e.name}:${e.reason}`), ["Stored body rule:missing-capability"]);
+    const ok = makeFilterHarness({ granted: [...granted, "mail.metadata", "mail.body"] });
+    assert.equal(ok.api.createFilter("account", "Body", true, undefined, [{ attrib: "body", op: "contains", value: "cobalt" }], markRead).success, true);
+  });
+
   it("updateFilter always allows disabling such a rule", () => {
     const h = makeFilterHarness({ allowSend: true, granted: readOnlyRun });
     h.seed({ name: "Forward", actions: [{ type: "forward", value: "target@example.invalid" }] });
