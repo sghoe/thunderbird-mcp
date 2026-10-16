@@ -94,3 +94,35 @@ on every call. Migration effects: [migration.md](migration.md#stage-4--paired-cl
 * Native regression (`stage4-clients.native.cjs`, filter block): both
   scenarios fail on 5a87531 and pass now; forwarding from an account with
   its own identity still sends (positive control).
+
+## Review round 2 – fixes
+
+All points verified against comm-central source before fixing.
+
+* `applyFilters` evaluated the delete model of the filter list's account;
+  the rule deletes through the target folder's own server. Now
+  `filterDeleteIsPermanent(folder.server, folder)` (Opus, Sol).
+* IMAP move-to-Trash without a Trash-*flagged* folder deletes permanently
+  (`nsImapMailFolder::DeleteMessages`: `GetFolderWithFlags(Trash)`, else
+  `deleteImmediatelyNoTrash`). Filters and `deleteMessages` now require
+  `mail.deletePermanent` then; a folder found only by name does not count
+  (Opus, Sol). Full-access clients keep upstream behaviour.
+* Inline forwarding (`mail.forward_message_mode != 0`, Thunderbird's default
+  2) runs through libmime, which lets the original's `X-Identity-Key` pick
+  any identity (`mimedrft.cpp`). Forward rules in inline mode are allowed
+  only while every identity belongs to an account the client may use;
+  forwarding as attachment uses the account's default identity (Sol).
+* Incoming rules also run for POP accounts that defer delivery into the
+  account and then send with *their* server (`nsParseMailbox.cpp`). Forward
+  and Reply rules require those accounts to be accessible (and to have an
+  identity for Forward) (Sol).
+* Review compose windows: Thunderbird may choose another identity than
+  requested (`X-Identity-Key`, `X-Account-Key`, reply to own message). The
+  window's actual identity must belong to an accessible account; otherwise
+  it is closed before any customisation and the call fails (Sol). The
+  reply-draft save already checked the actual identity's Drafts folder.
+* Native: identity override (review forward closed, positive control
+  opens with `id1`), inline Forward rule refused; the new tests fail on
+  b67de11.
+* Not natively testable here (no IMAP/POP server in the harness): the IMAP
+  delete-model and deferred-POP paths are covered by unit tests only.

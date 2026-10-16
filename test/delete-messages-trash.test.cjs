@@ -59,6 +59,8 @@ function makeHarness({
   serverType = "imap",
   deleteModel = Ci.nsMsgImapDeleteModels.MoveToTrash,
   canDeletePermanently = true,
+  // IMAP moves only to a Trash-*flagged* folder of the account.
+  flaggedTrash = true,
 } = {}) {
   const header = { messageId: "message-1@example.com" };
   const deleteCalls = [];
@@ -88,6 +90,7 @@ function makeHarness({
     server: {
       type: serverType,
       deleteModel,
+      rootFolder: { getFolderWithFlags: (flag) => (flag === Ci.nsMsgFolderFlags.Trash && flaggedTrash ? { URI: "imap://account/Trash" } : null) },
       QueryInterface(interfaceType) {
         queryInterfaceCalls.push(interfaceType);
         if (interfaceType !== Ci.nsIImapIncomingServer) {
@@ -272,6 +275,18 @@ describe("permanent deletion needs mail.deletePermanent", () => {
     });
   }
 
+  it("refuses an IMAP move-to-Trash delete without a Trash-flagged folder (Thunderbird deletes permanently)", () => {
+    const harness = makeHarness({ trashFolder: { URI: "imap://account/Deleted Items" }, flaggedTrash: false, canDeletePermanently: false });
+    const result = harness.deleteMessages([harness.header.messageId], "imap://account/INBOX");
+    assert.match(result.error, /requires mail\.deletePermanent/);
+    assert.equal(harness.deleteCalls.length, 0);
+  });
+
+  it("allows it with mail.deletePermanent (upstream behaviour)", () => {
+    const harness = makeHarness({ trashFolder: { URI: "imap://account/Deleted Items" }, flaggedTrash: false });
+    const result = harness.deleteMessages([harness.header.messageId], "imap://account/INBOX");
+    assert.deepStrictEqual(toPlainObject(result), { success: true, deleted: 1 });
+  });
   it("still moves to Trash for a client without it", () => {
     const harness = makeHarness({ trashFolder: { URI: "imap://account/Trash" }, canDeletePermanently: false });
     const result = harness.deleteMessages([harness.header.messageId], "imap://account/INBOX");

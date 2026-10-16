@@ -272,7 +272,8 @@ describe("filters respect the client's sender account and permanent deletion (na
         },
         "Local Folders": { Inbox: f.simple({ id: "local@sender.test", from: "Eve <eve@sender.test>", to: "nobody@local", subject: "Local forward", text: "x" }) },
       },
-      extraPrefs: { [`${NS}allowFilterSendActions`]: true },
+      // Forward as attachment: tests the sender-account rule on its own.
+      extraPrefs: { [`${NS}allowFilterSendActions`]: true, "mail.forward_message_mode": 0 },
       clients: [
         { name: "harness" },
         { name: "local-filters", capabilities: ["accounts.read", "mail.metadata", "filters.read", "filters.manage", "filters.run", "filters.autosend"], accounts: ["account3"] },
@@ -291,7 +292,7 @@ describe("filters respect the client's sender account and permanent deletion (na
       accountId: "account3", name: "Local forward", type: 16, conditions: subjectIs("Local forward"),
       actions: [{ type: "forward", value: "target@sink.test" }],
     }, { client: "local-filters" });
-    assert.match(r.result.error, /identity of this \(accessible\) account/, JSON.stringify(r));
+    assert.match(r.result.error, /may only send through accessible accounts with their own identity/, JSON.stringify(r));
     await h.sleep(1000);
     assert.equal(tb.smtp.messages.length, sent);
   });
@@ -318,5 +319,70 @@ describe("filters respect the client's sender account and permanent deletion (na
     assert.ok(applied.result.skipped.some((s) => s.name === "Purge" && s.reason === "missing-capability"), JSON.stringify(applied));
     await h.sleep(1500);
     assert.equal(await folderCount(`${ALICE}/Trash`), 1);
+  });
+});
+
+// Thunderbird may choose the sender identity itself: inline forwarding honours
+// the original's X-Identity-Key header (libmime), reply/forward windows may
+// switch identities. A client must not end up preparing or sending mail from
+// an account it may not use.
+describe("native identity selection stays within the client's accounts (native)", { skip: !h.thunderbirdBinary() && "THUNDERBIRD_BIN not set" }, () => {
+  let tb;
+  const composeWindows = () => tb.marionette.run(`
+    return [...Services.wm.getEnumerator("msgcompose")].map(w => w.gCurrentIdentity?.key || null);
+  `);
+  const closeComposeWindows = () => tb.marionette.run(`
+    for (const w of [...Services.wm.getEnumerator("msgcompose")]) w.close();
+    return true;
+  `);
+
+  before(async () => {
+    tb = await h.startThunderbird({
+      headless: true,
+      mailboxes: {
+        alice: {
+          Inbox: f.message({ id: "idkey@sender.test", from: "Carol <carol@sender.test>", to: f.ALLOWED_EMAIL, subject: "Identity override",
+            headers: ["X-Identity-Key: id2"], contentType: "text/plain; charset=utf-8", body: "pick bob" }) +
+            f.simple({ id: "plain@sender.test", from: "Carol <carol@sender.test>", to: f.ALLOWED_EMAIL, subject: "Plain", text: "x" }),
+        },
+      },
+      extraPrefs: { [`${NS}allowFilterSendActions`]: true, "mail.forward_message_mode": 2 },
+      clients: [
+        { name: "harness" },
+        { name: "alice-only", accounts: ["account1", "account3"] },
+      ],
+    });
+    await tb.waitForMessages(`${ALICE}/Inbox`, 2);
+  });
+  after(async () => { await tb?.stop(); });
+
+  it("closes a review window Thunderbird opened with an identity of a restricted account", async () => {
+    const r = await tb.call("forwardMessage", {
+      messageId: "idkey@sender.test", folderPath: `${ALICE}/Inbox`, to: "target@sink.test", from: "id1",
+    }, { client: "alice-only" });
+    assert.match(r.result?.error || "", /sender identity of an account this client may not use/, JSON.stringify(r));
+    await h.waitFor(async () => (await composeWindows()).length === 0, { label: "compose window closed" });
+  });
+
+  it("still opens review windows with an allowed identity (positive control)", async () => {
+    await closeComposeWindows();
+    const r = await tb.call("forwardMessage", {
+      messageId: "plain@sender.test", folderPath: `${ALICE}/Inbox`, to: "target@sink.test", from: "id1",
+    }, { client: "alice-only" });
+    assert.equal(r.result?.success, true, JSON.stringify(r));
+    assert.deepEqual(await composeWindows(), ["id1"]);
+    await closeComposeWindows();
+  });
+
+  it("refuses inline Forward filter rules while identities of restricted accounts exist", async () => {
+    const sent = tb.smtp.messages.length;
+    const created = await tb.call("createFilter", {
+      accountId: "account1", name: "Inline forward", type: 16,
+      conditions: [{ attrib: "subject", op: "contains", value: "Identity override" }],
+      actions: [{ type: "forward", value: "target@sink.test" }],
+    }, { client: "alice-only" });
+    assert.match(created.result?.error || "", /forwards inline/, JSON.stringify(created));
+    await h.sleep(1000);
+    assert.equal(tb.smtp.messages.length, sent);
   });
 });

@@ -312,6 +312,9 @@ function makeFilterHarness({
   granted = Object.keys(Core.policy.CAPABILITIES),
   // The account's default identity (Forward filters send through it).
   identity = { email: "user@example.invalid" },
+  forwardMode = 0,
+  // Further accounts (e.g. POP accounts deferring into this one).
+  otherAccounts = [],
 } = {}) {
   const prefReads = [];
   const submissions = [];
@@ -358,6 +361,7 @@ function makeFilterHarness({
   const account = {
     key: "account",
     defaultIdentity: identity,
+    identities: identity ? [{ key: "id-account", ...identity }] : [],
     incomingServer: {
       canHaveFilters: true,
       prettyName: "Test account",
@@ -375,6 +379,9 @@ function makeFilterHarness({
         if (prefError) throw new Error("preference unreadable");
         return allowSend === undefined ? fallback : allowSend;
       },
+      getIntPref(name, fallback) {
+        return name === "mail.forward_message_mode" ? forwardMode : fallback;
+      },
     },
     globals: {
       isAccountAllowed: (id) => id === account.key,
@@ -389,8 +396,10 @@ function makeFilterHarness({
       },
       MailServices: {
         accounts: {
-          getAccount: (id) => id === account.key ? account : null,
-          findAccountForServer: (server) => server === account.incomingServer ? account : null,
+          get accounts() { return [account, ...otherAccounts]; },
+          get allIdentities() { return [account, ...otherAccounts].flatMap((a) => a.identities || []); },
+          getAccount: (id) => [account, ...otherAccounts].find((a) => a.key === id) || null,
+          findAccountForServer: (server) => [account, ...otherAccounts].find((a) => a.incomingServer === server) || null,
         },
         filters: {
           getTempFilterList() {
@@ -2148,6 +2157,8 @@ describe("stored filter actions need the calling client's capabilities", () => {
     h.folder.isSpecialFolder = () => false;
     server.type = "imap";
     server.QueryInterface = () => ({ deleteModel: 1 });
+    let flaggedTrash = { URI: "imap://account/Trash" };
+    server.rootFolder = { getFolderWithFlags: () => flaggedTrash };
     h.ci.nsIImapIncomingServer = {};
     h.ci.nsMsgImapDeleteModels = { IMAPDelete: 0, MoveToTrash: 1, DeleteNoTrash: 2 };
     h.ci.nsMsgFolderFlags = { Trash: 0x100 };
@@ -2157,6 +2168,12 @@ describe("stored filter actions need the calling client's capabilities", () => {
     server.QueryInterface = () => ({ deleteModel: 2 });
     const refused = h.api.createFilter("account", "No trash", true, undefined, conditions, [{ type: "delete" }]);
     assert.match(refused.error, /require mail\.deletePermanent/);
+    // Move-to-Trash without a Trash-flagged folder deletes permanently too.
+    server.QueryInterface = () => ({ deleteModel: 1 });
+    flaggedTrash = null;
+    const unflagged = h.api.createFilter("account", "Unflagged", true, undefined, conditions, [{ type: "delete" }]);
+    assert.match(unflagged.error, /require mail\.deletePermanent/);
+    server.QueryInterface = () => ({ deleteModel: 2 });
     const applied = h.api.applyFilters("account", h.folder.URI);
     assert.deepEqual(Array.from(applied.skipped, (entry) => `${entry.name}:${entry.reason}`), ["Move model:missing-capability"]);
     assert.equal(h.submissions.length, 0);
@@ -2166,14 +2183,49 @@ describe("stored filter actions need the calling client's capabilities", () => {
     const h = makeFilterHarness({ allowSend: true, identity: null });
     const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
     const created = h.api.createFilter("account", "Forward", true, undefined, conditions, [{ type: "forward", value: "target@example.invalid" }]);
-    assert.match(created.error, /identity of this \(accessible\) account/);
+    assert.match(created.error, /may only send through accessible accounts with their own identity/);
     h.seed({ name: "Stored forward", actions: [{ type: "forward", value: "target@example.invalid" }] });
     const applied = h.api.applyFilters("account", h.folder.URI);
     assert.deepEqual(Array.from(applied.skipped, (entry) => ({ ...entry })), [{ name: "Stored forward", reason: "unauthorized-sender" }]);
     assert.equal(h.submissions.length, 0);
     const updated = h.api.updateFilter("account", 0, "Renamed");
-    assert.match(updated.error, /identity of this \(accessible\) account/);
+    assert.match(updated.error, /may only send through accessible accounts with their own identity/);
     assert.equal(h.api.updateFilter("account", 0, undefined, false).success, true);
+  });
+
+  it("inline Forward rules are allowed only while every identity is accessible", () => {
+    const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
+    const forward = [{ type: "forward", value: "target@example.invalid" }];
+    const all = makeFilterHarness({ allowSend: true, forwardMode: 2 });
+    assert.equal(all.api.createFilter("account", "Forward", true, undefined, conditions, forward).success, true);
+
+    const other = { key: "other", identities: [{ key: "id-other" }], incomingServer: { type: "imap" } };
+    const h = makeFilterHarness({ allowSend: true, forwardMode: 2, otherAccounts: [other] });
+    const created = h.api.createFilter("account", "Forward", true, undefined, conditions, forward);
+    assert.match(created.error, /forwards inline/);
+    const asAttachment = makeFilterHarness({ allowSend: true, forwardMode: 0, otherAccounts: [other] });
+    assert.equal(asAttachment.api.createFilter("account", "Forward", true, undefined, conditions, forward).success, true);
+    h.seed({ name: "Stored forward", actions: [{ type: "forward", value: "target@example.invalid" }] });
+    h.seed({ name: "Stored reply", actions: [{ type: "reply", value: REPLY_TEMPLATE }] });
+    const applied = h.api.applyFilters("account", h.folder.URI);
+    assert.deepEqual(Array.from(applied.skipped, (e) => `${e.name}:${e.reason}`), ["Stored forward:unauthorized-sender"]);
+    assert.deepEqual(Array.from(applied.submitted), ["Stored reply"]);
+  });
+
+  it("sending rules need every POP account that defers into this account", () => {
+    const pop = {
+      key: "pop", defaultIdentity: { email: "pop@example.invalid" },
+      incomingServer: { type: "pop3", QueryInterface: () => ({ deferredToAccount: "account" }) },
+    };
+    const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
+    for (const [type, value] of [["forward", "target@example.invalid"], ["reply", REPLY_TEMPLATE]]) {
+      const denied = makeFilterHarness({ allowSend: true, otherAccounts: [pop] });
+      denied.ci.nsIPop3IncomingServer = {};
+      const refused = denied.api.createFilter("account", type, true, undefined, conditions, [{ type, value }]);
+      assert.match(refused.error, /POP accounts that deliver into this account/, type);
+      // A rule without sending actions is not affected.
+      assert.equal(denied.api.createFilter("account", "flag", true, undefined, conditions, [{ type: "markRead" }]).success, true);
+    }
   });
 
   it("updateFilter always allows disabling such a rule", () => {

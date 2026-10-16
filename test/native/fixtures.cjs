@@ -146,5 +146,6 @@ module.exports = {
   externalAttachment,
   externalInlineImage,
   inlineImage,
+  message,
   simple,
 };

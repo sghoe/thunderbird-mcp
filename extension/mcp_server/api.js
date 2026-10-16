@@ -4471,6 +4471,17 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
             // END COMPOSE WINDOW DRAFT HELPER
 
+            const COMPOSE_IDENTITY_ERROR = "Thunderbird selected a sender identity of an account this client may not use (for example from the original message's X-Identity-Key or X-Account-Key header); the compose window was closed";
+            function composeIdentityAccessible(composeWin) {
+              try {
+                const effective = composeWin.gCurrentIdentity || composeWin.gMsgCompose?.identity;
+                if (!effective?.key) return false;
+                return getAccessibleAccounts().some(account => account.identities.some(i => i.key === effective.key));
+              } catch {
+                return false;
+              }
+            }
+
             function openComposeWindowWithCustomizations(msgComposeParams, originalMsgURI, compType, identity, body, isHtml, to, cc, bcc, attachDescs, afterInsert) {
               return new Promise((resolve) => {
                 const OPEN_TIMEOUT_MS = shouldUseDirectComposeOpen(compType) ? 60000 : 15000;
@@ -4538,6 +4549,16 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                         } catch {}
                         pendingStateListener = null;
                         pendingStateCompose = null;
+
+                        // Thunderbird may pick another identity than requested
+                        // (X-Identity-Key / X-Account-Key of the original, reply
+                        // to own messages). The window must not prepare mail
+                        // from an account this client may not use.
+                        if (!composeIdentityAccessible(composeWin)) {
+                          try { composeWin.close(); } catch {}
+                          finish({ error: COMPOSE_IDENTITY_ERROR });
+                          return;
+                        }
 
                         try {
                           applyComposeRecipientOverrides(composeWin, identity, to, cc, bcc);
@@ -10618,6 +10639,15 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               }
             }
 
+            // Unreadable state counts as "no Trash" (permanent).
+            function imapHasFlaggedTrash(server) {
+              try {
+                return !!server.rootFolder.getFolderWithFlags(Ci.nsMsgFolderFlags.Trash);
+              } catch {
+                return false;
+              }
+            }
+
             function deleteMessages(messageIds, folderPath) {
               try {
                 // MCP clients may send arrays as JSON strings
@@ -10690,6 +10720,13 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                     trashFolder = findTrashFolder(folder);
                     if (!trashFolder) {
                       return { error: "Trash folder not found" };
+                    }
+                    // IMAP only moves to a Trash-*flagged* folder of the account
+                    // (nsImapMailFolder::DeleteMessages); a folder found by name
+                    // alone does not count, and the delete is permanent.
+                    if (server?.type === "imap" && !imapHasFlaggedTrash(server) &&
+                        !clientHasCapability("mail.deletePermanent")) {
+                      return permanentDeleteRefused;
                     }
                   } else if (!clientHasCapability("mail.deletePermanent")) {
                     return permanentDeleteRefused;
@@ -11180,41 +11217,86 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               };
             }
 
-            // Whether a filter "Delete" action deletes permanently: Thunderbird
-            // deletes storage in Trash (and below) and for IMAP delete models
-            // other than move-to-Trash. Unreadable state counts as permanent.
+            // Whether a filter "Delete" action deletes permanently. The rule
+            // deletes through the filtered folder and its own server
+            // (nsMsgFilterAfterTheFact -> folder.DeleteMessages): permanent in
+            // Trash (and below), for IMAP delete models other than
+            // move-to-Trash, and for IMAP accounts without a Trash-flagged
+            // folder. Unreadable state counts as permanent.
             function filterDeleteIsPermanent(server, folder = null) {
               try {
                 if (folder && folder.isSpecialFolder(Ci.nsMsgFolderFlags.Trash, true)) return true;
                 if (server?.type !== "imap") return false;
-                return server.QueryInterface(Ci.nsIImapIncomingServer).deleteModel !==
-                  Ci.nsMsgImapDeleteModels.MoveToTrash;
+                if (server.QueryInterface(Ci.nsIImapIncomingServer).deleteModel !==
+                  Ci.nsMsgImapDeleteModels.MoveToTrash) return true;
+                return !server.rootFolder.getFolderWithFlags(Ci.nsMsgFolderFlags.Trash);
               } catch {
                 return true;
               }
             }
 
-            // Forward actions send through the default identity of the account
-            // that owns the filtered folder's server; without one Thunderbird
-            // falls back to the global default identity (nsMsgComposeService::
-            // ForwardMessage), which may belong to an account this client must
-            // not use. Reply templates only use the account's own identities.
-            function filterHasForward(filter) {
+            // Sending filter actions use identities Thunderbird picks natively
+            // (nsMsgComposeService):
+            // * Forward: the default identity of the account owning the server
+            //   the rule runs for, else the global default identity. Inline
+            //   forwarding (mail.forward_message_mode != 0, Thunderbird's
+            //   default) goes through libmime, which lets the message's
+            //   X-Identity-Key header pick any identity. Inline Forward rules
+            //   are therefore allowed only while every identity belongs to an
+            //   account this client may use.
+            // * Reply: an identity of that account matching the recipients.
+            // Incoming rules also run for POP accounts that defer delivery to
+            // this account, with *their* server. All those accounts must be
+            // accessible to the client (and have their own identity for Forward).
+            function filterSendingActions(filter) {
               const forward = resolveXpcomConstant("nsMsgFilterAction", "Forward");
+              const reply = resolveXpcomConstant("nsMsgFilterAction", "Reply");
+              const found = { forward: false, reply: false };
               for (let i = 0; i < filter.actionCount; i++) {
-                if (filter.getActionAt(i).type === forward) return true;
+                const type = filter.getActionAt(i).type;
+                if (type === forward) found.forward = true;
+                if (type === reply) found.reply = true;
               }
-              return false;
+              return found;
             }
-            function forwardSenderAuthorized(server) {
+            function deferringAccounts(account) {
+              const result = [];
+              for (const other of MailServices.accounts.accounts) {
+                const server = other.incomingServer;
+                if (other === account || server?.type !== "pop3") continue;
+                if (server.QueryInterface(Ci.nsIPop3IncomingServer).deferredToAccount === account.key) result.push(other);
+              }
+              return result;
+            }
+            // Returns an error message, or null if the rule's sending actions
+            // can only send through accounts this client may use.
+            function filterSenderRestriction(filter, server, { includeDeferred }) {
+              const { forward, reply } = filterSendingActions(filter);
+              if (!forward && !reply) return null;
               try {
+                if (forward && Services.prefs.getIntPref("mail.forward_message_mode", 2) !== 0) {
+                  const allowedIdentities = new Set();
+                  for (const accessible of getAccessibleAccounts()) {
+                    for (const identity of accessible.identities) allowedIdentities.add(identity.key);
+                  }
+                  for (const identity of MailServices.accounts.allIdentities) {
+                    if (!allowedIdentities.has(identity.key)) return INLINE_FORWARD_ERROR;
+                  }
+                }
                 const account = MailServices.accounts.findAccountForServer(server);
-                return !!account && isAccountAllowed(account.key) && !!account.defaultIdentity;
+                if (!account) return SENDER_ACCOUNT_ERROR;
+                const senders = includeDeferred ? [account, ...deferringAccounts(account)] : [account];
+                for (const sender of senders) {
+                  if (!isAccountAllowed(sender.key)) return SENDER_ACCOUNT_ERROR;
+                  if (forward && !sender.defaultIdentity) return SENDER_ACCOUNT_ERROR;
+                }
+                return null;
               } catch {
-                return false;
+                return SENDER_ACCOUNT_ERROR;
               }
             }
-            const FORWARD_SENDER_ERROR = "Forward filter actions need an identity of this (accessible) account; otherwise Thunderbird would send from the default account";
+            const INLINE_FORWARD_ERROR = "Forward filter actions are refused while Thunderbird forwards inline (mail.forward_message_mode != 0) and identities of accounts this client may not use exist: the forwarded message can choose the sender identity. Forward as attachment or grant the client all accounts";
+            const SENDER_ACCOUNT_ERROR = "Forward/Reply filter actions may only send through accessible accounts with their own identity (including POP accounts that deliver into this account); otherwise Thunderbird would send from another account";
 
             function filterCapabilityError(missing) {
               return { error: `Not permitted for this client: the filter's actions require ${missing.join(", ")}. Grant it in the Thunderbird MCP options.` };
@@ -11308,7 +11390,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   deletesPermanently: filterDeleteIsPermanent(server),
                 });
                 if (missing.length) return filterCapabilityError(missing);
-                if (filterHasForward(filter) && !forwardSenderAuthorized(server)) return { error: FORWARD_SENDER_ERROR };
+                const senderError = filterSenderRestriction(filter, server, { includeDeferred: true });
+                if (senderError) return { error: senderError };
                 validateFilterForWrite(filter, { checkTargetFolder: getAccessibleFolder, addressBooksRestricted: isAddressBookAccessRestricted() });
 
                 const idx = (insertAtIndex != null && insertAtIndex >= 0)
@@ -11402,7 +11485,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                     deletesPermanently: filterDeleteIsPermanent(server),
                   });
                   if (missing.length) return filterCapabilityError(missing);
-                  if (filterHasForward(candidate) && !forwardSenderAuthorized(server)) return { error: FORWARD_SENDER_ERROR };
+                  const senderError = filterSenderRestriction(candidate, server, { includeDeferred: true });
+                  if (senderError) return { error: senderError };
                 }
                 validateFilterForWrite(candidate, {
                   onlyDisable,
@@ -11500,12 +11584,14 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               try {
                 const fl = getFilterListForAccount(accountId);
                 if (fl.error) return fl;
-                const { filterList, server } = fl;
+                const { filterList } = fl;
 
                 const afResult = getAccessibleFolder(folderPath);
                 if (afResult.error) return afResult;
                 const folder = afResult.folder;
-                const deletesPermanently = filterDeleteIsPermanent(server, folder);
+                // The rule runs on the target folder's own account, which may
+                // differ from the filter list's account.
+                const deletesPermanently = filterDeleteIsPermanent(folder.server, folder);
 
                 // Try MailServices.filters first, fall back to XPCOM contract ID
                 let filterService;
@@ -11540,7 +11626,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   if (!reason && missingFilterCapabilities(filter, clientHasCapability, { deletesPermanently }).length) {
                     reason = "missing-capability";
                   }
-                  if (!reason && filterHasForward(filter) && !forwardSenderAuthorized(folder.server)) {
+                  if (!reason && filterSenderRestriction(filter, folder.server, { includeDeferred: false })) {
                     reason = "unauthorized-sender";
                   }
                   if (reason === "custom") {
