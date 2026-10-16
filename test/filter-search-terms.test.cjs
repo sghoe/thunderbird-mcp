@@ -2391,6 +2391,61 @@ describe("stored filter actions need the calling client's capabilities", () => {
       assert.equal(plain.api.createFilter("account", "Raise priority", true, undefined, conditions, [{ type: "changePriority", value: 6 }]).success, true);
     });
 
+    it("applyFilters skips rules whose effects periodic rules of the account would see", () => {
+      const h = makeFilterHarness({ allowSend: true, granted: [...readOnlyRun, "mail.flag"] });
+      h.seed({ name: "Periodic forward", filterType: h.ci.nsMsgFilterType.Periodic, actions: [{ type: "forward", value: "target@example.invalid" }] });
+      h.seed({ name: "Tag", actions: [{ type: "markRead" }] });
+      const result = h.api.applyFilters("account", h.folder.URI);
+      assert.ok(Array.from(result.skipped).some((e) => e.name === "Tag" && e.reason === "periodic-filter"), JSON.stringify(result));
+      assert.equal(h.submissions.length, 0);
+    });
+
+    it("checks the periodic rules of the account a Move/Copy target belongs to", () => {
+      const granted = [...readOnlyRun, "mail.move"];
+      const otherList = { filterCount: 0, getFilterAt: () => null };
+      const otherServer = { type: "none", canHaveFilters: true, getFilterList: () => otherList };
+      const other = { key: "other", identities: [], incomingServer: otherServer };
+      const h = makeFilterHarness({
+        allowSend: true, granted, otherAccounts: [other],
+        getAccessibleFolder: (uri) => (uri.startsWith("local://other")
+          ? { folder: { URI: uri, server: otherServer, getFlag: (flag) => flag === 0x1000 } }
+          : { folder: makeAccessibleFolder(uri) }),
+      });
+      h.ci.nsMsgFolderFlags = { ...(h.ci.nsMsgFolderFlags || {}), Inbox: 0x1000 };
+      // The other account has a periodic Forward rule the client may not run.
+      const periodic = h.seed({ name: "Other periodic forward", filterType: h.ci.nsMsgFilterType.Periodic, actions: [{ type: "forward", value: "x@example.invalid" }] });
+      h.filterList.filters.pop();
+      otherList.filterCount = 1;
+      otherList.getFilterAt = () => periodic;
+      const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
+      const created = h.api.createFilter("account", "Copy over", true, undefined, conditions, [{ type: "copyToFolder", value: "local://other/Inbox" }]);
+      assert.match(created.error, /periodic filter "Other periodic forward"/);
+    });
+
+    it("only Inbox folders count for periodic rules (PeriodicFilterManager)", () => {
+      const inboxFlag = 0x1000;
+      const archive = { URI: "local://account/Archive", getFlag: () => false };
+      const h = makeFilterHarness({
+        allowSend: true, granted: [...readOnlyRun, "mail.flag"],
+        getAccessibleFolder: (uri) => ({ folder: uri === archive.URI ? archive : makeAccessibleFolder(uri) }),
+      });
+      h.ci.nsMsgFolderFlags = { ...(h.ci.nsMsgFolderFlags || {}), Inbox: inboxFlag };
+      h.seed({ name: "Periodic forward", filterType: h.ci.nsMsgFilterType.Periodic, actions: [{ type: "forward", value: "target@example.invalid" }] });
+      h.seed({ name: "Tag", actions: [{ type: "markRead" }] });
+      const result = h.api.applyFilters("account", archive.URI);
+      assert.deepEqual(Array.from(result.submitted), ["Tag"]);
+    });
+
+    it("lets a client switch off or delete a periodic rule it may not run", () => {
+      const h = makeFilterHarness({ allowSend: true, granted: [...readOnlyRun] });
+      h.seed({ name: "Periodic forward", filterType: h.ci.nsMsgFilterType.Periodic, actions: [{ type: "forward", value: "target@example.invalid" }] });
+      assert.equal(h.api.updateFilter("account", 0, undefined, false).success, true);
+      assert.equal(h.filterList.filters[0].enabled, false);
+      const h2 = makeFilterHarness({ allowSend: true, granted: [...readOnlyRun] });
+      h2.seed({ name: "Periodic forward", filterType: h2.ci.nsMsgFilterType.Periodic, actions: [{ type: "forward", value: "target@example.invalid" }] });
+      assert.equal(h2.api.deleteFilter("account", 0).success, true);
+    });
+
     it("allows changes when every affected rule is runnable by the client", () => {
       const h = makeFilterHarness({ allowSend: true, granted: [...readOnlyRun, "mail.flag"] });
       h.seed({ name: "Flag A", actions: [{ type: "markRead" }] });

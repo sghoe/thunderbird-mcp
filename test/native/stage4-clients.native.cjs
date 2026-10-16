@@ -688,7 +688,11 @@ describe("filter conditions and reply copies in Trash (native)", { skip: !h.thun
     const policy = await import(require("node:url").pathToFileURL(require("node:path").join(h.EXTENSION_DIR, "mcp_server", "core", "policy.sys.mjs")).href);
     allCaps = Object.keys(policy.CAPABILITIES);
     tb = await h.startThunderbird({
-      mailboxes: { alice: { Trash: f.simple({ id: "trashed@sender.test", from: "Carol <carol@sender.test>", to: f.ALLOWED_EMAIL, subject: "trashreply original", text: "x" }) } },
+      mailboxes: { alice: {
+        Trash: f.simple({ id: "trashed@sender.test", from: "Carol <carol@sender.test>", to: f.ALLOWED_EMAIL, subject: "trashreply original", text: "x" }),
+        Inbox: f.simple({ id: "periodic-in@sender.test", from: "Carol <carol@sender.test>", to: f.ALLOWED_EMAIL, subject: "periodic-x inbox", text: "x" }),
+        Archive: f.simple({ id: "periodic-arch@sender.test", from: "Carol <carol@sender.test>", to: f.ALLOWED_EMAIL, subject: "periodic-x archive", text: "x" }),
+      } },
       extraPrefs: { "mail.identity.id1.fcc_reply_follows_parent": true },
       clients: [
         { name: "harness" },
@@ -698,6 +702,29 @@ describe("filter conditions and reply copies in Trash (native)", { skip: !h.thun
       ],
     });
     await tb.waitForMessages(`${ALICE}/Trash`, 1);
+    await tb.waitForMessages(`${ALICE}/Inbox`, 1);
+    await tb.waitForMessages(`${ALICE}/Archive`, 1);
+  });
+
+  it("periodic rules: Inbox changes and replies need their rights; other folders and switching the rule off do not", async () => {
+    await tb.marionette.run("Services.prefs.setBoolPref(args.name, true); Services.prefs.setIntPref('mail.forward_message_mode', 0); return true;", { name: `${NS}allowFilterSendActions` });
+    const periodic = await tb.call("createFilter", {
+      accountId: "account1", name: "Periodic forward", type: 256,
+      conditions: [{ attrib: "subject", op: "contains", value: "periodic-x" }], actions: [{ type: "forward", value: "target@sink.test" }],
+    });
+    assert.equal(periodic.result?.success, true, JSON.stringify(periodic));
+    try {
+      const inbox = await tb.call("updateMessage", { messageId: "periodic-in@sender.test", folderPath: `${ALICE}/Inbox`, flagged: true }, { client: "no-autosend" });
+      assert.match(inbox.result?.error || "", /periodic filter "Periodic forward"/, JSON.stringify(inbox));
+      const archive = await tb.call("updateMessage", { messageId: "periodic-arch@sender.test", folderPath: `${ALICE}/Archive`, flagged: true }, { client: "no-autosend" });
+      assert.equal(archive.result?.success, true, JSON.stringify(archive));
+      const reply = await tb.call("replyToMessage", { messageId: "periodic-in@sender.test", folderPath: `${ALICE}/Inbox`, body: "r", skipReview: true }, { client: "no-autosend" });
+      assert.match(reply.result?.error || "", /Not sent: .*periodic filter "Periodic forward"/, JSON.stringify(reply));
+      const off = await tb.call("updateFilter", { accountId: "account1", filterIndex: 0, enabled: false }, { client: "no-autosend" });
+      assert.equal(off.result?.success, true, JSON.stringify(off));
+    } finally {
+      await tb.call("deleteFilter", { accountId: "account1", filterIndex: 0 });
+    }
   });
   after(async () => { await tb?.stop(); });
 

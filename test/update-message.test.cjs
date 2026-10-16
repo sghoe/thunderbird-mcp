@@ -43,7 +43,7 @@ function makeHarness({ crossAccount = false, denied = [], copyError = false } = 
       copies.push(args);
     },
     copyFolder(...args) { folderMoves.push(args); },
-    periodicRulesRestriction: (srv) => (periodicBlocked.includes(srv) ? { error: "periodic filter refused" } : null),
+    periodicFolderRestriction: (target) => (periodicBlocked.includes(target?.server) ? { error: "periodic filter refused" } : null),
   });
   async function update(args) {
     return runtime.callTool("updateMessage", { messageId: "one", folderPath: folder.URI, ...args });

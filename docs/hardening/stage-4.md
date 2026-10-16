@@ -317,3 +317,22 @@ Forward rule after the moved range.
   membership.
 * Repository: test leftovers committed by mistake in 348e807 removed;
   `tb-mcp-*/` ignored.
+
+## Review round 13 – fixes
+
+* Opus: rules that copy or move into another account's Inbox, and rules
+  run with `applyFilters`, produce the same effects that `updateMessage`
+  now checks against Periodic rules. `createFilter`/`updateFilter` and
+  `applyFilters` check the Periodic rules of the account a rule runs in
+  and of every Move/Copy target (`rulePeriodicRestriction`; skipped rules
+  report `periodic-filter`). Full-access clients are exempt.
+* Sol: (1) direct replies/forwards mark the original as replied/forwarded,
+  which periodic rules of its Inbox can react to; checked before sending.
+  (2) Move/Copy targets are followed transitively through the target's
+  periodic rules (each server once). (3) Only Inbox-flagged folders count
+  (PeriodicFilterManager processes `getFoldersWithFlags(Inbox)`), so
+  changes in Archive or project folders are not affected. (4) Switching
+  off or deleting a periodic rule does not require that rule's own rights.
+* Native: Inbox flag change and direct reply refused, Archive change and
+  disabling the periodic rule allowed for a client without
+  `filters.autosend`.

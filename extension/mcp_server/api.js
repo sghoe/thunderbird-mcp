@@ -4820,6 +4820,18 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 }
                 const restriction = postOutgoingFilterRestriction(identity, { extraTargets });
                 if (restriction) return Promise.resolve({ error: `Not sent: ${restriction}` });
+                // A successful reply/forward marks the original as replied or
+                // forwarded, which periodic rules of its Inbox can react to.
+                if (originalMsgURI && compType !== Ci.nsIMsgCompType.New) {
+                  let original;
+                  try {
+                    original = MailServices.messageServiceFromURI(originalMsgURI).messageURIToMsgHdr(originalMsgURI).folder;
+                  } catch {
+                    return Promise.resolve({ error: "Not sent: the folder of the original message could not be determined" });
+                  }
+                  const periodic = periodicFolderRestriction(original);
+                  if (periodic) return Promise.resolve({ error: `Not sent: ${periodic.error}` });
+                }
                 let recipients;
                 try {
                   recipients = parseRecipientsForCollection(composeFields.to, composeFields.cc, composeFields.bcc);
@@ -11036,8 +11048,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 // Periodic filters run over the Inbox again and see changed
                 // state and messages moved or copied in.
                 const stateChanges = read !== undefined || flagged !== undefined || addTags || removeTags;
-                const periodicCheck = (stateChanges && periodicRulesRestriction(folder.server)) ||
-                  (targetFolder && (moveTo || copyTo) && periodicRulesRestriction(targetFolder.server));
+                const periodicCheck = (stateChanges && periodicFolderRestriction(folder)) ||
+                  (targetFolder && (moveTo || copyTo) && periodicFolderRestriction(targetFolder));
                 if (periodicCheck) return periodicCheck;
 
                 const actions = [];
@@ -11669,9 +11681,31 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             // changes reaches them regardless of their position. Every enabled
             // Periodic rule of the server (and of the account a POP server
             // delivers into) must be runnable by this client.
-            function periodicRulesRestriction(server) {
+            // Periodic filtering processes Inbox-flagged folders only
+            // (PeriodicFilterManager: getFoldersWithFlags(Inbox)).
+            function isPeriodicFolder(folder) {
+              try {
+                return folder.getFlag(Ci.nsMsgFolderFlags.Inbox);
+              } catch {
+                return true; // unreadable: assume it is processed
+              }
+            }
+
+            // The periodic rules that would see a change in this folder.
+            function periodicFolderRestriction(folder) {
+              if (!folder || !isPeriodicFolder(folder)) return null;
+              return periodicRulesRestriction(folder.server);
+            }
+
+            // exclude: a rule being disabled/deleted (its own rights are not
+            // needed to switch it off). Move/Copy targets of the periodic
+            // rules are followed (each server once).
+            function periodicRulesRestriction(server, { exclude = null, visited = new Set() } = {}) {
               if (clientIsUnrestricted()) return null;
               try {
+                const serverKey = server?.serverURI || server;
+                if (visited.has(serverKey)) return null;
+                visited.add(serverKey);
                 const periodic = resolveXpcomConstant("nsMsgFilterType", "Periodic");
                 if (periodic === undefined) return null;
                 const servers = [server];
@@ -11684,11 +11718,13 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   const list = candidate.getFilterList(null);
                   for (let i = 0; i < list.filterCount; i++) {
                     const rule = list.getFilterAt(i);
-                    if (!rule.enabled || !(rule.filterType & periodic)) continue;
+                    if (rule === exclude || !rule.enabled || !(rule.filterType & periodic)) continue;
                     const reason = storedRuleRestriction(rule, candidate);
                     if (reason) {
                       return { error: `Not permitted for this client: the periodic filter "${rule.filterName}" runs over the Inbox again and would act on the changed messages, and this client may not run it (${reason})` };
                     }
+                    const onward = ruleTargetRestriction(rule, visited);
+                    if (onward) return onward;
                   }
                 }
                 return null;
@@ -11697,13 +11733,50 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               }
             }
 
+            // A rule changes state where it runs and puts messages into its
+            // Move/Copy targets; the periodic rules of all those accounts see
+            // the result. Unreadable targets fail closed.
+            // Periodic rules of the Inboxes a rule copies or moves into.
+            function ruleTargetRestriction(filter, visited = new Set()) {
+              const moveCopy = ["MoveToFolder", "CopyToFolder"]
+                .map(name => resolveXpcomConstant("nsMsgFilterAction", name))
+                .filter(value => value !== undefined);
+              try {
+                for (let i = 0; i < filter.actionCount; i++) {
+                  const action = filter.getActionAt(i);
+                  if (!moveCopy.includes(action.type)) continue;
+                  const target = getAccessibleFolder(action.targetFolderUri);
+                  if (target.error || !target.folder) return { error: "Not permitted for this client: a Move/Copy target of the filter could not be checked" };
+                  if (!isPeriodicFolder(target.folder)) continue;
+                  const restriction = periodicRulesRestriction(target.folder.server, { visited });
+                  if (restriction) return restriction;
+                }
+                return null;
+              } catch {
+                return { error: "Not permitted for this client: the filter's targets could not be checked" };
+              }
+            }
+
+            // runFolder: where the rule runs (null: incoming mail, i.e. the
+            // Inbox). Periodic rules see its state changes there and the
+            // messages it puts into Inbox targets.
+            function rulePeriodicRestriction(filter, runServer, runFolder = null) {
+              if (clientIsUnrestricted()) return null;
+              const visited = new Set();
+              if (!runFolder || isPeriodicFolder(runFolder)) {
+                const here = periodicRulesRestriction(runServer, { visited });
+                if (here) return here;
+              }
+              return ruleTargetRestriction(filter, visited);
+            }
+
             // Every enabled rule in [start, end] (and the incoming rules of a
             // deferred-to account, and periodic rules) must be runnable.
-            function reachableRulesRestriction(filterList, server, start, end = filterList.filterCount - 1) {
+            function reachableRulesRestriction(filterList, server, start, end = filterList.filterCount - 1, { exclude = null } = {}) {
               if (clientIsUnrestricted()) return null;
               const deferred = deferredListRestriction(server);
               if (deferred) return deferred;
-              const periodic = periodicRulesRestriction(server);
+              const periodic = periodicRulesRestriction(server, { exclude });
               if (periodic) return periodic;
               for (let i = Math.max(0, start); i <= end && i < filterList.filterCount; i++) {
                 const rule = filterList.getFilterAt(i);
@@ -11809,6 +11882,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 if (missing.length) return filterCapabilityError(missing);
                 const senderError = filterSenderRestriction(filter, server, { includeDeferred: true });
                 if (senderError) return { error: senderError };
+                const periodicError = rulePeriodicRestriction(filter, server);
+                if (periodicError) return periodicError;
                 validateFilterForWrite(filter, { checkTargetFolder: getAccessibleFolder, addressBooksRestricted: filterAddressBooksRestricted() });
 
                 const idx = (insertAtIndex != null && insertAtIndex >= 0)
@@ -11907,7 +11982,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 // the rules after it see.
                 const effectChanges = enabled !== undefined || type !== undefined || conditions !== undefined || actions !== undefined;
                 if (effectChanges) {
-                  const reach = reachableRulesRestriction(filterList, server, filterIndex + 1);
+                  // The stored rule is replaced; the candidate is checked below.
+                  const reach = reachableRulesRestriction(filterList, server, filterIndex + 1, undefined, { exclude: filter });
                   if (reach) return reach;
                 }
                 // The resulting rule (new or retained actions) runs with this
@@ -11919,6 +11995,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   if (missing.length) return filterCapabilityError(missing);
                   const senderError = filterSenderRestriction(candidate, server, { includeDeferred: true });
                   if (senderError) return { error: senderError };
+                  const periodicError = rulePeriodicRestriction(candidate, server);
+                  if (periodicError) return periodicError;
                 }
                 validateFilterForWrite(candidate, {
                   onlyDisable,
@@ -11959,7 +12037,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                 const filter = filterList.getFilterAt(filterIndex);
                 const filterName = filter.filterName;
-                const reach = reachableRulesRestriction(filterList, server, filterIndex + 1);
+                const reach = reachableRulesRestriction(filterList, server, filterIndex + 1, undefined, { exclude: filter });
                 if (reach) return reach;
                 filterList.removeFilterAt(filterIndex);
                 try {
@@ -12069,6 +12147,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   if (!reason && filterSenderRestriction(filter, folder.server, { includeDeferred: false, folder })) {
                     reason = "unauthorized-sender";
                   }
+                  // Periodic rules see what this rule changes and copies.
+                  if (!reason && rulePeriodicRestriction(filter, folder.server, folder)) reason = "periodic-filter";
                   if (reason === "custom") {
                     return { error: `Custom filter actions are unsupported (filter: ${filter.filterName})` };
                   }

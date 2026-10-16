@@ -73,6 +73,7 @@ function loadSend(options = {}) {
     },
     // Sent-copy (FCC) authorization of the identity.
     identitySentCopyAllowed: () => !options.sentCopyDenied,
+    periodicFolderRestriction: () => options.periodic || null,
     parseRecipientsForCollection: (...headers) => headers.filter(Boolean).map(email => ({ email, name: "" })),
     addressCollectionRestriction(recipients) {
       state.collectionRecipients = recipients;
