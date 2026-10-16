@@ -395,6 +395,11 @@ function makeFilterHarness({
       clientHasCapability: (capability) => granted.includes(capability),
       identitySentCopyAllowed: (identity) => sentCopyAllowed(identity),
       addressCollectionRestriction: (recipients) => collection(recipients),
+      // Minimal stand-in for Thunderbird's header parser ("Name <addr>, addr").
+      parseRecipientsForCollection: (...headers) => headers.filter(Boolean).flatMap((header) => header.split(",").map((part) => {
+        const match = /^\s*(.*?)\s*<([^>]+)>\s*$/.exec(part);
+        return match ? { email: match[2], name: match[1] } : { email: part.trim(), name: "" };
+      })),
       postOutgoingFilterRestriction: () => null,
       isAddressBookAccessRestricted: () => addressBooksRestricted,
       getAccessibleAccounts: () => [account],
@@ -2282,8 +2287,23 @@ describe("stored filter actions need the calling client's capabilities", () => {
     const refused = h.api.createFilter("account", "fwd", true, undefined, conditions, [{ type: "forward", value: "t@example.invalid" }]);
     assert.match(refused.error, /would add or change contacts/);
     assert.deepEqual(JSON.parse(JSON.stringify(seen.at(-1))), [{ email: "t@example.invalid", name: "" }]);
+    // Forward targets are parsed like Thunderbird does (names included).
+    h.api.createFilter("account", "fwd2", true, undefined, conditions, [{ type: "forward", value: "Known Person <known@example.invalid>" }]);
+    assert.deepEqual(JSON.parse(JSON.stringify(seen.at(-1))), [{ email: "known@example.invalid", name: "Known Person" }]);
     h.api.createFilter("account", "reply", true, undefined, conditions, [{ type: "reply", value: REPLY_TEMPLATE }]);
-    assert.equal(seen.at(-1).at(-1).name, null, "reply recipients are unknown");
+    assert.equal(seen.at(-1).at(-1).email, null, "reply recipients are unknown");
+  });
+
+  it("includes the sending identities' automatic Cc/Bcc in the collection check", () => {
+    const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
+    const seen = [];
+    const h = makeFilterHarness({
+      allowSend: true,
+      identity: { email: "user@example.invalid", doCc: true, doCcList: "Cc Person <cc@example.invalid>", doBcc: true, doBccList: "bcc@example.invalid" },
+      collection: (recipients) => { seen.push(recipients); return null; },
+    });
+    assert.equal(h.api.createFilter("account", "fwd", true, undefined, conditions, [{ type: "forward", value: "t@example.invalid" }]).success, true);
+    assert.deepEqual(JSON.parse(JSON.stringify(seen.at(-1))).map((r) => r.email), ["t@example.invalid", "cc@example.invalid", "bcc@example.invalid"]);
   });
 
   it("chained POP deferral counts: every account resolving into this one is checked", () => {

@@ -199,3 +199,21 @@ All points verified against comm-central source before fixing.
 * Native: filter-triggered Post-outgoing copy and contact collection
   refused (positive controls pass); both fail on 23a9d3a. The Stage 2
   native profile now allows address books, as its Reply rule collects.
+
+## Review round 6 – fixes
+
+Both reviewers reported the same three points:
+
+* Inline Forward rules: every selectable identity (`X-Identity-Key`) is a
+  possible sender, so their Sent copies, Post-outgoing filters and
+  automatic Cc/Bcc are all checked, not only the default identity's.
+* Post-outgoing chains: a direct send now also checks the Post-outgoing
+  filters reached by sends that its own Post-outgoing filters trigger
+  (nesting is passed through; a third level that sends again is refused).
+* Address collection for rules: Forward targets are parsed like
+  Thunderbird does (`Name <addr>`, lists), the sending identities'
+  automatic Cc/Bcc are included, and unknown Reply recipients are refused
+  without `contacts.write` + address-book access even with collection off
+  (existing unnamed contacts are still named).
+* Native: all three scenarios refused (positive control reaches the
+  chain); all fail on 63befea.

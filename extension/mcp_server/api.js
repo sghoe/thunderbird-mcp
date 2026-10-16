@@ -3906,7 +3906,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             // existing contacts without a name get the recipient's name.
             // Without contacts.write and address-book access a send may only
             // proceed when collection changes nothing. recipients:
-            // [{ email, name }]; name null = unknown (fail closed).
+            // [{ email, name }]; email null = unknown recipient (refused).
             function addressCollectionRestriction(recipients) {
               if (clientHasCapability("contacts.write") && !isAddressBookAccessRestricted()) return null;
               const refusal = "Thunderbird would add or change contacts for the recipients (address collection), which needs contacts.write and address-book access";
@@ -3914,6 +3914,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 const createCards = Services.prefs.getBoolPref("mail.collect_email_address_outgoing", false) &&
                   !!Services.prefs.getStringPref("mail.collect_addressbook", "");
                 for (const { email, name } of recipients) {
+                  // Unknown recipients (Reply rules) may match an unnamed contact.
+                  if (email === null) return refusal;
                   if (!email) continue;
                   const book = [...MailServices.ab.directories].find(d => d.cardForEmailAddress(email));
                   if (!book) {
@@ -11455,15 +11457,16 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               const { forward, reply } = filterSendingActions(filter);
               if (!forward && !reply) return null;
               try {
-                if (forward && Services.prefs.getIntPref("mail.forward_message_mode", 2) !== 0) {
+                // Inline forwarding lets X-Identity-Key select any identity, so
+                // every identity is a possible Forward sender.
+                const inlineForward = forward && Services.prefs.getIntPref("mail.forward_message_mode", 2) !== 0;
+                if (inlineForward) {
                   const allowedIdentities = new Set();
                   for (const accessible of getAccessibleAccounts()) {
                     for (const identity of accessible.identities) allowedIdentities.add(identity.key);
                   }
                   for (const identity of MailServices.accounts.allIdentities) {
                     if (!allowedIdentities.has(identity.key)) return INLINE_FORWARD_ERROR;
-                    // Any identity may be selected, so any Sent copy may be filed.
-                    if (!identitySentCopyAllowed(identity)) return SENT_COPY_ERROR;
                   }
                 }
                 const account = MailServices.accounts.findAccountForServer(server);
@@ -11474,26 +11477,32 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   // Identities that may send: Forward uses the account's
                   // default identity or the default account's (Thunderbird's
                   // GetDefaultIdentity); Reply any identity of the account.
-                  let identities;
+                  let identities = [];
                   if (forward) {
                     const fallbackAccount = sender.defaultIdentity ? sender : MailServices.accounts.defaultAccount;
                     if (!fallbackAccount?.defaultIdentity || !isAccountAllowed(fallbackAccount.key)) return SENDER_ACCOUNT_ERROR;
-                    identities = [fallbackAccount.defaultIdentity];
-                  } else {
-                    identities = [];
+                    identities = inlineForward ? [...MailServices.accounts.allIdentities] : [fallbackAccount.defaultIdentity];
                   }
-                  if (reply) identities.push(...sender.identities);
+                  if (reply) {
+                    for (const identity of sender.identities) {
+                      if (!identities.some(i => i.key === identity.key)) identities.push(identity);
+                    }
+                  }
                   if (!identities.every(identitySentCopyAllowed)) return SENT_COPY_ERROR;
-                  // The triggered send collects its recipients: forward
-                  // targets are known, reply recipients (the senders of
-                  // future mail) are not.
+                  // The triggered send collects its recipients: Forward targets
+                  // as Thunderbird parses them, the sending identities' auto
+                  // Cc/Bcc, and for Reply the (unknown) senders of future mail.
                   const collectionTargets = [];
                   const forwardType = resolveXpcomConstant("nsMsgFilterAction", "Forward");
                   for (let i = 0; i < filter.actionCount; i++) {
                     const action = filter.getActionAt(i);
-                    if (action.type === forwardType) collectionTargets.push({ email: action.strValue, name: "" });
+                    if (action.type === forwardType) collectionTargets.push(...parseRecipientsForCollection(action.strValue));
                   }
-                  if (reply) collectionTargets.push({ email: "unknown-reply-recipient", name: null });
+                  for (const identity of identities) {
+                    if (identity.doCc) collectionTargets.push(...parseRecipientsForCollection(identity.doCcList));
+                    if (identity.doBcc) collectionTargets.push(...parseRecipientsForCollection(identity.doBccList));
+                  }
+                  if (reply) collectionTargets.push({ email: null, name: null });
                   const collection = addressCollectionRestriction(collectionTargets);
                   if (collection) return `Forward/Reply filter actions are refused: ${collection}`;
                   // The triggered send runs the Post-outgoing filters of the
@@ -11545,7 +11554,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                       const sending = filterSendingActions(filter);
                       if (sending.forward || sending.reply) reason = "sends again";
                     }
-                    if (!reason && filterSenderRestriction(filter, server, { includeDeferred: false, nested: true })) reason = "unauthorized-sender";
+                    // A top-level check (direct send) also checks the
+                    // Post-outgoing filters of sends these filters trigger.
+                    if (!reason && filterSenderRestriction(filter, server, { includeDeferred: false, nested })) reason = "unauthorized-sender";
                     if (!reason) reason = getFilterConditionRestriction(filter, { addressBooksRestricted });
                     if (reason) return `the Post-outgoing filter "${filter.filterName}" would run on the sent copy beyond this client's rights (${reason})`;
                   }

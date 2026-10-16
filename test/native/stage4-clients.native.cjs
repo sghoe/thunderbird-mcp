@@ -557,3 +557,105 @@ describe("native follow-up effects stay within the client's accounts (native)", 
     }
   });
 });
+
+// Chains Thunderbird runs after a send: identities chosen by X-Identity-Key,
+// Post-outgoing filters of sends triggered by Post-outgoing filters, and
+// address collection with parsed names.
+describe("send chains and address collection (native)", { skip: !h.thunderbirdBinary() && "THUNDERBIRD_BIN not set" }, () => {
+  let tb;
+  const BOB = "mailbox://bob@127.0.0.1";
+  const LOCAL = "mailbox://nobody@Local%20Folders";
+  const folderCount = (uri) => tb.marionette.run(`
+    const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+    return [...MailServices.folderLookup.getFolderForURL(args.uri).msgDatabase.enumerateMessages()].length;
+  `, { uri });
+  const prefs = (values) => tb.marionette.run(`
+    for (const [name, value] of Object.entries(args.values)) {
+      if (typeof value === "boolean") Services.prefs.setBoolPref(name, value);
+      else if (typeof value === "number") Services.prefs.setIntPref(name, value);
+      else Services.prefs.setCharPref(name, value);
+    }
+    return true;
+  `, { values });
+  const clearFilters = async (accountId) => {
+    const list = await tb.call("listFilters", { accountId });
+    for (let i = (list.result?.[0]?.filters?.length || 0) - 1; i >= 0; i--) await tb.call("deleteFilter", { accountId, filterIndex: i });
+  };
+  const rule = (accountId, name, type, subject, actions, options) => tb.call("createFilter", {
+    accountId, name, type, conditions: [{ attrib: "subject", op: "contains", value: subject }], actions,
+  }, options);
+
+  before(async () => {
+    tb = await h.startThunderbird({
+      mailboxes: { alice: { Templates: f.simple({ id: "tpl@chain.test", from: "Alice <alice@allowed.test>", to: "", subject: "Thanks", text: "Template" }) } },
+      extraPrefs: { [`${NS}allowFilterSendActions`]: true },
+      clients: [
+        { name: "harness" },
+        { name: "alice-bob", accounts: ["account1", "account2"] },
+        { name: "no-contacts", addressBooks: false },
+      ],
+    });
+    await tb.waitForMessages(`${ALICE}/Templates`, 1);
+  });
+  after(async () => { await tb?.stop(); });
+
+  it("inline Forward rules check the Post-outgoing filters of every selectable identity", async () => {
+    await prefs({ "mail.forward_message_mode": 2 });
+    const po = await rule("account2", "Bob sent to Local", 64, "inline-chain", [{ type: "copyToFolder", value: `${LOCAL}/Inbox` }]);
+    assert.equal(po.result?.success, true, JSON.stringify(po));
+    try {
+      const refused = await rule("account1", "Inline forward", 16, "inline-chain", [{ type: "forward", value: "target@sink.test" }], { client: "alice-bob" });
+      assert.match(refused.result?.error || "", /Post-outgoing filter "Bob sent to Local"/, JSON.stringify(refused));
+    } finally {
+      await clearFilters("account1");
+      await clearFilters("account2");
+    }
+  });
+
+  it("checks Post-outgoing filters reached through a Post-outgoing send (direct send)", async () => {
+    await prefs({
+      "mail.forward_message_mode": 0,
+      "mail.identity.id1.fcc_folder": `${BOB}/Sent`,
+      "mail.identity.id2.fcc_folder": `${ALICE}/Sent`,
+    });
+    const forward = await rule("account2", "Bob forwards sent", 64, "chain1", [{ type: "forward", value: "assistant@sink.test" }]);
+    const copy = await rule("account1", "Alice copies sent to Local", 64, "chain1", [{ type: "copyToFolder", value: `${LOCAL}/Inbox` }]);
+    assert.equal(forward.result?.success && copy.result?.success, true, JSON.stringify([forward, copy]));
+    try {
+      const before = await folderCount(`${LOCAL}/Inbox`);
+      const refused = await tb.call("sendMail", { to: "x@sink.test", subject: "chain1 restricted", body: "b", from: "id1", skipReview: true }, { client: "alice-bob" });
+      assert.match(refused.result?.error || "", /Not sent: .*Post-outgoing filter "Bob forwards sent"/, JSON.stringify(refused));
+      // Positive control: the chain really reaches Local Folders.
+      const ok = await tb.call("sendMail", { to: "x@sink.test", subject: "chain1 full", body: "b", from: "id1", skipReview: true });
+      assert.equal(ok.result?.success, true, JSON.stringify(ok));
+      await h.waitFor(async () => (await folderCount(`${LOCAL}/Inbox`)) > before, { label: "copy through the chain", timeoutMs: 60000 });
+    } finally {
+      await clearFilters("account1");
+      await clearFilters("account2");
+      await prefs({ "mail.identity.id1.fcc_folder": `${ALICE}/Sent`, "mail.identity.id2.fcc_folder": `${BOB}/Sent` });
+    }
+  });
+
+  it("refuses sending rules that would name an existing unnamed contact (collection off)", async () => {
+    await prefs({ "mail.collect_email_address_outgoing": false, "mail.forward_message_mode": 0 });
+    await tb.marionette.run(`
+      const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+      const book = MailServices.ab.getDirectory("jsaddrbook://abook.sqlite");
+      const card = Cc["@mozilla.org/addressbook/cardproperty;1"].createInstance(Ci.nsIAbCard);
+      card.primaryEmail = "known@sink.test";
+      book.addCard(card);
+      return true;
+    `);
+    try {
+      const forward = await rule("account1", "Named forward", 16, "never 42", [{ type: "forward", value: "Known Person <known@sink.test>" }], { client: "no-contacts" });
+      assert.match(forward.result?.error || "", /add or change contacts/, JSON.stringify(forward));
+      const reply = await rule("account1", "Reply", 16, "never 42", [{ type: "reply", value: `${ALICE}/Templates?messageId=tpl@chain.test&subject=Thanks` }], { client: "no-contacts" });
+      assert.match(reply.result?.error || "", /add or change contacts/, JSON.stringify(reply));
+      // A plain target address without a name changes nothing.
+      const plain = await rule("account1", "Plain forward", 16, "never 42", [{ type: "forward", value: "known@sink.test" }], { client: "no-contacts" });
+      assert.equal(plain.result?.success, true, JSON.stringify(plain));
+    } finally {
+      await clearFilters("account1");
+    }
+  });
+});
