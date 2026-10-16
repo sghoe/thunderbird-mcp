@@ -336,3 +336,19 @@ Forward rule after the moved range.
 * Native: Inbox flag change and direct reply refused, Archive change and
   disabling the periodic rule allowed for a client without
   `filters.autosend`.
+
+## Review round 14 – fixes
+
+* Sent copies filed into an Inbox (identity's Sent folder set to an Inbox,
+  reply next to the original) and Move/Copy targets of Post-outgoing rules
+  are checked against that Inbox's periodic rules (Opus, Sol).
+* Stored rules affected by list edits follow their Move/Copy targets'
+  periodic rules transitively (Sol). The mutually recursive checks share a
+  visited set and are bounded by a depth limit (fails closed).
+* `displayMessage` marks unread messages read (`mark_message_read.auto`);
+  it is refused when periodic rules of the Inbox the client may not run
+  would react (Opus, Sol).
+* Post-outgoing checks are skipped for clients with full rights, so a
+  custom Post-outgoing action no longer blocks their direct sends (Sol).
+* Native: display of an unread Inbox message and a send whose copy lands
+  in the Inbox refused for a client without `filters.autosend`.

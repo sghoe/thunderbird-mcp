@@ -720,6 +720,17 @@ describe("filter conditions and reply copies in Trash (native)", { skip: !h.thun
       assert.equal(archive.result?.success, true, JSON.stringify(archive));
       const reply = await tb.call("replyToMessage", { messageId: "periodic-in@sender.test", folderPath: `${ALICE}/Inbox`, body: "r", skipReview: true }, { client: "no-autosend" });
       assert.match(reply.result?.error || "", /Not sent: .*periodic filter "Periodic forward"/, JSON.stringify(reply));
+      // Displaying an unread Inbox message marks it read.
+      const shown = await tb.call("displayMessage", { messageId: "periodic-in@sender.test", folderPath: `${ALICE}/Inbox`, displayMode: "tab" }, { client: "no-autosend" });
+      assert.match(shown.result?.error || "", /periodic filter "Periodic forward"/, JSON.stringify(shown));
+      // A Sent copy filed into the Inbox is seen by the periodic rules too.
+      await tb.marionette.run("Services.prefs.setCharPref('mail.identity.id1.fcc_folder', args.uri); return true;", { uri: `${ALICE}/Inbox` });
+      try {
+        const sent = await tb.call("sendMail", { to: "x@sink.test", subject: "periodic-x sent", body: "b", from: "id1", skipReview: true }, { client: "no-autosend" });
+        assert.match(sent.result?.error || "", /Not sent: .*periodic filter "Periodic forward"/, JSON.stringify(sent));
+      } finally {
+        await tb.marionette.run("Services.prefs.setCharPref('mail.identity.id1.fcc_folder', args.uri); return true;", { uri: `${ALICE}/Sent` });
+      }
       const off = await tb.call("updateFilter", { accountId: "account1", filterIndex: 0, enabled: false }, { client: "no-autosend" });
       assert.equal(off.result?.success, true, JSON.stringify(off));
     } finally {

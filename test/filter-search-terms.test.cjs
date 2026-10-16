@@ -2436,6 +2436,18 @@ describe("stored filter actions need the calling client's capabilities", () => {
       assert.deepEqual(Array.from(result.submitted), ["Tag"]);
     });
 
+    it("terminates on periodic rules that move into their own Inbox", () => {
+      const inbox = { URI: "local://account/Inbox", getFlag: (flag) => flag === 0x1000 };
+      const h = makeFilterHarness({
+        allowSend: true, granted: [...readOnlyRun, "mail.flag", "mail.move"],
+        getAccessibleFolder: (uri) => ({ folder: uri === inbox.URI ? inbox : makeAccessibleFolder(uri) }),
+      });
+      h.ci.nsMsgFolderFlags = { ...(h.ci.nsMsgFolderFlags || {}), Inbox: 0x1000 };
+      h.seed({ name: "Periodic loop", filterType: h.ci.nsMsgFilterType.Periodic, actions: [{ type: "moveToFolder", value: inbox.URI }] });
+      h.seed({ name: "Flag", actions: [{ type: "markRead" }] });
+      assert.equal(h.api.deleteFilter("account", 1).success, true);
+    });
+
     it("lets a client switch off or delete a periodic rule it may not run", () => {
       const h = makeFilterHarness({ allowSend: true, granted: [...readOnlyRun] });
       h.seed({ name: "Periodic forward", filterType: h.ci.nsMsgFilterType.Periodic, actions: [{ type: "forward", value: "target@example.invalid" }] });

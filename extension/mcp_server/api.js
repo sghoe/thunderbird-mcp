@@ -10689,6 +10689,16 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               if (!isPrivacyOptInEnabled(PREF_ALLOW_ENCRYPTED_MESSAGES) && hasEncryptedOuterStructure(msgHdr)) {
                 return { error: ENCRYPTED_DISPLAY_ERROR };
               }
+              // Displaying marks an unread message read (mark_message_read.auto),
+              // which periodic rules of its Inbox can react to.
+              let marksRead = true;
+              try {
+                marksRead = !msgHdr.isRead && Services.prefs.getBoolPref("mailnews.mark_message_read.auto", true);
+              } catch { /* assume it does */ }
+              if (marksRead) {
+                const periodic = periodicFolderRestriction(msgHdr.folder);
+                if (periodic) return periodic;
+              }
 
               try {
                 const { MailUtils } = ChromeUtils.importESModule(
@@ -11570,6 +11580,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             // instead (folder null when unknown); the folder matters for
             // permanent deletion (Trash) and is part of the visited key.
             function postOutgoingFilterRestriction(identity, { extraTargets = [], visited = new Set() } = {}) {
+              // Clients with all rights keep upstream behaviour (custom actions
+              // and other rules run as in Thunderbird's own send path).
+              if (clientIsUnrestricted()) return null;
               try {
                 if (!identity.doFcc) return null;
                 const postOutgoing = resolveXpcomConstant("nsMsgFilterType", "PostOutgoing");
@@ -11581,6 +11594,14 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 if (!servers) return "the Sent folder's account could not be determined";
                 const targets = fccFolder ? [{ server: fccFolder.server, folder: fccFolder }] : servers.map(server => ({ server, folder: null }));
                 for (const target of extraTargets) if (target?.server) targets.push(target);
+                // The copy itself lands there: periodic rules of an Inbox see it.
+                const periodicVisited = new Set();
+                for (const { server, folder } of targets) {
+                  const periodic = folder
+                    ? (isPeriodicFolder(folder) ? periodicRulesRestriction(server, { visited: periodicVisited }) : null)
+                    : periodicRulesRestriction(server, { visited: periodicVisited });
+                  if (periodic) return periodic.error.replace(/^Not permitted for this client: /, "");
+                }
                 const addressBooksRestricted = filterAddressBooksRestricted();
                 for (const { server, folder } of targets) {
                   if (server.canHaveFilters === false) continue;
@@ -11600,6 +11621,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                       const senderError = filterSenderRestriction(filter, server, { includeDeferred: false, visited, folder });
                       if (senderError) reason = `sends: ${senderError}`;
                     }
+                    if (!reason && ruleTargetRestriction(filter, periodicVisited)) reason = "periodic-filter";
                     if (!reason) reason = getFilterConditionRestriction(filter, { addressBooksRestricted });
                     if (reason) return `the Post-outgoing filter "${filter.filterName}" would run on the sent copy beyond this client's rights (${reason})`;
                   }
@@ -11664,7 +11686,24 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
             // Why this client may not run a stored rule (as applyFilters would
             // check it), or null.
-            function storedRuleRestriction(filter, server) {
+            // periodicVisited: servers whose periodic rules are already being
+            // checked on this walk. The checks can reach each other through
+            // sends, Post-outgoing and periodic rules; storedRuleDepth bounds
+            // the (synchronous) recursion and fails closed beyond it.
+            let storedRuleDepth = 0;
+            const MAX_STORED_RULE_DEPTH = 16;
+            function storedRuleRestriction(filter, server, options = {}) {
+              if (storedRuleDepth >= MAX_STORED_RULE_DEPTH) return "too-complex";
+              storedRuleDepth++;
+              try {
+                return storedRuleRestrictionOnce(filter, server, options);
+              } catch {
+                return "unreadable";
+              } finally {
+                storedRuleDepth--;
+              }
+            }
+            function storedRuleRestrictionOnce(filter, server, { periodicVisited = new Set() } = {}) {
               if (!filter.enabled) return null;
               if (filter.unparseable) return "unparseable";
               const actionRestriction = getFilterActionRestriction(filter, { allowSending: true, checkTargetFolder: getAccessibleFolder });
@@ -11673,6 +11712,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 return "missing-capability";
               }
               if (filterSenderRestriction(filter, server, { includeDeferred: true })) return "unauthorized-sender";
+              // Messages it puts into an Inbox reach that account's periodic rules.
+              if (ruleTargetRestriction(filter, periodicVisited)) return "periodic-filter";
               return getFilterConditionRestriction(filter, { addressBooksRestricted: filterAddressBooksRestricted() });
             }
 
@@ -11719,12 +11760,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   for (let i = 0; i < list.filterCount; i++) {
                     const rule = list.getFilterAt(i);
                     if (rule === exclude || !rule.enabled || !(rule.filterType & periodic)) continue;
-                    const reason = storedRuleRestriction(rule, candidate);
+                    // Also follows the rule's Move/Copy targets (shared visited).
+                    const reason = storedRuleRestriction(rule, candidate, { periodicVisited: visited });
                     if (reason) {
                       return { error: `Not permitted for this client: the periodic filter "${rule.filterName}" runs over the Inbox again and would act on the changed messages, and this client may not run it (${reason})` };
                     }
-                    const onward = ruleTargetRestriction(rule, visited);
-                    if (onward) return onward;
                   }
                 }
                 return null;

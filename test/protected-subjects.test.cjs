@@ -75,6 +75,8 @@ function loadTools({ allowed = false, streamError = null } = {}) {
     openFolder: () => ({ folder, db: folder.msgDatabase }),
     getAccessibleAccounts: () => [],
     getUserTags: () => [],
+    // Periodic rules of the message's Inbox (Stage 4); tests may block.
+    periodicFolderRestriction: () => sandbox.__periodic || null,
     DEFAULT_MAX_RESULTS: 50,
     MAX_SEARCH_RESULTS_CAP: 200,
     SEARCH_COLLECTION_CAP: 10000,
@@ -189,6 +191,18 @@ describe("displayMessage while encrypted message access is off", () => {
       assert.equal(h.stats.displayed, 0);
       assert.ok(h.stats.bytesRead <= HEADER_LIMIT);
     }
+  });
+
+  it("refuses to mark an unread message read when periodic rules of its Inbox would react", () => {
+    const h = loadTools();
+    h.add({ id: "message", raw: CLEAR_RAW });
+    h.api.__periodic = { error: "periodic filter refused" };
+    const header = h.folder.msgDatabase.enumerateMessages()[0];
+    header.isRead = false;
+    assert.equal(h.api.displayMessage("message", h.folder.URI).error, "periodic filter refused");
+    assert.equal(h.stats.displayed, 0);
+    header.isRead = true; // already read: displaying changes nothing
+    assert.equal(h.api.displayMessage("message", h.folder.URI).success, true);
   });
 
   it("displays clear messages and, after opt-in, encrypted ones", () => {
