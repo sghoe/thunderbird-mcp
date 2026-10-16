@@ -6333,6 +6333,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               const ownEmail = normalizeCalendarEmail(getCalendarIdentity(calendar)?.email);
               let existing;
               let hasOtherAttendees;
+              let externallyOrganized;
               try {
                 // A provider lookup/scan may return a proxy or exception first.
                 const series = event.parentItem || event;
@@ -6354,13 +6355,18 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 });
                 hasOtherAttendees = existing.some(attendee =>
                   !ownEmail || normalizeCalendarEmail(attendee?.id) !== ownEmail);
+                // An invitation from someone else (even with only us as
+                // attendee): changing or deleting it can send a reply to the
+                // organizer (RFC 6638 server-side scheduling).
+                externallyOrganized = items.some(item => item.organizer &&
+                  (!ownEmail || normalizeCalendarEmail(item.organizer.id) !== ownEmail));
               } catch {
                 throw new Error(blocked
                   ? `${ATTENDEE_REVIEW_ERROR} Could not verify the event's attendees or exceptions.`
                   : "Cannot manage attendees: could not verify the event's attendees or exceptions.");
               }
-              if (!scheduleGranted && (attendees?.length > 0 || hasOtherAttendees)) {
-                throw new Error("Not permitted for this client: the event has attendees who may be notified, which requires calendar.schedule. Grant it in the Thunderbird MCP options.");
+              if (!scheduleGranted && (attendees?.length > 0 || hasOtherAttendees || externallyOrganized)) {
+                throw new Error("Not permitted for this client: the event has attendees or an organizer who may be notified, which requires calendar.schedule. Grant it in the Thunderbird MCP options.");
               }
               if (blocked && (attendees?.length > 0 || hasOtherAttendees)) {
                 throw new Error(ATTENDEE_REVIEW_ERROR);
@@ -11453,7 +11459,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             }
             // Returns an error message, or null if the rule's sending actions
             // can only send through accounts this client may use.
-            function filterSenderRestriction(filter, server, { includeDeferred, nested = false }) {
+            function filterSenderRestriction(filter, server, { includeDeferred, visited = new Set() }) {
               const { forward, reply } = filterSendingActions(filter);
               if (!forward && !reply) return null;
               try {
@@ -11507,13 +11513,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   if (collection) return `Forward/Reply filter actions are refused: ${collection}`;
                   // The triggered send runs the Post-outgoing filters of the
                   // copy's account; a reply may be filed next to the original.
-                  if (!nested) {
-                    for (const identity of identities) {
-                      const followsParent = reply && identity.fccReplyFollowsParent;
-                      const extraServers = followsParent ? [server, sender.incomingServer] : [];
-                      const restriction = postOutgoingFilterRestriction(identity, { extraServers, nested: true });
-                      if (restriction) return `Forward/Reply filter actions are refused: ${restriction}`;
-                    }
+                  for (const identity of identities) {
+                    const followsParent = reply && identity.fccReplyFollowsParent;
+                    const extraServers = followsParent ? [server, sender.incomingServer] : [];
+                    const restriction = postOutgoingFilterRestriction(identity, { extraServers, visited });
+                    if (restriction) return `Forward/Reply filter actions are refused: ${restriction}`;
                   }
                 }
                 return null;
@@ -11527,9 +11531,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             // applyFilters. Returns a reason or null.
             // extraServers: other folders the copy may be filed in (replies
             // with fccReplyFollowsParent go to the original's folder).
-            // nested: called for a send that a filter triggers; Post-outgoing
-            // filters that send again are refused there (no recursion).
-            function postOutgoingFilterRestriction(identity, { extraServers = [], nested = false } = {}) {
+            // Sends that these filters trigger are followed transitively;
+            // visited holds the filters already checked on this chain, so
+            // every filter is checked once and the walk terminates.
+            function postOutgoingFilterRestriction(identity, { extraServers = [], visited = new Set() } = {}) {
               try {
                 if (!identity.doFcc) return null;
                 const postOutgoing = resolveXpcomConstant("nsMsgFilterType", "PostOutgoing");
@@ -11545,18 +11550,18 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   for (let i = 0; i < filterList.filterCount; i++) {
                     const filter = filterList.getFilterAt(i);
                     if (!filter.enabled || !(filter.filterType & postOutgoing)) continue;
+                    const key = `${server.serverURI}#${i}#${filter.filterName}`;
+                    if (visited.has(key)) continue;
+                    visited.add(key);
                     let reason = filter.unparseable ? "unparseable" : null;
                     if (!reason) reason = getFilterActionRestriction(filter, { allowSending: true, checkTargetFolder: getAccessibleFolder });
                     if (!reason && missingFilterCapabilities(filter, clientHasCapability, { deletesPermanently: filterDeleteIsPermanent(server) }).length) {
                       reason = "missing-capability";
                     }
-                    if (!reason && nested) {
-                      const sending = filterSendingActions(filter);
-                      if (sending.forward || sending.reply) reason = "sends again";
+                    if (!reason) {
+                      const senderError = filterSenderRestriction(filter, server, { includeDeferred: false, visited });
+                      if (senderError) reason = `sends: ${senderError}`;
                     }
-                    // A top-level check (direct send) also checks the
-                    // Post-outgoing filters of sends these filters trigger.
-                    if (!reason && filterSenderRestriction(filter, server, { includeDeferred: false, nested })) reason = "unauthorized-sender";
                     if (!reason) reason = getFilterConditionRestriction(filter, { addressBooksRestricted });
                     if (reason) return `the Post-outgoing filter "${filter.filterName}" would run on the sent copy beyond this client's rights (${reason})`;
                   }

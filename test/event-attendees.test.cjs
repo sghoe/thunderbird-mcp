@@ -135,6 +135,23 @@ describe("Stored meetings need calendar.schedule for the calling client", () => 
       });
     }
 
+    it(`${name} refuses an external invitation whose only attendee is the calendar user (organizer may get a reply)`, async () => {
+      const runtime = loadCalendarRuntime({ blockSkipReview: false, client: { capabilities: withoutSchedule(Core) } });
+      const organizer = runtime.makeAttendee({ id: "mailto:external@example.net", isOrganizer: true });
+      runtime.seedEvent({ organizer, attendees: [{ id: "mailto:organizer@example.com" }] });
+      const result = await runtime.invoke(name, { ...updateArgs, ...(name === "updateEvent" ? { title: "New title" } : {}) });
+      assert.match(result.error, /requires calendar\.schedule/);
+      assertNoWrites(runtime);
+    });
+
+    it(`${name} allows a self-organized event with only the calendar user as attendee`, async () => {
+      const runtime = loadCalendarRuntime({ blockSkipReview: false, client: { capabilities: withoutSchedule(Core) } });
+      const organizer = runtime.makeAttendee({ id: "mailto:organizer@example.com", isOrganizer: true });
+      runtime.seedEvent({ organizer, attendees: [{ id: "mailto:organizer@example.com" }] });
+      const result = await runtime.invoke(name, { ...updateArgs, ...(name === "updateEvent" ? { title: "New title" } : {}) });
+      assert.equal(result.error, undefined);
+    });
+
     it(`${name} still allows events without attendees`, async () => {
       const runtime = loadCalendarRuntime({ blockSkipReview: false, client: { capabilities: withoutSchedule(Core) } });
       runtime.seedSeries({ attendees: [] });

@@ -217,3 +217,22 @@ Both reviewers reported the same three points:
   (existing unnamed contacts are still named).
 * Native: all three scenarios refused (positive control reaches the
   chain); all fail on 63befea.
+
+## Review round 7 – fixes
+
+* Post-outgoing traversal (Opus, Sol): the round-6 blanket refusal of
+  Post-outgoing filters that send again blocked every direct send from an
+  account with one ordinary Post-outgoing Forward rule – also for
+  full-access clients. Sends triggered by Post-outgoing filters are now
+  followed transitively with a set of already checked filters (each filter
+  checked once, terminates); only effects beyond the client's rights are
+  refused. Native: one Post-outgoing Forward rule no longer blocks a
+  full-access send or rule; the restricted chain test still refuses.
+* External invitations (Sol): an event whose only attendee is the calendar
+  user but whose organizer is someone else is an invitation; changing or
+  deleting it can send a reply to the organizer (RFC 6638 server-side
+  scheduling). It now needs `calendar.schedule`. The Block `skipReview`
+  semantics are unchanged (upstream behaviour).
+* Note: one full native run (all files in parallel) failed 3 subtests of the
+  send-chain block once; the file alone and two further full runs passed.
+  Treated as load-related flakiness of the timing-based chain test.

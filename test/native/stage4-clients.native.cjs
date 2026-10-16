@@ -636,6 +636,20 @@ describe("send chains and address collection (native)", { skip: !h.thunderbirdBi
     }
   });
 
+  it("a single Post-outgoing Forward rule does not block full-access sends or rules (upstream behaviour)", async () => {
+    await prefs({ "mail.forward_message_mode": 0 });
+    const crm = await rule("account1", "CRM forward", 64, "[crm]", [{ type: "forward", value: "crm@sink.test" }]);
+    assert.equal(crm.result?.success, true, JSON.stringify(crm));
+    try {
+      const sent = await tb.call("sendMail", { to: "x@sink.test", subject: "unrelated", body: "b", from: "id1", skipReview: true });
+      assert.equal(sent.result?.success, true, JSON.stringify(sent));
+      const incoming = await rule("account1", "Incoming forward", 16, "never 42", [{ type: "forward", value: "x@sink.test" }]);
+      assert.equal(incoming.result?.success, true, JSON.stringify(incoming));
+    } finally {
+      await clearFilters("account1");
+    }
+  });
+
   it("refuses sending rules that would name an existing unnamed contact (collection off)", async () => {
     await prefs({ "mail.collect_email_address_outgoing": false, "mail.forward_message_mode": 0 });
     await tb.marionette.run(`
