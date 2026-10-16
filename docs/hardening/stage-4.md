@@ -267,3 +267,24 @@ Opus: no substantive findings. Sol:
   for a client without `filters.autosend`, allowed with full access. The
   actual delivery path (POP) is not available in the harness; covered by
   unit tests and the reviewer's native reproduction.
+
+## Review round 10 – fixes
+
+Both reviewers: limiting the round-9 check to Stop/Move/Delete was not
+enough, and it blocked full-access clients:
+
+* Rules run in order on the same message and earlier rules change what
+  later rules see (tags, priority, flags change what conditions match;
+  Stop/Move/Delete end processing). Now every list change other than
+  appending a rule – inserting (`insertAtIndex`), reordering, deleting,
+  and effect-changing updates (enabled, type, conditions, actions) –
+  requires that the client may run every affected rule.
+* POP accounts that deliver into another account also feed its incoming
+  rules with every message their own rules did not move
+  (`nsParseNewMailState::ApplyFilters`); changes to such a list also
+  require the deferred-to account's incoming rules to be runnable.
+* Clients holding all capabilities with unrestricted account and
+  address-book scope are exempt (upstream behaviour, e.g. maintaining a
+  list next to a custom-action or stale rule).
+* Native: inserting a priority rule before a Forward rule refused for a
+  client without `filters.autosend`.

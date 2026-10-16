@@ -2355,12 +2355,39 @@ describe("stored filter actions need the calling client's capabilities", () => {
       assert.equal(h.filterList.filters[0].enabled, true);
     });
 
-    it("allows such changes when no flow-controlling rule is involved", () => {
+    it("also covers state-changing rules: inserting, retyping or reordering a priority rule before a Forward rule", () => {
+      const granted = [...readOnlyRun, "mail.flag"];
+      const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
+      const h = makeFilterHarness({ allowSend: true, granted });
+      h.seed({ name: "Forward highest", actions: [{ type: "forward", value: "target@example.invalid" }] });
+      const inserted = h.api.createFilter("account", "Raise priority", true, undefined, conditions, [{ type: "changePriority", value: 6 }], 0);
+      assert.match(inserted.error, /"Forward highest" act on more messages/);
+      // Appending after it changes nothing the Forward rule sees.
+      assert.equal(h.api.createFilter("account", "Raise priority", true, undefined, conditions, [{ type: "changePriority", value: 6 }]).success, true);
+      assert.match(h.api.reorderFilters("account", 1, 0).error, /"Forward highest" act on more messages/);
+      h.seed({ name: "Flag", actions: [{ type: "markRead" }] });
+      // Index 2 is last: changing it affects no later rule.
+      assert.equal(h.api.updateFilter("account", 2, undefined, undefined, h.ci.nsMsgFilterType.InboxRule).success, true);
+    });
+
+    it("allows changes when every affected rule is runnable by the client", () => {
       const h = makeFilterHarness({ allowSend: true, granted: [...readOnlyRun, "mail.flag"] });
       h.seed({ name: "Flag A", actions: [{ type: "markRead" }] });
-      h.seed({ name: "Forward all", actions: [{ type: "forward", value: "target@example.invalid" }] });
+      h.seed({ name: "Flag B", actions: [{ type: "markFlagged" }] });
       assert.equal(h.api.reorderFilters("account", 1, 0).success, true);
-      assert.equal(h.api.deleteFilter("account", 1).success, true);
+      assert.equal(h.api.deleteFilter("account", 0).success, true);
+    });
+
+    it("keeps upstream behaviour for clients with all capabilities and unrestricted scope", () => {
+      // A later rule with a missing Move target would block a restricted client.
+      const h = makeFilterHarness({ allowSend: true, getAccessibleFolder: (uri) => (uri.includes("Gone") ? { error: "Folder not found" } : { folder: makeAccessibleFolder(uri) }) });
+      h.seed({ name: "Stop", actions: [{ type: "stopExecution" }] });
+      const stale = h.seed({ name: "Stale move", actions: [{ type: "markRead" }] });
+      const move = makeRuleAction();
+      move.type = h.ci.nsMsgFilterAction.MoveToFolder;
+      move.targetFolderUri = "imap://account/Gone";
+      stale.appendAction(move);
+      assert.equal(h.api.deleteFilter("account", 0).success, true);
     });
 
     it("allows them for a client that may run the later rules", () => {

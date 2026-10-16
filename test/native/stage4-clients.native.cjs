@@ -725,6 +725,12 @@ describe("filter conditions and reply copies in Trash (native)", { skip: !h.thun
       assert.match(reorder.result?.error || "", /"Forward all" act on more messages/, JSON.stringify(reorder));
       const del = await tb.call("deleteFilter", { accountId: "account1", filterIndex: 0 }, { client: "no-autosend" });
       assert.match(del.result?.error || "", /"Forward all" act on more messages/, JSON.stringify(del));
+      // State-changing rules count too: a priority rule inserted in front.
+      const priority = await tb.call("createFilter", {
+        accountId: "account1", name: "Raise priority", type: 17, insertAtIndex: 0,
+        conditions: [{ attrib: "subject", op: "contains", value: "a" }], actions: [{ type: "changePriority", value: "6" }],
+      }, { client: "no-autosend" });
+      assert.match(priority.result?.error || "", /"Forward all" act on more messages/, JSON.stringify(priority));
       const list = await tb.call("listFilters", { accountId: "account1" });
       assert.deepEqual(list.result[0].filters.map((x) => x.name), ["Stop confidential", "Forward all"]);
       const ok = await tb.call("reorderFilters", { accountId: "account1", fromIndex: 1, toIndex: 0 });

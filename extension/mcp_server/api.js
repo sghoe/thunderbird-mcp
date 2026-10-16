@@ -11592,17 +11592,46 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               return isAddressBookAccessRestricted() || !clientHasCapability("contacts.read");
             }
 
-            // Rules with these actions keep later rules from acting on a
-            // message; moving, deleting, disabling or changing them can let
-            // later rules (e.g. a user's Forward rule) act on more messages.
-            function filterControlsFlow(filter) {
-              const types = ["StopExecution", "MoveToFolder", "Delete"]
-                .map(name => resolveXpcomConstant("nsMsgFilterAction", name))
-                .filter(value => value !== undefined);
-              for (let i = 0; i < filter.actionCount; i++) {
-                if (types.includes(filter.getActionAt(i).type)) return true;
+            // Rules run in order on the same message, and earlier rules change
+            // what later rules see: Stop/Move/Delete end processing, tags,
+            // priority and flags change what later conditions match. POP
+            // accounts that deliver into another account also feed that
+            // account's incoming rules with every message their own rules did
+            // not move (nsParseNewMailState::ApplyFilters). Any change to a list
+            // other than appending a rule can therefore change what existing
+            // rules do; it requires that the client may run every affected
+            // rule. Clients with all capabilities and unrestricted scope keep
+            // upstream behaviour.
+            function clientIsUnrestricted() {
+              try {
+                if (!Object.keys(Core.policy.CAPABILITIES).every(cap => clientHasCapability(cap))) return false;
+                if (isAddressBookAccessRestricted()) return false;
+                return [...MailServices.accounts.accounts].every(account => isAccountAllowed(account.key));
+              } catch {
+                return false;
               }
-              return false;
+            }
+
+            // Incoming rules of the account a POP server delivers into.
+            function deferredListRestriction(server) {
+              try {
+                if (server?.type !== "pop3") return null;
+                const target = server.rootMsgFolder.server;
+                if (!target || target === server) return null;
+                const inboxRule = resolveXpcomConstant("nsMsgFilterType", "InboxRule");
+                const list = target.getFilterList(null);
+                for (let i = 0; i < list.filterCount; i++) {
+                  const rule = list.getFilterAt(i);
+                  if (inboxRule !== undefined && !(rule.filterType & inboxRule)) continue;
+                  const reason = storedRuleRestriction(rule, target);
+                  if (reason) {
+                    return { error: `Not permitted for this client: this change can let the filter "${rule.filterName}" of the account this one delivers into act on more messages, and this client may not run it (${reason})` };
+                  }
+                }
+                return null;
+              } catch {
+                return { error: "Not permitted for this client: the filters of the account this one delivers into could not be checked" };
+              }
             }
 
             // Why this client may not run a stored rule (as applyFilters would
@@ -11619,8 +11648,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               return getFilterConditionRestriction(filter, { addressBooksRestricted: filterAddressBooksRestricted() });
             }
 
-            // Every enabled rule in [start, end] must be runnable by this client.
+            // Every enabled rule in [start, end] (and the incoming rules of a
+            // deferred-to account) must be runnable by this client.
             function reachableRulesRestriction(filterList, server, start, end = filterList.filterCount - 1) {
+              if (clientIsUnrestricted()) return null;
+              const deferred = deferredListRestriction(server);
+              if (deferred) return deferred;
               for (let i = Math.max(0, start); i <= end && i < filterList.filterCount; i++) {
                 const rule = filterList.getFilterAt(i);
                 const reason = storedRuleRestriction(rule, server);
@@ -11730,6 +11763,14 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 const idx = (insertAtIndex != null && insertAtIndex >= 0)
                   ? Math.min(insertAtIndex, filterList.filterCount)
                   : filterList.filterCount;
+                // Inserting before existing rules changes what they see.
+                if (idx < filterList.filterCount) {
+                  const reach = reachableRulesRestriction(filterList, server, idx);
+                  if (reach) return reach;
+                } else if (!clientIsUnrestricted()) {
+                  const deferred = deferredListRestriction(server);
+                  if (deferred) return deferred;
+                }
                 filterList.insertFilterAt(idx, filter);
                 try {
                   filterList.saveToDefaultFile();
@@ -11811,9 +11852,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 }
                 const onlyDisable = enabled === false && name === undefined && type === undefined
                   && conditions === undefined && actions === undefined;
-                // Changing a flow-controlling rule (also disabling it) can widen
-                // the reach of the rules after it.
-                if (filterControlsFlow(filter)) {
+                // Any effect-changing update (also disabling) can change what
+                // the rules after it see.
+                const effectChanges = enabled !== undefined || type !== undefined || conditions !== undefined || actions !== undefined;
+                if (effectChanges) {
                   const reach = reachableRulesRestriction(filterList, server, filterIndex + 1);
                   if (reach) return reach;
                 }
@@ -11866,10 +11908,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                 const filter = filterList.getFilterAt(filterIndex);
                 const filterName = filter.filterName;
-                if (filterControlsFlow(filter)) {
-                  const reach = reachableRulesRestriction(filterList, server, filterIndex + 1);
-                  if (reach) return reach;
-                }
+                const reach = reachableRulesRestriction(filterList, server, filterIndex + 1);
+                if (reach) return reach;
                 filterList.removeFilterAt(filterIndex);
                 try {
                   filterList.saveToDefaultFile();
@@ -11902,14 +11942,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   return { error: `Invalid target index: ${toIndex}` };
                 }
                 // Only the rules between both positions change their place
-                // relative to each other; if one of them controls the flow,
-                // all of them must be runnable by this client.
-                const low = Math.min(fromIndex, toIndex);
-                const high = Math.max(fromIndex, toIndex);
-                let flowChanges = false;
-                for (let i = low; i <= high; i++) if (filterControlsFlow(filterList.getFilterAt(i))) flowChanges = true;
-                if (flowChanges) {
-                  const reach = reachableRulesRestriction(filterList, server, low, high);
+                // relative to each other; all of them must be runnable.
+                if (fromIndex !== toIndex) {
+                  const reach = reachableRulesRestriction(filterList, server, Math.min(fromIndex, toIndex), Math.max(fromIndex, toIndex));
                   if (reach) return reach;
                 }
 
