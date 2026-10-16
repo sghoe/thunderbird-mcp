@@ -2257,6 +2257,20 @@ describe("stored filter actions need the calling client's capabilities", () => {
     }
   });
 
+  it("inline Forward rules check the Sent copies of every identity (X-Identity-Key may pick any)", () => {
+    const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
+    const forward = [{ type: "forward", value: "t@example.invalid" }];
+    const second = { key: "id-second" };
+    const sentCopyAllowed = (identity) => identity.key !== "id-second";
+    // A second identity of the (accessible) account files its copies elsewhere.
+    const withSecond = makeFilterHarness({ allowSend: true, forwardMode: 2, sentCopyAllowed });
+    withSecond.api.MailServices.accounts.getAccount("account").identities.push(second);
+    assert.match(withSecond.api.createFilter("account", "fwd", true, undefined, conditions, forward).error, /sent copies into an account/);
+    const asAttachment = makeFilterHarness({ allowSend: true, forwardMode: 0, sentCopyAllowed });
+    asAttachment.api.MailServices.accounts.getAccount("account").identities.push(second);
+    assert.equal(asAttachment.api.createFilter("account", "fwd", true, undefined, conditions, forward).success, true);
+  });
+
   it("chained POP deferral counts: every account resolving into this one is checked", () => {
     const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
     const root = { URI: "mailbox://account/" };

@@ -70,6 +70,7 @@ function loadSend(options = {}) {
     },
     // Sent-copy (FCC) authorization of the identity.
     identitySentCopyAllowed: () => !options.sentCopyDenied,
+    postOutgoingFilterRestriction: () => options.postOutgoing || null,
     isSkipReviewBlocked: () => !!options.blocked,
     findMessage: () => ({ msgHdr: hdr, folder }),
     filePathsToAttachDescs: () => ({ descs: [] }),
@@ -184,6 +185,7 @@ describe("direct send SMTP completion", () => {
     ["synchronous creation failure", { createError: new Error("create threw") }, /create threw/],
     ["attachment failure", { attachmentError: new Error("attachments invalid") }, /attachments invalid/],
     ["Sent copy into a restricted account", { sentCopyDenied: true }, /files sent copies into an account this client may not use/],
+    ["Post-outgoing filter beyond the client's rights", { postOutgoing: "the Post-outgoing filter \"x\" would run" }, /Not sent: the Post-outgoing filter/],
   ]) {
     it(`reports ${label} without success`, async () => {
       const h = loadSend(options);

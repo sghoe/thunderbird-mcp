@@ -432,3 +432,78 @@ describe("sent copies stay within the client's accounts (native)", { skip: !h.th
     await h.waitFor(() => tb.smtp.messages.length > sent, { label: "sent" });
   });
 });
+
+// Effects Thunderbird adds on its own after a send or while a review window
+// is open: Post-outgoing filters on the Sent copy, autosave into Drafts, and
+// the Sent-folder fallback when the configured folder does not exist.
+describe("native follow-up effects stay within the client's accounts (native)", { skip: !h.thunderbirdBinary() && "THUNDERBIRD_BIN not set" }, () => {
+  let tb;
+  const BOB = "mailbox://bob@127.0.0.1";
+  const folderCount = (uri) => tb.marionette.run(`
+    const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+    return [...MailServices.folderLookup.getFolderForURL(args.uri).msgDatabase.enumerateMessages()].length;
+  `, { uri });
+  const setCharPref = (name, value) => tb.marionette.run("Services.prefs.setCharPref(args.name, args.value); return true;", { name, value });
+  const composeWindows = () => tb.marionette.run(`return [...Services.wm.getEnumerator("msgcompose")].length;`);
+  const closeComposeWindows = () => tb.marionette.run(`for (const w of [...Services.wm.getEnumerator("msgcompose")]) w.close(); return true;`);
+
+  before(async () => {
+    tb = await h.startThunderbird({
+      mailboxes: { alice: { Inbox: f.simple({ id: "orig@sender.test", from: "Carol <carol@sender.test>", to: f.ALLOWED_EMAIL, subject: "Original", text: "x" }) } },
+      clients: [
+        { name: "harness" },
+        { name: "alice-local", accounts: ["account1", "account3"] },
+        { name: "alice-only", accounts: ["account1"] },
+      ],
+    });
+    await tb.waitForMessages(`${ALICE}/Inbox`, 1);
+  });
+  after(async () => { await tb?.stop(); });
+
+  it("refuses a direct send whose Post-outgoing filter would copy into a restricted account", async () => {
+    const created = await tb.call("createFilter", {
+      accountId: "account1", name: "Copy sent to Bob", type: 64,
+      conditions: [{ attrib: "subject", op: "contains", value: "post-outgoing" }],
+      actions: [{ type: "copyToFolder", value: `${BOB}/Inbox` }],
+    });
+    assert.equal(created.result?.success, true, JSON.stringify(created));
+    const before = await folderCount(`${BOB}/Inbox`);
+    const sent = tb.smtp.messages.length;
+    const refused = await tb.call("sendMail", { to: "x@sink.test", subject: "post-outgoing 1", body: "b", from: "id1", skipReview: true }, { client: "alice-local" });
+    assert.match(refused.result?.error || "", /Post-outgoing filter "Copy sent to Bob"/, JSON.stringify(refused));
+    await h.sleep(1000);
+    assert.equal(tb.smtp.messages.length, sent);
+    // Positive control: a client that may use Bob's account sends, and the
+    // filter really copies the sent message.
+    const ok = await tb.call("sendMail", { to: "x@sink.test", subject: "post-outgoing 2", body: "b", from: "id1", skipReview: true });
+    assert.equal(ok.result?.success, true, JSON.stringify(ok));
+    await h.waitFor(async () => (await folderCount(`${BOB}/Inbox`)) === before + 1, { label: "post-outgoing copy" });
+    await tb.call("deleteFilter", { accountId: "account1", filterIndex: 0 });
+  });
+
+  it("refuses review windows that would autosave into a restricted Drafts folder", async () => {
+    await setCharPref("mail.identity.id1.draft_folder", `${BOB}/Drafts`);
+    try {
+      const refused = await tb.call("replyToMessage", { messageId: "orig@sender.test", folderPath: `${ALICE}/Inbox`, body: "reply" }, { client: "alice-local" });
+      assert.match(refused.result?.error || "", /autosave this review window/, JSON.stringify(refused));
+      await h.waitFor(async () => (await composeWindows()) === 0, { label: "window closed" });
+      const ok = await tb.call("replyToMessage", { messageId: "orig@sender.test", folderPath: `${ALICE}/Inbox`, body: "reply" });
+      assert.equal(ok.result?.success, true, JSON.stringify(ok));
+    } finally {
+      await closeComposeWindows();
+      await setCharPref("mail.identity.id1.draft_folder", `${ALICE}/Drafts`);
+    }
+  });
+
+  it("treats a missing Sent folder like Thunderbird: every fallback (incl. Local Folders) must be accessible", async () => {
+    await setCharPref("mail.identity.id1.fcc_folder", `${ALICE}/Missing Sent`);
+    try {
+      const refused = await tb.call("sendMail", { to: "x@sink.test", subject: "fallback", body: "b", from: "id1", skipReview: true }, { client: "alice-only" });
+      assert.match(refused.result?.error || "", /sent copies into an account this client may not use/, JSON.stringify(refused));
+      const ok = await tb.call("sendMail", { to: "x@sink.test", subject: "fallback ok", body: "b", from: "id1", skipReview: true }, { client: "alice-local" });
+      assert.equal(ok.result?.success, true, JSON.stringify(ok));
+    } finally {
+      await setCharPref("mail.identity.id1.fcc_folder", `${ALICE}/Sent`);
+    }
+  });
+});

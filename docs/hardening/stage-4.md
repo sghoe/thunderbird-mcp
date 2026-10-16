@@ -153,3 +153,28 @@ All points verified against comm-central source before fixing.
   on 665c33a. Exchange and deferred POP remain unit-tested only.
 * `test/native/live-sandbox.cjs`: visible portable Thunderbird with the
   synthetic profile, SMTP sink and two paired clients for manual tests.
+
+## Review round 4 – fixes
+
+* Sent copies and drafts follow Thunderbird's folder resolution
+  (`nsMsgIdentity::getOrCreateFolderAsync`): the configured folder if it
+  exists, otherwise the first usable of the configured server, the
+  identity's servers (through POP deferral) and Local Folders. Since the
+  winner cannot be predicted without side effects, every fallback candidate
+  must be accessible. An empty setting (new Exchange accounts) goes through
+  the same candidates, so full-access clients send as upstream (Opus).
+* Inline Forward rules check the Sent copies of every identity, since
+  `X-Identity-Key` may pick any (Sol, Opus).
+* Post-outgoing filters (Sol): after a direct send Thunderbird runs the
+  Post-outgoing filters of the Sent copy's account
+  (`MessageSend._filterSentMessage`). Their actions, targets, sender
+  accounts and conditions must stay within the client's rights; otherwise
+  nothing is sent.
+* Autosave (Sol): `MsgComposeCommands.js` autosaves modified review windows
+  into Drafts without a user decision. Review windows whose identity would
+  autosave into a restricted account are closed before customisation
+  (only while `mail.compose.autosave` is on).
+* Native: Post-outgoing copy into an excluded account refused (positive
+  control copies), autosave into restricted Drafts refused, missing Sent
+  folder with Local Folders fallback refused for a client without Local
+  Folders. All three fail on 061327d.

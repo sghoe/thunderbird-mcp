@@ -3839,23 +3839,72 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               return findIdentityIn(getAccessibleAccounts(), emailOrId);
             }
 
-            // Sending files a copy into the identity's Sent (FCC) folder, which
-            // may belong to another account. The owning account must be
-            // accessible; unreadable settings or unknown owners fail closed.
+            // Where Thunderbird files an identity's Sent copy or (auto)saved
+            // draft, following nsMsgIdentity::getOrCreateFolderAsync without
+            // side effects: the configured folder if it exists; otherwise the
+            // first usable of the configured server, the identity's servers
+            // (through POP deferral) and Local Folders. As the winner cannot be
+            // predicted, every fallback candidate must be accessible.
+            // Unreadable state fails closed.
+            // Servers whose folders may receive the item; null if unreadable.
+            function identityFolderTargetServers(identity, uri) {
+              try {
+                if (uri) {
+                  let existing = null;
+                  try { existing = MailServices.folderLookup.getFolderForURL(uri); } catch { existing = null; }
+                  if (existing) return [existing.server];
+                }
+                const candidates = [];
+                if (uri) {
+                  for (const account of MailServices.accounts.accounts) {
+                    const serverURI = account.incomingServer?.serverURI;
+                    if (serverURI && (uri === serverURI || uri.startsWith(serverURI + "/"))) candidates.push(account.incomingServer);
+                  }
+                }
+                candidates.push(...MailServices.accounts.getServersForIdentity(identity));
+                try { candidates.push(MailServices.accounts.localFoldersServer); } catch { /* none */ }
+                const targets = [];
+                for (const server of candidates) {
+                  if (!server || server.defaultCopiesAndFoldersPrefsToServer === false) continue;
+                  // Deferred POP servers keep their folders on the target.
+                  const target = server.rootMsgFolder.server;
+                  if (!targets.includes(target)) targets.push(target);
+                }
+                return targets.length ? targets : null;
+              } catch {
+                return null;
+              }
+            }
+
+            function identityFolderTargetAllowed(identity, uri) {
+              const servers = identityFolderTargetServers(identity, uri);
+              if (!servers) return false;
+              return servers.every((server) => {
+                try {
+                  const account = MailServices.accounts.findAccountForServer(server);
+                  return !!account && isAccountAllowed(account.key);
+                } catch {
+                  return false;
+                }
+              });
+            }
+
             function identitySentCopyAllowed(identity) {
               try {
                 if (!identity.doFcc) return true;
-                // Thunderbird 128+: fccFolderURI (resolves to the account's
-                // Sent folder by default); older builds: fccFolder.
-                const uri = identity.fccFolderURI || identity.fccFolder;
-                if (!uri) return false;
-                for (const account of MailServices.accounts.accounts) {
-                  const serverURI = account.incomingServer?.serverURI;
-                  if (serverURI && (uri === serverURI || uri.startsWith(serverURI + "/"))) {
-                    return isAccountAllowed(account.key);
-                  }
-                }
+                // Thunderbird 128+: fccFolderURI; older builds: fccFolder.
+                return identityFolderTargetAllowed(identity, identity.fccFolderURI || identity.fccFolder || "");
+              } catch {
                 return false;
+              }
+            }
+
+            // Autosave writes client-populated review windows into Drafts
+            // without a user decision (MsgComposeCommands.js AutoSave).
+            function identityAutosaveAllowed(identity) {
+              try {
+                if (!Services.prefs.getBoolPref("mail.compose.autosave", true)) return true;
+                return identityFolderTargetAllowed(identity, getIdentityDraftFolderURI(identity) || "");
               } catch {
                 return false;
               }
@@ -4493,6 +4542,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
             // END COMPOSE WINDOW DRAFT HELPER
 
+            const COMPOSE_AUTOSAVE_ERROR = "Thunderbird would autosave this review window into a Drafts folder of an account this client may not use (identity's Drafts setting); the compose window was closed";
             const COMPOSE_IDENTITY_ERROR = "Thunderbird selected a sender identity of an account this client may not use (for example from the original message's X-Identity-Key or X-Account-Key header); the compose window was closed";
             function composeIdentityAccessible(composeWin) {
               try {
@@ -4579,6 +4629,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                         if (!composeIdentityAccessible(composeWin)) {
                           try { composeWin.close(); } catch {}
                           finish({ error: COMPOSE_IDENTITY_ERROR });
+                          return;
+                        }
+                        if (!identityAutosaveAllowed(composeWin.gCurrentIdentity || composeWin.gMsgCompose.identity)) {
+                          try { composeWin.close(); } catch {}
+                          finish({ error: COMPOSE_AUTOSAVE_ERROR });
                           return;
                         }
 
@@ -4692,6 +4747,13 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               // authorized separately by the callers.)
               if (mode !== Ci.nsIMsgCompDeliverMode.SaveAsDraft && !identitySentCopyAllowed(identity)) {
                 return Promise.resolve({ error: "Not sent: the identity files sent copies into an account this client may not use (Sent folder setting)" });
+              }
+              // After filing the copy Thunderbird runs Post-outgoing filters of
+              // that folder's account (MessageSend _filterSentMessage), with
+              // this client's content and without a user decision.
+              if (mode !== Ci.nsIMsgCompDeliverMode.SaveAsDraft) {
+                const restriction = postOutgoingFilterRestriction(identity);
+                if (restriction) return Promise.resolve({ error: `Not sent: ${restriction}` });
               }
               const bodyMimeType = bodyType || "text/html";
               const SEND_TIMEOUT_MS = 120000; // 2 min safety timeout
@@ -11336,6 +11398,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   }
                   for (const identity of MailServices.accounts.allIdentities) {
                     if (!allowedIdentities.has(identity.key)) return INLINE_FORWARD_ERROR;
+                    // Any identity may be selected, so any Sent copy may be filed.
+                    if (!identitySentCopyAllowed(identity)) return SENT_COPY_ERROR;
                   }
                 }
                 const account = MailServices.accounts.findAccountForServer(server);
@@ -11362,6 +11426,40 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 return SENDER_ACCOUNT_ERROR;
               }
             }
+            // Post-outgoing filters of the account that receives the Sent copy
+            // run automatically after a direct send. They run with this
+            // client's content, so they must stay within its rights like
+            // applyFilters. Returns a reason or null.
+            function postOutgoingFilterRestriction(identity) {
+              try {
+                if (!identity.doFcc) return null;
+                const postOutgoing = resolveXpcomConstant("nsMsgFilterType", "PostOutgoing");
+                if (postOutgoing === undefined) return null;
+                const servers = identityFolderTargetServers(identity, identity.fccFolderURI || identity.fccFolder || "");
+                if (!servers) return "the Sent folder's account could not be determined";
+                const addressBooksRestricted = isAddressBookAccessRestricted();
+                for (const server of servers) {
+                  if (server.canHaveFilters === false) continue;
+                  const filterList = server.getFilterList(null);
+                  for (let i = 0; i < filterList.filterCount; i++) {
+                    const filter = filterList.getFilterAt(i);
+                    if (!filter.enabled || !(filter.filterType & postOutgoing)) continue;
+                    let reason = filter.unparseable ? "unparseable" : null;
+                    if (!reason) reason = getFilterActionRestriction(filter, { allowSending: true, checkTargetFolder: getAccessibleFolder });
+                    if (!reason && missingFilterCapabilities(filter, clientHasCapability, { deletesPermanently: filterDeleteIsPermanent(server) }).length) {
+                      reason = "missing-capability";
+                    }
+                    if (!reason && filterSenderRestriction(filter, server, { includeDeferred: false })) reason = "unauthorized-sender";
+                    if (!reason) reason = getFilterConditionRestriction(filter, { addressBooksRestricted });
+                    if (reason) return `the Post-outgoing filter "${filter.filterName}" would run on the sent copy beyond this client's rights (${reason})`;
+                  }
+                }
+                return null;
+              } catch {
+                return "the Post-outgoing filters could not be checked";
+              }
+            }
+
             const INLINE_FORWARD_ERROR = "Forward filter actions are refused while Thunderbird forwards inline (mail.forward_message_mode != 0) and identities of accounts this client may not use exist: the forwarded message can choose the sender identity. Forward as attachment or grant the client all accounts";
             const SENT_COPY_ERROR = "Forward/Reply filter actions would file sent copies into an account this client may not use (identity's Sent folder)";
             const SENDER_ACCOUNT_ERROR = "Forward/Reply filter actions may only send through accessible accounts (including POP accounts that deliver into this account, and Thunderbird's default identity when the account has none); otherwise Thunderbird would send from another account";
