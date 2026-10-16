@@ -292,11 +292,18 @@ describe("filters respect the client's sender account and permanent deletion (na
       accountId: "account3", name: "Local forward", type: 16, conditions: subjectIs("Local forward"),
       actions: [{ type: "forward", value: "target@sink.test" }],
     }, { client: "local-filters" });
-    assert.match(r.result.error, /may only send through accessible accounts with their own identity/, JSON.stringify(r));
+    assert.match(r.result.error, /may only send through accessible accounts/, JSON.stringify(r));
     await h.sleep(1000);
     assert.equal(tb.smtp.messages.length, sent);
   });
 
+  it("allows Local Folders Forward rules for a client that may use the default account (Thunderbird's fallback)", async () => {
+    const r = await tb.call("createFilter", {
+      accountId: "account3", name: "Local forward (full access)", type: 16, conditions: subjectIs("never matches 42"),
+      actions: [{ type: "forward", value: "target@sink.test" }],
+    });
+    assert.equal(r.result.success, true, JSON.stringify(r));
+  });
   it("still forwards through the account's own identity (positive control)", async () => {
     const sent = tb.smtp.messages.length;
     const created = await tb.call("createFilter", {
@@ -384,5 +391,44 @@ describe("native identity selection stays within the client's accounts (native)"
     assert.match(created.result?.error || "", /forwards inline/, JSON.stringify(created));
     await h.sleep(1000);
     assert.equal(tb.smtp.messages.length, sent);
+  });
+});
+
+// Sending files a copy into the identity's Sent folder, which may belong to
+// another account.
+describe("sent copies stay within the client's accounts (native)", { skip: !h.thunderbirdBinary() && "THUNDERBIRD_BIN not set" }, () => {
+  let tb;
+  const BOB = "mailbox://bob@127.0.0.1";
+  const folderCount = (uri) => tb.marionette.run(`
+    const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+    return [...MailServices.folderLookup.getFolderForURL(args.uri).msgDatabase.enumerateMessages()].length;
+  `, { uri });
+  before(async () => {
+    tb = await h.startThunderbird({
+      extraPrefs: {
+        "mail.identity.id1.fcc": true,
+        "mail.identity.id1.fcc_folder_picker_mode": "1",
+        "mail.identity.id1.fcc_folder": `${BOB}/Sent`,
+      },
+      clients: [{ name: "harness" }, { name: "alice-only", accounts: ["account1", "account3"] }],
+    });
+  });
+  after(async () => { await tb?.stop(); });
+
+  it("refuses a direct send whose Sent copy would land in a restricted account", async () => {
+    const sent = tb.smtp.messages.length;
+    const before = await folderCount(`${BOB}/Sent`);
+    const r = await tb.call("sendMail", { to: "x@sink.test", subject: "fcc", body: "b", from: "id1", skipReview: true }, { client: "alice-only" });
+    assert.match(r.result?.error || "", /sent copies into an account this client may not use/, JSON.stringify(r));
+    await h.sleep(1000);
+    assert.equal(tb.smtp.messages.length, sent);
+    assert.equal(await folderCount(`${BOB}/Sent`), before);
+  });
+
+  it("still sends for a client that may use that account (positive control)", async () => {
+    const sent = tb.smtp.messages.length;
+    const r = await tb.call("sendMail", { to: "x@sink.test", subject: "fcc ok", body: "b", from: "id1", skipReview: true });
+    assert.equal(r.result?.success, true, JSON.stringify(r));
+    await h.waitFor(() => tb.smtp.messages.length > sent, { label: "sent" });
   });
 });

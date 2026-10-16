@@ -313,6 +313,9 @@ function makeFilterHarness({
   // The account's default identity (Forward filters send through it).
   identity = { email: "user@example.invalid" },
   forwardMode = 0,
+  // Whether an identity's Sent (FCC) folder is in an accessible account.
+  sentCopyAllowed = () => true,
+  defaultAccount = null,
   // Further accounts (e.g. POP accounts deferring into this one).
   otherAccounts = [],
 } = {}) {
@@ -363,6 +366,8 @@ function makeFilterHarness({
     defaultIdentity: identity,
     identities: identity ? [{ key: "id-account", ...identity }] : [],
     incomingServer: {
+      // Local folders: a regular delete moves to Trash.
+      type: "none",
       canHaveFilters: true,
       prettyName: "Test account",
       rootFolder: folder,
@@ -386,6 +391,7 @@ function makeFilterHarness({
     globals: {
       isAccountAllowed: (id) => id === account.key,
       clientHasCapability: (capability) => granted.includes(capability),
+      identitySentCopyAllowed: (identity) => sentCopyAllowed(identity),
       isAddressBookAccessRestricted: () => addressBooksRestricted,
       getAccessibleAccounts: () => [account],
       // Folders belong to the account's server unless a test says otherwise.
@@ -398,6 +404,7 @@ function makeFilterHarness({
         accounts: {
           get accounts() { return [account, ...otherAccounts]; },
           get allIdentities() { return [account, ...otherAccounts].flatMap((a) => a.identities || []); },
+          get defaultAccount() { return defaultAccount; },
           getAccount: (id) => [account, ...otherAccounts].find((a) => a.key === id) || null,
           findAccountForServer: (server) => [account, ...otherAccounts].find((a) => a.incomingServer === server) || null,
         },
@@ -2183,13 +2190,13 @@ describe("stored filter actions need the calling client's capabilities", () => {
     const h = makeFilterHarness({ allowSend: true, identity: null });
     const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
     const created = h.api.createFilter("account", "Forward", true, undefined, conditions, [{ type: "forward", value: "target@example.invalid" }]);
-    assert.match(created.error, /may only send through accessible accounts with their own identity/);
+    assert.match(created.error, /may only send through accessible accounts/);
     h.seed({ name: "Stored forward", actions: [{ type: "forward", value: "target@example.invalid" }] });
     const applied = h.api.applyFilters("account", h.folder.URI);
     assert.deepEqual(Array.from(applied.skipped, (entry) => ({ ...entry })), [{ name: "Stored forward", reason: "unauthorized-sender" }]);
     assert.equal(h.submissions.length, 0);
     const updated = h.api.updateFilter("account", 0, "Renamed");
-    assert.match(updated.error, /may only send through accessible accounts with their own identity/);
+    assert.match(updated.error, /may only send through accessible accounts/);
     assert.equal(h.api.updateFilter("account", 0, undefined, false).success, true);
   });
 
@@ -2226,6 +2233,52 @@ describe("stored filter actions need the calling client's capabilities", () => {
       // A rule without sending actions is not affected.
       assert.equal(denied.api.createFilter("account", "flag", true, undefined, conditions, [{ type: "markRead" }]).success, true);
     }
+  });
+
+  it("Forward rules of identity-less accounts may use an accessible default account (Thunderbird's fallback)", () => {
+    const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
+    const forward = [{ type: "forward", value: "target@example.invalid" }];
+    const fallback = { key: "account", defaultIdentity: { key: "id-fallback" }, identities: [{ key: "id-fallback" }] };
+    const ok = makeFilterHarness({ allowSend: true, identity: null, defaultAccount: fallback });
+    assert.equal(ok.api.createFilter("account", "Forward", true, undefined, conditions, forward).success, true);
+    const restricted = { key: "restricted", defaultIdentity: { key: "id-r" }, identities: [{ key: "id-r" }] };
+    const refused = makeFilterHarness({ allowSend: true, identity: null, defaultAccount: restricted });
+    assert.match(refused.api.createFilter("account", "Forward", true, undefined, conditions, forward).error, /default identity when the account has none/);
+  });
+
+  it("Forward/Reply rules are refused when sent copies would land in a restricted account", () => {
+    const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
+    for (const [type, value] of [["forward", "target@example.invalid"], ["reply", REPLY_TEMPLATE]]) {
+      const h = makeFilterHarness({ allowSend: true, sentCopyAllowed: () => false });
+      assert.match(h.api.createFilter("account", type, true, undefined, conditions, [{ type, value }]).error, /sent copies into an account/, type);
+      h.seed({ name: "Stored", actions: [{ type, value }] });
+      const applied = h.api.applyFilters("account", h.folder.URI);
+      assert.deepEqual(Array.from(applied.skipped, (e) => `${e.name}:${e.reason}`), ["Stored:unauthorized-sender"], type);
+    }
+  });
+
+  it("chained POP deferral counts: every account resolving into this one is checked", () => {
+    const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
+    const root = { URI: "mailbox://account/" };
+    const chained = {
+      key: "chained", identities: [], defaultIdentity: { key: "id-c" },
+      incomingServer: { type: "pop3", rootMsgFolder: root },
+    };
+    const h = makeFilterHarness({ allowSend: true, otherAccounts: [chained] });
+    h.folder.server.rootMsgFolder = root;
+    assert.match(h.api.createFilter("account", "fwd", true, undefined, conditions, [{ type: "forward", value: "t@example.invalid" }]).error, /POP accounts that deliver into this account/);
+    const elsewhere = { ...chained, incomingServer: { type: "pop3", rootMsgFolder: { URI: "mailbox://other/" } } };
+    const h2 = makeFilterHarness({ allowSend: true, otherAccounts: [elsewhere] });
+    h2.folder.server.rootMsgFolder = root;
+    assert.equal(h2.api.createFilter("account", "fwd", true, undefined, conditions, [{ type: "forward", value: "t@example.invalid" }]).success, true);
+  });
+
+  it("Delete rules on Exchange and unknown server types need mail.deletePermanent", () => {
+    const granted = ["filters.manage", "filters.run", "mail.delete", "mail.metadata"];
+    const h = makeFilterHarness({ granted });
+    h.folder.server.type = "ews";
+    const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
+    assert.match(h.api.createFilter("account", "Delete", true, undefined, conditions, [{ type: "delete" }]).error, /require mail\.deletePermanent/);
   });
 
   it("updateFilter always allows disabling such a rule", () => {

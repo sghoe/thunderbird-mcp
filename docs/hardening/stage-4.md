@@ -126,3 +126,30 @@ All points verified against comm-central source before fixing.
   b67de11.
 * Not natively testable here (no IMAP/POP server in the harness): the IMAP
   delete-model and deferred-POP paths are covered by unit tests only.
+
+## Review round 3 – fixes
+
+* Chained POP deferral (Sol): `Pop3IncomingServer.rootMsgFolder` resolves
+  deferral recursively. Sending rules now check every POP account whose
+  resolved delivery root is this account's root; unreadable state counts as
+  deferring.
+* Sent copies (Sol): direct sends (`sendMail`/`replyToMessage`/
+  `forwardMessage` with `skipReview`) and sending filter rules file a copy
+  into the identity's Sent folder (`fccFolderURI`; `fccFolder` is null in
+  TB 153), which may belong to another account. Its owning account must be
+  accessible; otherwise nothing is sent. An enabled copy without a folder
+  counts as not allowed.
+* Identity-less accounts (Sol): Forward rules on Local Folders use
+  Thunderbird's fallback (default account's default identity,
+  `nsMsgComposeService::GetDefaultIdentity`) and are allowed when that
+  account is accessible – full-access clients keep upstream behaviour.
+* Exchange and unknown server types (Opus): only local folders, POP3,
+  feeds and IMAP move-to-Trash with a Trash-flagged folder count as moving
+  to Trash. Anything else (EWS/Graph "delete immediately", unknown types)
+  needs `mail.deletePermanent` in `deleteMessages` and Delete rules.
+  Full-access clients keep upstream behaviour.
+* Native: Local Folders Forward with full access allowed; direct send with
+  Sent copy into an excluded account refused (no SMTP, no copy). Both fail
+  on 665c33a. Exchange and deferred POP remain unit-tested only.
+* `test/native/live-sandbox.cjs`: visible portable Thunderbird with the
+  synthetic profile, SMTP sink and two paired clients for manual tests.

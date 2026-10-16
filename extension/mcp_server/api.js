@@ -3839,6 +3839,28 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               return findIdentityIn(getAccessibleAccounts(), emailOrId);
             }
 
+            // Sending files a copy into the identity's Sent (FCC) folder, which
+            // may belong to another account. The owning account must be
+            // accessible; unreadable settings or unknown owners fail closed.
+            function identitySentCopyAllowed(identity) {
+              try {
+                if (!identity.doFcc) return true;
+                // Thunderbird 128+: fccFolderURI (resolves to the account's
+                // Sent folder by default); older builds: fccFolder.
+                const uri = identity.fccFolderURI || identity.fccFolder;
+                if (!uri) return false;
+                for (const account of MailServices.accounts.accounts) {
+                  const serverURI = account.incomingServer?.serverURI;
+                  if (serverURI && (uri === serverURI || uri.startsWith(serverURI + "/"))) {
+                    return isAccountAllowed(account.key);
+                  }
+                }
+                return false;
+              } catch {
+                return false;
+              }
+            }
+
             /** Creates an nsIFile instance for the given path. */
             function createLocalFile(path) {
               const file = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
@@ -4665,6 +4687,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               }
 
               const mode = deliverMode ?? Ci.nsIMsgCompDeliverMode.Now;
+              // A sent copy lands in the identity's Sent (FCC) folder, possibly in
+              // another account; refuse before anything is sent. (Drafts are
+              // authorized separately by the callers.)
+              if (mode !== Ci.nsIMsgCompDeliverMode.SaveAsDraft && !identitySentCopyAllowed(identity)) {
+                return Promise.resolve({ error: "Not sent: the identity files sent copies into an account this client may not use (Sent folder setting)" });
+              }
               const bodyMimeType = bodyType || "text/html";
               const SEND_TIMEOUT_MS = 120000; // 2 min safety timeout
 
@@ -10639,6 +10667,21 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               }
             }
 
+            // Server types whose regular delete moves to Trash (folder not in
+            // Trash): local folders, POP3, feeds, IMAP move-to-Trash with a
+            // Trash-flagged folder. Anything else counts as permanent.
+            function deletionKnownToMoveToTrash(server) {
+              const type = server?.type;
+              if (type === "none" || type === "pop3" || type === "rss") return true;
+              if (type !== "imap") return false;
+              try {
+                return server.QueryInterface(Ci.nsIImapIncomingServer).deleteModel ===
+                  Ci.nsMsgImapDeleteModels.MoveToTrash && imapHasFlaggedTrash(server);
+              } catch {
+                return false;
+              }
+            }
+
             // Unreadable state counts as "no Trash" (permanent).
             function imapHasFlaggedTrash(server) {
               try {
@@ -10716,20 +10759,20 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                     (server?.type !== "imap" ||
                       server.QueryInterface(Ci.nsIImapIncomingServer).deleteModel ===
                         Ci.nsMsgImapDeleteModels.MoveToTrash);
+                  // Without mail.deletePermanent only deletions known to move to
+                  // Trash are allowed: other server types (Exchange EWS/Graph
+                  // with "delete immediately", ...) may delete permanently, and
+                  // IMAP only moves to a Trash-*flagged* folder of the account
+                  // (nsImapMailFolder::DeleteMessages).
+                  if (!clientHasCapability("mail.deletePermanent") &&
+                      !(deletionMovesToTrash && deletionKnownToMoveToTrash(server))) {
+                    return permanentDeleteRefused;
+                  }
                   if (deletionMovesToTrash) {
                     trashFolder = findTrashFolder(folder);
                     if (!trashFolder) {
                       return { error: "Trash folder not found" };
                     }
-                    // IMAP only moves to a Trash-*flagged* folder of the account
-                    // (nsImapMailFolder::DeleteMessages); a folder found by name
-                    // alone does not count, and the delete is permanent.
-                    if (server?.type === "imap" && !imapHasFlaggedTrash(server) &&
-                        !clientHasCapability("mail.deletePermanent")) {
-                      return permanentDeleteRefused;
-                    }
-                  } else if (!clientHasCapability("mail.deletePermanent")) {
-                    return permanentDeleteRefused;
                   }
                   folder.deleteMessages(found, null, false, true, null, false);
                 }
@@ -11226,7 +11269,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             function filterDeleteIsPermanent(server, folder = null) {
               try {
                 if (folder && folder.isSpecialFolder(Ci.nsMsgFolderFlags.Trash, true)) return true;
-                if (server?.type !== "imap") return false;
+                const type = server?.type;
+                if (type === "none" || type === "pop3" || type === "rss") return false;
+                // Exchange (EWS/Graph) "delete immediately" and unknown types.
+                if (type !== "imap") return true;
                 if (server.QueryInterface(Ci.nsIImapIncomingServer).deleteModel !==
                   Ci.nsMsgImapDeleteModels.MoveToTrash) return true;
                 return !server.rootFolder.getFolderWithFlags(Ci.nsMsgFolderFlags.Trash);
@@ -11259,12 +11305,21 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               }
               return found;
             }
+            // POP accounts whose delivery resolves (also through chains) into
+            // this account's root folder (Pop3IncomingServer.rootMsgFolder).
+            // Unreadable state counts as deferring (fail closed).
             function deferringAccounts(account) {
               const result = [];
+              let target;
+              try { target = account.incomingServer.rootMsgFolder.URI; } catch { target = null; }
               for (const other of MailServices.accounts.accounts) {
                 const server = other.incomingServer;
                 if (other === account || server?.type !== "pop3") continue;
-                if (server.QueryInterface(Ci.nsIPop3IncomingServer).deferredToAccount === account.key) result.push(other);
+                try {
+                  if (!target || server.rootMsgFolder.URI === target) result.push(other);
+                } catch {
+                  result.push(other);
+                }
               }
               return result;
             }
@@ -11288,7 +11343,19 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 const senders = includeDeferred ? [account, ...deferringAccounts(account)] : [account];
                 for (const sender of senders) {
                   if (!isAccountAllowed(sender.key)) return SENDER_ACCOUNT_ERROR;
-                  if (forward && !sender.defaultIdentity) return SENDER_ACCOUNT_ERROR;
+                  // Identities that may send: Forward uses the account's
+                  // default identity or the default account's (Thunderbird's
+                  // GetDefaultIdentity); Reply any identity of the account.
+                  let identities;
+                  if (forward) {
+                    const fallbackAccount = sender.defaultIdentity ? sender : MailServices.accounts.defaultAccount;
+                    if (!fallbackAccount?.defaultIdentity || !isAccountAllowed(fallbackAccount.key)) return SENDER_ACCOUNT_ERROR;
+                    identities = [fallbackAccount.defaultIdentity];
+                  } else {
+                    identities = [];
+                  }
+                  if (reply) identities.push(...sender.identities);
+                  if (!identities.every(identitySentCopyAllowed)) return SENT_COPY_ERROR;
                 }
                 return null;
               } catch {
@@ -11296,7 +11363,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               }
             }
             const INLINE_FORWARD_ERROR = "Forward filter actions are refused while Thunderbird forwards inline (mail.forward_message_mode != 0) and identities of accounts this client may not use exist: the forwarded message can choose the sender identity. Forward as attachment or grant the client all accounts";
-            const SENDER_ACCOUNT_ERROR = "Forward/Reply filter actions may only send through accessible accounts with their own identity (including POP accounts that deliver into this account); otherwise Thunderbird would send from another account";
+            const SENT_COPY_ERROR = "Forward/Reply filter actions would file sent copies into an account this client may not use (identity's Sent folder)";
+            const SENDER_ACCOUNT_ERROR = "Forward/Reply filter actions may only send through accessible accounts (including POP accounts that deliver into this account, and Thunderbird's default identity when the account has none); otherwise Thunderbird would send from another account";
 
             function filterCapabilityError(missing) {
               return { error: `Not permitted for this client: the filter's actions require ${missing.join(", ")}. Grant it in the Thunderbird MCP options.` };

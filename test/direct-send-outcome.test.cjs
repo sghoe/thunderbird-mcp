@@ -68,6 +68,8 @@ function loadSend(options = {}) {
       if (options.attachmentError) throw options.attachmentError;
       return descs;
     },
+    // Sent-copy (FCC) authorization of the identity.
+    identitySentCopyAllowed: () => !options.sentCopyDenied,
     isSkipReviewBlocked: () => !!options.blocked,
     findMessage: () => ({ msgHdr: hdr, folder }),
     filePathsToAttachDescs: () => ({ descs: [] }),
@@ -181,6 +183,7 @@ describe("direct send SMTP completion", () => {
     ["missing identity", { noIdentity: true }, /No identity/],
     ["synchronous creation failure", { createError: new Error("create threw") }, /create threw/],
     ["attachment failure", { attachmentError: new Error("attachments invalid") }, /attachments invalid/],
+    ["Sent copy into a restricted account", { sentCopyDenied: true }, /files sent copies into an account this client may not use/],
   ]) {
     it(`reports ${label} without success`, async () => {
       const h = loadSend(options);
