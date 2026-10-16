@@ -134,7 +134,8 @@ export default [
         { selector: "ExportAllDeclaration", message: "Core modules must not re-export other modules." },
         { selector: "ExportNamedDeclaration[source]", message: "Core modules must not re-export other modules." },
         // (() => {}).constructor("...") compiles code like eval/Function.
-        { selector: "MemberExpression[property.name='constructor']", message: "Core modules must not reach constructors (dynamic code)." },
+        // Any identifier: member access, object/destructuring keys, shorthand.
+        { selector: "Identifier[name='constructor']", message: "Core modules must not reach constructors (dynamic code)." },
         { selector: "Literal[value='constructor']", message: "Core modules must not reach constructors (dynamic code)." },
         { selector: "TemplateElement[value.cooked='constructor']", message: "Core modules must not reach constructors (dynamic code)." },
       ],

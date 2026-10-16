@@ -20,8 +20,9 @@ const FORBIDDEN = [
 ];
 
 // (() => {}).constructor("return this")() compiles code without naming
-// eval or Function; constructor access is therefore refused as well.
-const CONSTRUCTOR_ACCESS = /\.\s*constructor(?![\w$])/;
+// eval or Function; the word constructor is therefore refused in code
+// (member access, destructuring keys, shorthand) and as a string.
+const CONSTRUCTOR_ACCESS = /(^|[^\w$])constructor(?![\w$])/m;
 const CONSTRUCTOR_STRING = /(["'`])constructor\1/;
 
 // Removes comments, string/template literals and regex literals so only
@@ -115,7 +116,7 @@ describe("core module boundary", () => {
     });
 
     it(`${file} reaches no constructors (no dynamic code)`, () => {
-      assert.doesNotMatch(code, CONSTRUCTOR_ACCESS, `${file} accesses .constructor`);
+      assert.doesNotMatch(code, CONSTRUCTOR_ACCESS, `${file} uses constructor`);
       assert.doesNotMatch(source, CONSTRUCTOR_STRING, `${file} names "constructor"`);
     });
 
@@ -141,6 +142,8 @@ describe("core module boundary", () => {
     'export function host() { return (() => {}).constructor("return this")()["ChromeUtils"]; }',
     'export function host() { return (async () => {})["constructor"]("return 1"); }',
     "export function host() { return Reflect.get(() => {}, `constructor`); }",
+    'export function host() { const { constructor: compile } = () => {}; return compile("return this")(); }',
+    'export function host() { const { constructor } = () => {}; return constructor("return this")(); }',
   ];
 
   it("the lexical check itself catches constructor-based dynamic code", () => {

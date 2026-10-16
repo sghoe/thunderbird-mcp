@@ -87,6 +87,10 @@ describe("unexpected raw values fail closed", () => {
     ["getMessage", { rawSource: 1 }, ["mail.body", "mail.metadata", "mail.raw"]],
     ["getMessage", { saveAttachments: "1" }, ["attachments.export", "mail.body", "mail.metadata"]],
     ["updateMessage", { trash: "on" }, ["mail.delete", "mail.metadata"]],
+    // The handler turns read/flagged null into false (a mutation).
+    ["updateMessage", { read: null }, ["mail.flag", "mail.metadata"]],
+    ["updateMessage", { flagged: null }, ["mail.flag", "mail.metadata"]],
+    ["updateMessage", { addTags: null, moveTo: null }, ["mail.flag", "mail.metadata", "mail.move"]],
     // Only an explicit true may drop the review requirement.
     ["replyToMessage", { saveAsDraft: "yes" }, ["compose.draft", "compose.review", "mail.body", "mail.metadata"]],
     ["getMessage", { rawSource: false, bodyFormat: "text" }, ["mail.body", "mail.metadata"]],

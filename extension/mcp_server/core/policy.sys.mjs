@@ -62,6 +62,8 @@ export const PROFILES = Object.freeze({
 const nonEmpty = (v) => v !== undefined && v !== null;
 // Adds requirements: anything but an explicit false/absent value.
 const notFalse = (v) => nonEmpty(v) && v !== false && v !== "false";
+// Mutations: the handler acts on any supplied value (null included).
+const present = (v) => v !== undefined;
 // Removes requirements: only an explicit true.
 const isTrue = (v) => v === true || v === "true";
 const arrayRule = (fn) => (v, all, ctx) => {
@@ -169,12 +171,13 @@ const TOOL_RULES = {
     base: ["mail.metadata"],
     args: {
       messageId: null, messageIds: null, folderPath: null,
-      read: (v) => (nonEmpty(v) ? ["mail.flag"] : []),
-      flagged: (v) => (nonEmpty(v) ? ["mail.flag"] : []),
-      addTags: (v) => (nonEmpty(v) ? ["mail.flag"] : []),
-      removeTags: (v) => (nonEmpty(v) ? ["mail.flag"] : []),
-      moveTo: (v) => (nonEmpty(v) ? ["mail.move"] : []),
-      copyTo: (v) => (nonEmpty(v) ? ["mail.move"] : []),
+      // read: null / flagged: null mean false (mark unread, unflag).
+      read: (v) => (present(v) ? ["mail.flag"] : []),
+      flagged: (v) => (present(v) ? ["mail.flag"] : []),
+      addTags: (v) => (present(v) ? ["mail.flag"] : []),
+      removeTags: (v) => (present(v) ? ["mail.flag"] : []),
+      moveTo: (v) => (present(v) ? ["mail.move"] : []),
+      copyTo: (v) => (present(v) ? ["mail.move"] : []),
       trash: (v) => (notFalse(v) ? ["mail.delete"] : []),
     },
   },

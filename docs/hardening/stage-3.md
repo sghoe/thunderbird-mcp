@@ -48,6 +48,18 @@ and add the pure policy core used by Stage 4. No behaviour change.
     and `updateFilter`, meetings and assigned tasks with attendees) are
     checked by the handlers against the calling client in Stage 4.
 
+## Review round 2 – fixes
+
+* Policy: `read: null` / `flagged: null` are mutations in the handler
+  (mark unread, unflag) but were treated as absent. All `updateMessage`
+  mutation arguments now require their capability whenever they are
+  supplied, null included.
+* Boundary: `const { constructor: f } = () => {}` passed both checks. The
+  identifier `constructor` is now refused in every position (ESLint
+  `Identifier` selector, lexical word check); the probe set covers
+  destructuring and shorthand.
+* Opus: no substantive findings.
+
 ## Verification
 
 * Unit: all tests pass except the 2 pre-existing Windows-only Flatpak tests.
