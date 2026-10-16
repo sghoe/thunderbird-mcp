@@ -39,13 +39,16 @@ function compare(aFile, bFile) {
     else if (JSON.stringify(ra.shape) !== JSON.stringify(rb.shape)) diffs.push({ label: ra.label, issue: "shape", a: ra.shape, b: rb.shape });
   }
   for (const rb of b.results) if (!a.results.some((ra) => ra.label === rb.label)) diffs.push({ label: rb.label, issue: "added" });
+  if (a.smtpMessages !== b.smtpMessages) diffs.push({ label: "SMTP deliveries", issue: "count", a: a.smtpMessages, b: b.smtpMessages });
   return { a: a.target, b: b.target, toolsA: a.tools.length, toolsB: b.tools.length, smtp: [a.smtpMessages, b.smtpMessages], diffs };
 }
 
 (async () => {
   const args = process.argv.slice(2);
   if (args[0] === "--compare") {
-    console.log(JSON.stringify(compare(args[1], args[2]), null, 2));
+    const result = compare(args[1], args[2]);
+    console.log(JSON.stringify(result, null, 2));
+    if (result.diffs.length) process.exitCode = 1;
     return;
   }
   const upstream = args.includes("--upstream");
@@ -67,4 +70,5 @@ function compare(aFile, bFile) {
   const failed = report.results.filter((r) => !r.ok);
   console.log(`${report.target}: ${report.results.length} calls, ${report.tools.length} tools, ${failed.length} failed, ${report.smtpMessages} SMTP messages`);
   for (const r of failed) console.log(`  FAIL ${r.label}: ${r.error}`);
+  if (failed.length) process.exitCode = 1;
 })().catch((e) => { console.error("FAIL", e); process.exit(1); });

@@ -4,17 +4,23 @@ Machine-checked sources:
 
 * **Input contract:** `test/baseline/tools-v0.9.2.json`, generated from
   upstream `buildTools()` at commit `1ab1018`. `test/tool-contract.test.cjs`
-  enforces: exactly these 40 tools; unchanged group/CRUD class; every baseline
-  property keeps its type, enum values, nested structure and limits; no new
-  required property and no undocumented new property. Deliberate changes must
+  enforces, recursively at every schema level (properties, array items,
+  `oneOf`/`anyOf` branches pairwise): exactly these 40 tools; unchanged
+  group/CRUD class; unchanged `type`, `pattern`, `format`, `const`; no removed
+  enum value and no new enum; lower bounds (`minLength`, `minItems`,
+  `minimum`, …) never rise or appear, upper bounds never fall or appear;
+  `additionalProperties` never becomes `false`; no property becomes required
+  and no new property appears unless documented. Mutation tests in the same
+  file prove that these narrowings are rejected. Deliberate changes must
   be listed with a reason in `test/baseline/contract-changes.json` and
   described in `docs/hardening/migration.md`.
 * **Native functional baseline:** `test/baseline/native-parity-v0.9.2.json`,
   produced by `node test/native/run-parity.cjs --upstream` on Windows 11 with
   Thunderbird 153.5.0esr: 64 calls, 40 tools, 0 failures, 4 SMTP deliveries to
   the local sink. The same scenarios run against the working tree and are
-  compared by outcome and result shape
-  (`node test/native/run-parity.cjs --compare a.json b.json`).
+  compared by outcome, result shape and number of SMTP deliveries
+  (`node test/native/run-parity.cjs --compare a.json b.json`; both commands
+  exit non-zero on failed calls or differences).
 
 "Effect" is the capability class the call actually exercises. It is the
 basis for the positive permissions introduced in Stage 4. Native column:

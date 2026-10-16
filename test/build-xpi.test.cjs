@@ -33,7 +33,11 @@ describe("XPI packaging", { skip: process.platform !== "linux" || !hasZipTools }
       assert.equal(execFileSync("unzip", ["-p", xpi, "LICENSE"], { encoding: "utf8" }),
         fs.readFileSync(path.join(project, "LICENSE"), "utf8"));
       const manifest = JSON.parse(execFileSync("unzip", ["-p", xpi, "manifest.json"], { encoding: "utf8" }));
-      assert.equal(manifest.version, JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version);
+      // Fork package versions X.Y.Z-hardened.N become numeric Gecko versions X.Y.Z.N.
+      const packageVersion = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version;
+      const fork = /^(\d+\.\d+\.\d+)-hardened\.(\d+)$/.exec(packageVersion);
+      assert.ok(fork, packageVersion);
+      assert.equal(manifest.version, `${fork[1]}.${fork[2]}`);
     });
   }
 

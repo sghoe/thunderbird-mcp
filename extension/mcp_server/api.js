@@ -11703,7 +11703,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               const portInUse = await isLoopbackPortInUse(tryPort);
               // The add-on may have been shut down while the probe ran.
               if ((globalThis.__tbMcpHardenedShutdownGeneration || 0) !== shutdownGeneration) {
-                throw new Error("Add-on shut down during startup");
+                throw Object.assign(new Error("Add-on shut down during startup"), { cancelledByShutdown: true });
               }
               try {
                 if (portInUse) {
@@ -11741,10 +11741,14 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             return { success: true, port: boundPort };
           } catch (e) {
             console.error("Failed to start MCP server:", e);
-            stopConnectionInfoRefreshTimer();
-            // Clean up before yielding: a reload may install a new connection
-            // file while this listener is still draining.
-            removeConnectionInfo();
+            // A startup cancelled by shutdown never bound or published anything;
+            // the timer and discovery file may already belong to a newer instance.
+            if (!e?.cancelledByShutdown) {
+              stopConnectionInfoRefreshTimer();
+              // Clean up before yielding: a reload may install a new connection
+              // file while this listener is still draining.
+              removeConnectionInfo();
+            }
             // Keep this attempt cached until the listener has finished stopping,
             // so concurrent starts cannot rebind during failure cleanup.
             if (startedServer) {

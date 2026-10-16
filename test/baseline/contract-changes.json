@@ -1,5 +1,5 @@
 {
-  "_comment": "Documented, deliberate contract changes against tools-v0.9.2.json. Every entry needs a reason and a migration note in docs/hardening/migration.md.",
+  "_comment": "Documented, deliberate contract changes against tools-v0.9.2.json. Keys are dotted schema paths (tool.prop.sub). Every entry needs a reason and a migration note in docs/hardening/migration.md.",
   "addedProperties": {},
   "removedProperties": {},
   "changedRequired": {}

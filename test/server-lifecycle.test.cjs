@@ -397,12 +397,16 @@ describe("server startup lifecycle", () => {
     // What onShutdown does: invalidate pending startups and clear state.
     sandbox.__tbMcpHardenedShutdownGeneration = (sandbox.__tbMcpHardenedShutdownGeneration || 0) + 1;
     sandbox.__tbMcpHardenedStartPromise = null;
+    // A replacement instance has meanwhile published its own discovery file.
+    const replacement = { port: 8777, token: "new", pid: 1 };
+    state.connection = replacement;
     releaseProbe(false);
     const result = await start;
     assert.equal(result.success, false);
     assert.match(result.error, /shut down during startup/);
     assert.deepEqual(state.servers[0].binds, []);
-    assert.equal(state.connection, null);
+    assert.strictEqual(state.connection, replacement);
+    assert.equal(state.removals, 0);
     assert.equal(state.timers.length, 0);
     assert.equal(sandbox.__tbMcpHardenedServer ?? null, null);
   });
