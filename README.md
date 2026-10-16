@@ -84,6 +84,10 @@ Structured MIME extraction keeps the first body's representation outside multipa
 
 `includeInlineImages: true` is a separate opt-in for supported inline CID images as MCP image blocks; it does not add image URLs to the Markdown body.
 
+**External and detached attachments.** A MIME part can carry `X-Mozilla-External-Attachment-URL` (Thunderbird writes it when an attachment is detached; any sender can forge it). Such parts only hold a local notice. Attachment bytes are read exclusively from the message itself through its own message service and a validated part number; the reported URL is never fetched (no HTTP, `file:`, or UNC access). External parts are listed with `external: true` and an `error` instead of a `filePath` or image block, and a direct (`skipReview: true`) forward of a message containing them is refused. The native review forward (`skipReview: false`) attaches only the stored notice (verified on Thunderbird 153.5.0esr).
+
+**Ambiguous Message-IDs.** Message-IDs are chosen by the sender and are not unique. When several messages in the selected folder share the requested Message-ID, message tools refuse the call instead of choosing one.
+
 ### Compose
 
 | Tool | Description |
@@ -91,7 +95,7 @@ Structured MIME extraction keeps the first body's representation outside multipa
 | `sendMail` | Compose a new email -- opens a review window; direct sending requires explicitly disabling the `skipReview` safety block |
 | `saveDraft` | Save a new or replacement draft without sending or opening a window; supports threading headers and reports an accessible Drafts folder |
 | `replyToMessage` | Reply with quoted original and proper threading -- `skipReview` is subject to the same safety block; `saveAsDraft` saves the threaded reply to Drafts without sending |
-| `forwardMessage` | Forward with all original attachments preserved -- `skipReview` is subject to the same safety block |
+| `forwardMessage` | Forward with all original attachments preserved -- `skipReview` is subject to the same safety block. A direct forward is refused when the original contains external/detached attachments (see below). |
 
 `sendMail`, `replyToMessage`, and `forwardMessage` open a window for you to review and edit before sending by default. The **Block `skipReview`** preference is on by default, so `skipReview: true` is rejected until you explicitly disable the preference; only then can it send directly. Attachments can be file paths or inline base64 objects.
 
@@ -105,7 +109,7 @@ Direct sends report success only after SMTP succeeds, and only then mark origina
 - `replaceMessageId` and `replaceFolderPath`: replace an existing draft with the supplied content. The folder must be accessible under account restrictions, carry Thunderbird's Drafts flag, and match the selected `from` identity's configured drafts folder. Other folders and missing messages are rejected before saving. Supply all fields and attachments you want retained; content is not merged from the old draft.
 - `includeSignature`: append the identity's signature, defaulting to `true` for a new draft and `false` for a replacement so re-saving a fetched draft does not duplicate its signature. Set it explicitly when needed. `sendMail` with `skipReview: true` accepts the same option, defaulting to `true`; review windows use Thunderbird's own signature preferences. Signature files are limited to 1 MiB; unreadable or oversized signature files are omitted.
 
-On success, `saveDraft` returns `folderPath` when Thunderbird exposes the destination and that folder is accessible under account restrictions. Otherwise the save still succeeds without disclosing the folder URI. It does not return the saved message's ID; look up the draft in the returned folder when available.
+Before every save (new or replacement), the selected identity's configured Drafts destination must exist, be accessible under account restrictions and carry the Drafts flag; otherwise nothing is saved and the error does not disclose the folder URI. On success, `saveDraft` returns `folderPath` when that folder is still accessible. It does not return the saved message's ID; look up the draft in the returned folder when available.
 
 Compose tools validate the `from` identity strictly -- if the specified sender doesn't match any configured Thunderbird identity, the tool returns an error instead of silently substituting another account.
 
@@ -128,7 +132,7 @@ Date conditions accept only `YYYY-MM-DD` as a local calendar day; date-times are
 
 The sending-action setting governs rules MCP creates, modifies, or runs manually. Reordering or deleting a rule containing `StopExecution` can change which of your existing rules Thunderbird runs automatically, including Forward/Reply rules.
 
-Move/Copy destinations must remain accessible under the current account restrictions, including actions retained by an update. An update that only sets `enabled: false`, or deletion, remains available for rules with inaccessible destinations.
+Reply actions name a template as `<Templates folder URI>?messageId=<Message-ID>&subject=<subject>` (Thunderbird's own format). The folder must be accessible under the current account restrictions and carry the Templates flag, and exactly one message in it must have that Message-ID; this is checked on create, on update (including retained actions) and before `applyFilters` submits a rule, which otherwise is skipped with reason `inaccessible-template`. Move/Copy destinations must remain accessible under the current account restrictions, including actions retained by an update. An update that only sets `enabled: false`, or deletion, remains available for rules with inaccessible destinations.
 
 New or replaced Move/Copy actions store the resolved folder's canonical URI, including when the supplied URI uses another accepted spelling.
 
@@ -155,7 +159,7 @@ New or replaced Move/Copy actions store the resolved folder's canonical URI, inc
 | `deleteEvent` | Delete an event or series; `recurrenceId` excludes one occurrence. Meetings with other attendees cannot be deleted while **Block `skipReview`** is on. |
 | `createTask` | Open a pre-filled task dialog for review; direct creation via `skipReview` requires explicitly disabling the default safety block |
 | `listTasks` | List tasks/to-dos from calendars -- filter by completion status, due date, or calendar |
-| `updateTask` | Update a task's title, due date, description, priority, completion status, or percent complete |
+| `updateTask` | Update a task's title, due date, description, priority, completion status, or percent complete. Only tasks are changed (an event ID is refused); tasks with attendees other than the calendar user follow the same Block `skipReview` rule as meetings. |
 
 `recurrence` accepts a single RRULE, such as `FREQ=WEEKLY;BYDAY=MO,TU` or `RRULE:FREQ=DAILY;COUNT=10`. The optional prefix is case-insensitive. Control characters (including CR/LF), malformed rules, `SECONDLY`/`MINUTELY`, and `HOURLY` on all-day events are rejected; Thunderbird's recurrence parser validates the rule before saving. On update, `recurrence: ""` or `null` clears the rule. Replacing a rule discards existing EXDATEs and modified occurrences.
 

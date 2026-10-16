@@ -1639,6 +1639,7 @@ function makeOutboundMailRuntime(options = {}) {
       nsIMsgCompType: { New: 0, Reply: 1, ReplyAll: 2, ForwardInline: 3 },
       nsIMsgCompDeliverMode: { Now: 0, SaveAsDraft: 1 },
       nsIFile: { DIRECTORY_TYPE: 1 },
+      nsMsgFolderFlags: { Drafts: 0x400 },
     },
     Cc: {
       '@mozilla.org/messengercompose/attachment;1': { createInstance: () => new Proxy({}, {
@@ -1672,7 +1673,9 @@ function makeOutboundMailRuntime(options = {}) {
     readRequestBody: req => req.body,
     isToolEnabled: () => true,
     isSkipReviewBlocked: () => false,
-    setComposeIdentity(params) { params.identity = {}; },
+    // An authorized, Drafts-flagged destination so saveDraft reaches attachment handling.
+    setComposeIdentity(params) { params.identity = { draftFolder: 'imap://user@example.com/Drafts' }; },
+    getAccessibleFolder: uri => ({ folder: { URI: uri, getFlag: flag => flag === 0x400 } }),
     resolveComposeFormat: () => ({ useHtml: false, format: 0 }),
     buildBodyWithSignature: body => body || '',
     findMessage: () => ({ msgHdr: {}, folder: { server: {}, getUriForMsg: () => 'message://fixture' } }),

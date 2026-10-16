@@ -98,6 +98,9 @@ class CalendarItem {
     this.recurrenceInfo = null;
   }
 
+  // calIItemBase type predicates.
+  isEvent() { return !(this instanceof CalendarTodo); }
+  isTodo() { return this instanceof CalendarTodo; }
   get parentItem() { return this._parentItem || this; }
   set parentItem(item) { this._parentItem = item; }
   get recurrenceStartDate() { return this.startDate; }

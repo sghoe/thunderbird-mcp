@@ -126,7 +126,8 @@ describe("saveDraft replacement", () => {
       assert.equal(result.message, "Draft replaced");
       assert.equal(result.folderPath, DRAFTS_URI);
       assert.deepEqual(calls.finds, [{ messageId: "old-draft-id", folderPath: DRAFTS_URI }]);
-      assert.deepEqual(calls.flags, [Ci.nsMsgFolderFlags.Drafts]);
+      // The replaced draft's folder and the identity destination are both checked.
+      assert.deepEqual(calls.flags, [Ci.nsMsgFolderFlags.Drafts, Ci.nsMsgFolderFlags.Drafts]);
       assert.ok(calls.accessible.includes(DRAFTS_URI));
       assert.equal(calls.from, "sender@example.test");
       assert.equal(calls.sends.length, legacy ? 2 : 1);
@@ -268,7 +269,7 @@ describe("saveDraft replacement", () => {
 
   it("refuses a flagged Drafts folder belonging to a different identity", async () => {
     const { save, calls } = loadDraftTools({
-      identity: { draftFolder: OTHER_DRAFTS_URI }, destination: { URI: OTHER_DRAFTS_URI },
+      identity: { draftFolder: OTHER_DRAFTS_URI }, destination: { URI: OTHER_DRAFTS_URI, getFlag: () => true },
     });
     assert.match((await save()).error, /outside the selected identity.*Drafts folder/);
     assertNoComposeSideEffects(calls);

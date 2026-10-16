@@ -288,11 +288,23 @@ function buildOneAction(helpers, act, options) {
   return filter.getActionAt(0);
 }
 
+// Reply actions name a unique message in an accessible Templates folder.
+const REPLY_TEMPLATE = "mailbox://nobody@Local%20Folders/Templates?messageId=tpl@example.invalid&subject=Thanks";
+const sendValue = (type) => (type === "reply" ? REPLY_TEMPLATE : "target@example.invalid");
+function makeAccessibleFolder(uri, { templates = ["tpl@example.invalid"] } = {}) {
+  return {
+    URI: uri,
+    // nsMsgFolderFlags.Templates only; other special-folder checks stay false.
+    getFlag: (flag) => flag === 0x00400000 && uri.endsWith("/Templates"),
+    msgDatabase: { enumerateMessages: () => templates.map((messageId) => ({ messageId })) },
+  };
+}
+
 // The helper fixtures above model typed values. Handler tests additionally
 // need native list identity, persistence failures and the submitted list.
 function makeFilterHarness({
   ci = makeCi(), allowSend, prefError = false,
-  getAccessibleFolder = (uri) => ({ folder: { URI: uri } }),
+  getAccessibleFolder = (uri) => ({ folder: makeAccessibleFolder(uri) }),
   addressBooksRestricted = false,
 } = {}) {
   const prefReads = [];
@@ -1579,7 +1591,7 @@ describe("persisted filter text is validated before changing the list", () => {
     }],
     ...[
       ["moveToFolder", "imap://account/Archive"], ["copyToFolder", "imap://account/Archive"],
-      ["addTag", "tag"], ["reply", "mailbox://templates?number=1"], ["forward", "target@example.invalid"],
+      ["addTag", "tag"], ["reply", REPLY_TEMPLATE], ["forward", "target@example.invalid"],
     ].map(([type, value]) => [
       `${type} value`, (request, text) => { request.actions = [{ type, value: text }]; }, value,
     ]),
@@ -1714,7 +1726,7 @@ describe("filter sending requires an explicit preference", () => {
         for (const enabled of [true, false]) {
           const h = makeFilterHarness(options);
           const result = h.api.createFilter("account", "Sending", enabled, undefined,
-            [{ attrib: "subject", op: "contains", value: "invoice" }], [{ type, value: "target@example.invalid" }]);
+            [{ attrib: "subject", op: "contains", value: "invoice" }], [{ type, value: sendValue(type) }]);
           assert.ok(result.error, `${type}, enabled=${enabled}`);
           assert.equal(h.filterList.filterCount, 0);
           assert.equal(h.filterList.saveAttempts, 0);
@@ -1729,7 +1741,7 @@ describe("filter sending requires an explicit preference", () => {
     const ci = makeCi({ actions: { Forward: 110, Reply: 109, StopExecution: 111 } });
     for (const type of ["forward", "reply", "stopExecution"]) {
       const h = makeFilterHarness({ ci });
-      const action = type === "stopExecution" ? { type } : { type, value: "target@example.invalid" };
+      const action = type === "stopExecution" ? { type } : { type, value: sendValue(type) };
       const result = h.api.createFilter("account", type, true, undefined,
         [{ attrib: "subject", op: "contains", value: "invoice" }], [action]);
       if (type === "stopExecution") {
@@ -1764,7 +1776,7 @@ describe("filter sending requires an explicit preference", () => {
     const h = makeFilterHarness({ allowSend: true });
     for (const type of ["forward", "reply"]) {
       const result = h.api.createFilter("account", type, true, undefined,
-        [{ attrib: "subject", op: "contains", value: "invoice" }], [{ type, value: "target@example.invalid" }]);
+        [{ attrib: "subject", op: "contains", value: "invoice" }], [{ type, value: sendValue(type) }]);
       assert.equal(result.success, true, result.error);
     }
     assert.equal(h.filterList.filterCount, 2);
@@ -1782,7 +1794,7 @@ describe("filter sending requires an explicit preference", () => {
     for (const type of ["forward", "reply"]) {
       for (const update of updates) {
         const h = makeFilterHarness();
-        const original = h.seed({ enabled: update[1] !== true, actions: [{ type, value: "target@example.invalid" }] });
+        const original = h.seed({ enabled: update[1] !== true, actions: [{ type, value: sendValue(type) }] });
         const before = h.snapshot();
         const result = h.api.updateFilter("account", 0, ...update);
         assert.ok(result.error, `${type}: ${JSON.stringify(update)}`);
@@ -1810,11 +1822,11 @@ describe("filter sending requires an explicit preference", () => {
 
   it("allows copying sending actions in an update after explicit opt-in", () => {
     const h = makeFilterHarness({ allowSend: true });
-    h.seed({ actions: [{ type: "reply", value: "mailbox://templates?number=1" }] });
+    h.seed({ actions: [{ type: "reply", value: REPLY_TEMPLATE }] });
     const result = h.api.updateFilter("account", 0, "Renamed");
     assert.equal(result.success, true, result.error);
     assert.equal(h.filterList.filters[0].getActionAt(0).type, h.ci.nsMsgFilterAction.Reply);
-    assert.equal(h.filterList.filters[0].getActionAt(0).strValue, "mailbox://templates?number=1");
+    assert.equal(h.filterList.filters[0].getActionAt(0).strValue, REPLY_TEMPLATE);
   });
 
   it("checks replacement sending actions before changing a safe existing rule", () => {
@@ -2056,7 +2068,7 @@ describe("applyFilters submits only eligible native filters", () => {
     h.seed({ name: "Outgoing", filterType: h.ci.nsMsgFilterType.PostOutgoing });
     h.seed({ name: "Unparseable", unparseable: true });
     h.seed({ name: "Forward", actions: [{ type: "forward", value: "target@example.invalid" }] });
-    h.seed({ name: "Reply", actions: [{ type: "reply", value: "mailbox://templates?number=1" }] });
+    h.seed({ name: "Reply", actions: [{ type: "reply", value: REPLY_TEMPLATE }] });
     h.seed({ name: "Safe", filterType: h.ci.nsMsgFilterType.Manual });
     h.seed({ name: "Stop", actions: [{ type: "stopExecution" }] });
     const before = h.snapshot();
@@ -2097,7 +2109,7 @@ describe("applyFilters submits only eligible native filters", () => {
   it("submits manual sending rules only after explicit opt-in", () => {
     const h = makeFilterHarness({ allowSend: true });
     h.seed({ name: "Forward", actions: [{ type: "forward", value: "target@example.invalid" }] });
-    h.seed({ name: "Reply", actions: [{ type: "reply", value: "mailbox://templates?number=1" }] });
+    h.seed({ name: "Reply", actions: [{ type: "reply", value: REPLY_TEMPLATE }] });
     h.seed({ name: "Disabled", enabled: false, actions: [{ type: "forward", value: "target@example.invalid" }] });
     const result = h.api.applyFilters("account", h.folder.URI);
     assert.equal(result.success, true, result.error);
@@ -2461,5 +2473,72 @@ describe("address book filter conditions follow address book access", () => {
         assert.deepEqual(Array.from(result.skipped), []);
       }
     }
+  });
+});
+
+// Finding B: a Reply action's template is mailed automatically, so it must
+// be a unique message in an accessible Templates folder, checked on create,
+// update (including retained actions) and manual execution.
+describe("reply template authorization", () => {
+  const BLOCKED_TEMPLATE = "mailbox://bob@127.0.0.1/Templates?messageId=tpl@example.invalid&subject=Thanks";
+  function folderPolicy({ duplicates = false } = {}) {
+    return (uri) => {
+      if (uri.startsWith("mailbox://bob@")) return { error: `Account not accessible for folder: ${uri}` };
+      return { folder: makeAccessibleFolder(uri.replace("Local Folders", "Local%20Folders"), {
+        templates: duplicates ? ["tpl@example.invalid", "tpl@example.invalid"] : ["tpl@example.invalid"],
+      }) };
+    };
+  }
+  const create = (h, value) => h.api.createFilter("account", "Reply", true, undefined,
+    [{ attrib: "subject", op: "contains", value: "invoice" }], [{ type: "reply", value }]);
+
+  it("accepts a unique template in an accessible Templates folder and stores the canonical URI", () => {
+    const h = makeFilterHarness({ allowSend: true, getAccessibleFolder: folderPolicy() });
+    const result = create(h, "mailbox://nobody@Local Folders/Templates?messageId=tpl@example.invalid&subject=Thanks");
+    assert.equal(result.success, true, result.error);
+    assert.equal(h.filterList.filters[0].getActionAt(0).strValue, REPLY_TEMPLATE);
+  });
+
+  for (const [label, value, pattern] of [
+    ["a template in a restricted account", BLOCKED_TEMPLATE, /Reply template folder not accessible/],
+    ["a folder without the Templates flag", "mailbox://nobody@Local%20Folders/Inbox?messageId=tpl@example.invalid&subject=x", /Templates flag/],
+    ["a missing template message", "mailbox://nobody@Local%20Folders/Templates?messageId=other@example.invalid&subject=x", /not found/],
+    ["a value without messageId", "mailbox://nobody@Local%20Folders/Templates", /Reply template must be/],
+    ["a value without subject", "mailbox://nobody@Local%20Folders/Templates?messageId=tpl@example.invalid", /Reply template must be/],
+    ["an empty folder part", "?messageId=tpl@example.invalid&subject=x", /Reply template must be/],
+  ]) {
+    it(`refuses ${label} even with sending allowed`, () => {
+      const h = makeFilterHarness({ allowSend: true, getAccessibleFolder: folderPolicy() });
+      const result = create(h, value);
+      assert.match(result.error, pattern);
+      assert.doesNotMatch(result.error, /bob@/, "must not echo a restricted URI");
+      assert.equal(h.filterList.filterCount, 0);
+      assert.equal(h.filterList.saveAttempts, 0);
+    });
+  }
+
+  it("refuses an ambiguous Message-ID in the Templates folder", () => {
+    const h = makeFilterHarness({ allowSend: true, getAccessibleFolder: folderPolicy({ duplicates: true }) });
+    assert.match(create(h, REPLY_TEMPLATE).error, /ambiguous/);
+  });
+
+  it("refuses updates that retain a reply to an inaccessible template, but allows disabling", () => {
+    const h = makeFilterHarness({ allowSend: true, getAccessibleFolder: folderPolicy() });
+    h.seed({ actions: [{ type: "reply", value: BLOCKED_TEMPLATE }] });
+    const before = h.snapshot();
+    assert.match(h.api.updateFilter("account", 0, "Renamed").error, /Reply template not accessible/);
+    assert.equal(h.snapshot(), before);
+    const disabled = h.api.updateFilter("account", 0, undefined, false);
+    assert.equal(disabled.success, true, disabled.error);
+  });
+
+  it("skips manual execution of a rule whose template is inaccessible", () => {
+    const h = makeFilterHarness({ allowSend: true, getAccessibleFolder: folderPolicy() });
+    h.seed({ name: "Blocked reply", actions: [{ type: "reply", value: BLOCKED_TEMPLATE }] });
+    h.seed({ name: "Allowed reply", actions: [{ type: "reply", value: REPLY_TEMPLATE }] });
+    const result = h.api.applyFilters("account", h.folder.URI);
+    assert.equal(result.success, true, result.error);
+    assert.deepEqual(Array.from(result.submitted), ["Allowed reply"]);
+    assert.deepEqual(Array.from(result.skipped, (entry) => ({ ...entry })), [{ name: "Blocked reply", reason: "inaccessible-template" }]);
   });
 });

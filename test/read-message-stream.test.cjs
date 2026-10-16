@@ -76,6 +76,9 @@ function loadInlineImageFetcher({
     source.slice(fetchStart, fetchEnd),
   ].join("\n");
   const sandbox = {
+    // getMessage scope: the authorized message and its own message service.
+    msgHdr: { folder: { getUriForMsg: () => "message-uri" } },
+    MailServices: { messageServiceFromURI: () => ({ getUrlForUri: () => ({ spec: OWN_MESSAGE_URL }) }) },
     btoa: globalThis.btoa,
     Cr: { NS_BASE_STREAM_CLOSED },
     console: { error: (...args) => log.push(args) },
@@ -101,6 +104,9 @@ this.fetchInlineImageBase64 = fetchInlineImageBase64;`,
   );
   return sandbox.fetchInlineImageBase64;
 }
+
+const OWN_MESSAGE_URL = "mailbox:///fixture/Inbox?number=1";
+const OWN_PART_URL = `${OWN_MESSAGE_URL}&part=1.2`;
 
 function loadGetMessage({ stream, log, findMessageError }) {
   const apiPath = path.resolve(__dirname, "../extension/mcp_server/api.js");
@@ -266,6 +272,34 @@ describe("readMessageStreamFully", () => {
 });
 
 describe("inline image stream errors", () => {
+  for (const url of [
+    "http://127.0.0.1:9/ext-inline",
+    "file:///C:/secret.txt",
+    "file://server/share/secret.txt",
+    `${OWN_MESSAGE_URL}&part=1.2&filename=x`,
+    `${OWN_MESSAGE_URL.replace("number=1", "number=2")}&part=1.2`,
+  ]) {
+    it(`never fetches a URL that is not this message's own part URL: ${url}`, async () => {
+      const fetchInlineImageBase64 = loadInlineImageFetcher({
+        stream: makePipeStream("x"),
+        log: [],
+        newChannelError: new Error("must not open a channel"),
+      });
+      const result = await fetchInlineImageBase64({ url });
+      assert.match(result.error, /External or detached attachment/);
+    });
+  }
+
+  it("never fetches a source marked external", async () => {
+    const fetchInlineImageBase64 = loadInlineImageFetcher({
+      stream: makePipeStream("x"),
+      log: [],
+      newChannelError: new Error("must not open a channel"),
+    });
+    const result = await fetchInlineImageBase64({ url: OWN_PART_URL, external: true });
+    assert.match(result.error, /External or detached attachment/);
+  });
+
   it("treats message-part channel contentLength as advisory", async () => {
     const stream = makePipeStream("small image bytes");
     const log = [];
@@ -275,7 +309,7 @@ describe("inline image stream errors", () => {
       log,
     });
 
-    const result = await fetchInlineImageBase64({ url: "mailbox-message-part" });
+    const result = await fetchInlineImageBase64({ url: OWN_PART_URL });
 
     assert.equal(result.error, undefined);
     assert.equal(result.data, btoa("small image bytes"));
@@ -298,7 +332,7 @@ describe("inline image stream errors", () => {
       log,
     });
 
-    const result = await fetchInlineImageBase64({ url: "mailbox-message-part" });
+    const result = await fetchInlineImageBase64({ url: OWN_PART_URL });
 
     assert.equal(result.error, "Inline image read failed");
     assert.equal(log.length, 1);
@@ -315,7 +349,7 @@ describe("inline image stream errors", () => {
       newChannelError: failure,
     });
 
-    const result = await fetchInlineImageBase64({ url: "mailbox-message-part" });
+    const result = await fetchInlineImageBase64({ url: OWN_PART_URL });
 
     assert.equal(result.error, "Inline image fetch failed");
     assert.equal(JSON.stringify(result).includes(internalPath), false);
@@ -332,7 +366,7 @@ describe("inline image stream errors", () => {
       asyncFetchError: failure,
     });
 
-    const result = await fetchInlineImageBase64({ url: "mailbox-message-part" });
+    const result = await fetchInlineImageBase64({ url: OWN_PART_URL });
 
     assert.equal(result.error, "Inline image fetch failed");
     assert.equal(JSON.stringify(result).includes(internalUri), false);
@@ -350,7 +384,7 @@ describe("inline image stream errors", () => {
       log,
     });
 
-    const result = await fetchInlineImageBase64({ url: "mailbox-message-part" });
+    const result = await fetchInlineImageBase64({ url: OWN_PART_URL });
 
     assert.equal(
       result.error,

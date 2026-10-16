@@ -1,13 +1,13 @@
 "use strict";
 
 /**
- * saveDraft reports the folder the draft went to.
+ * saveDraft authorizes and reports the folder the draft goes to.
  *
  * The caller only passes `from`; which folder that identity uses for
  * drafts is Thunderbird's business. These tests pin that the folder is
  * read off the identity, that the property probing copes with the
- * different shapes across versions, and that a missing property never
- * turns a successful save into an error.
+ * different shapes across versions, and that a save only happens after the
+ * identity's real Drafts destination was authorized (hardening finding D).
  */
 
 const { describe, it } = require("node:test");
@@ -32,14 +32,17 @@ const Ci = {
   nsIMsgCompFields: Symbol("nsIMsgCompFields"),
   nsIMsgCompType: { New: 0 },
   nsIMsgCompDeliverMode: { SaveAsDraft: 4 },
+  nsMsgFolderFlags: { Drafts: 0x400 },
 };
 
 const FOLDER = "imap://user@example.com/Drafts";
+const draftsFolder = (uri, flagged = true) => ({ URI: uri, getFlag: (flag) => flagged && flag === Ci.nsMsgFolderFlags.Drafts });
 
 function loadSaveDraft(identity, options = {}) {
   const composeFields = { to: "", cc: "", bcc: "", subject: "", body: "", setHeader() {} };
   const params = {};
   const lookups = [];
+  const saves = [];
 
   const sandbox = {
     Ci,
@@ -55,9 +58,10 @@ function loadSaveDraft(identity, options = {}) {
       lookups.push(uri);
       return options.getAccessibleFolder
         ? options.getAccessibleFolder(uri)
-        : { folder: { URI: uri } };
+        : { folder: draftsFolder(uri) };
     },
     sendMessageDirectly() {
+      saves.push(true);
       if (options.onSave) options.onSave();
       return Promise.resolve(options.result || { success: true });
     },
@@ -70,19 +74,21 @@ function loadSaveDraft(identity, options = {}) {
     snippet("SAVE DRAFT TOOL"),
     "this.saveDraft = saveDraft;",
   ].join("\n"), sandbox);
-  return { saveDraft: sandbox.saveDraft, lookups };
+  return { saveDraft: sandbox.saveDraft, lookups, saves };
 }
 
 describe("saveDraft reports the drafts folder", () => {
   for (const property of ["draftsFolderURI", "draftFolder"]) {
     for (const value of [FOLDER, { URI: FOLDER }]) {
       it(`resolves an accessible ${typeof value} ${property}`, async () => {
-        const { saveDraft, lookups } = loadSaveDraft({ [property]: value });
+        const { saveDraft, lookups, saves } = loadSaveDraft({ [property]: value });
         const result = await saveDraft("a@example.com", "Hi", "body");
 
         assert.equal(result.success, true);
         assert.equal(result.folderPath, FOLDER);
-        assert.deepEqual(lookups, [FOLDER]);
+        // Authorized before saving, re-read for the report afterwards.
+        assert.deepEqual(lookups, [FOLDER, FOLDER]);
+        assert.equal(saves.length, 1);
       });
     }
   }
@@ -101,31 +107,22 @@ describe("saveDraft reports the drafts folder", () => {
     assert.equal((await saveDraft("a@example.com", "Hi", "body")).folderPath, FOLDER);
   });
 
-  it("still saves when the identity names no drafts folder", async () => {
-    const { saveDraft, lookups } = loadSaveDraft({});
-    const result = await saveDraft("a@example.com", "Hi", "body");
-    assert.equal(result.success, true);
-    assert.equal(result.message, "Draft saved");
-    assert.equal(result.folderPath, undefined);
-    assert.deepEqual(lookups, []);
-  });
-
   it("does not probe the Sent-folder or nonexistent identity properties", async () => {
     let forbiddenReads = 0;
     const identity = {
       get draftsFolder() { forbiddenReads++; return FOLDER; },
       get fccFolder() { forbiddenReads++; return "imap://user@example.com/Sent"; },
     };
-    const { saveDraft, lookups } = loadSaveDraft(identity);
+    const { saveDraft, lookups, saves } = loadSaveDraft(identity);
     const result = await saveDraft("a@example.com", "Hi", "body");
 
-    assert.equal(result.success, true);
-    assert.equal(result.folderPath, undefined);
+    assert.match(result.error, /no configured Drafts folder/);
     assert.equal(forbiddenReads, 0);
     assert.deepEqual(lookups, []);
+    assert.equal(saves.length, 0);
   });
 
-  it("uses the identity folder after the save completes", async () => {
+  it("reports the identity folder after the save completes", async () => {
     const oldFolder = "imap://user@example.com/OldDrafts";
     const identity = { draftFolder: oldFolder };
     const { saveDraft, lookups } = loadSaveDraft(identity, {
@@ -135,7 +132,7 @@ describe("saveDraft reports the drafts folder", () => {
 
     assert.equal(result.success, true);
     assert.equal(result.folderPath, FOLDER);
-    assert.deepEqual(lookups, [FOLDER]);
+    assert.deepEqual(lookups, [oldFolder, FOLDER]);
   });
 
   for (const identity of [
@@ -146,40 +143,48 @@ describe("saveDraft reports the drafts folder", () => {
     { get draftsFolderURI() { throw new Error("missing property"); }, get draftFolder() { throw new Error("missing property"); } },
     { draftsFolderURI: { get URI() { throw new Error("missing URI"); } }, draftFolder: {} },
   ]) {
-    it("keeps successful saves without a usable identity folder", async () => {
-      const { saveDraft, lookups } = loadSaveDraft(identity);
+    it("refuses to save without a usable identity Drafts folder", async () => {
+      const { saveDraft, lookups, saves } = loadSaveDraft(identity);
       const result = await saveDraft("a@example.com", "Hi", "body");
 
-      assert.equal(result.success, true);
-      assert.equal(result.folderPath, undefined);
+      assert.match(result.error, /Cannot save draft: the selected identity has no configured Drafts folder/);
       assert.deepEqual(lookups, []);
+      assert.equal(saves.length, 0);
     });
   }
 
-  it("omits restricted Drafts URIs and the access error containing them", async () => {
+  it("refuses a restricted Drafts destination without naming it", async () => {
     const restricted = "imap://restricted@example.com/Drafts";
-    const { saveDraft, lookups } = loadSaveDraft({ draftFolder: restricted }, {
+    const { saveDraft, lookups, saves } = loadSaveDraft({ draftFolder: restricted }, {
       getAccessibleFolder(uri) { return { error: `Account not accessible for folder: ${uri}` }; },
     });
     const result = await saveDraft("a@example.com", "Hi", "body");
 
-    assert.equal(result.success, true);
-    assert.equal(result.folderPath, undefined);
-    assert.equal(result.error, undefined);
+    assert.match(result.error, /Drafts folder is not accessible/);
     assert.equal(JSON.stringify(result).includes(restricted), false);
     assert.deepEqual(lookups, [restricted]);
+    assert.equal(saves.length, 0);
   });
 
-  it("omits folder details when accessibility lookup throws", async () => {
-    const { saveDraft } = loadSaveDraft({ draftFolder: FOLDER }, {
+  it("refuses when the accessibility lookup throws, without naming the folder", async () => {
+    const { saveDraft, saves } = loadSaveDraft({ draftFolder: FOLDER }, {
       getAccessibleFolder(uri) { throw new Error(`Lookup failed for ${uri}`); },
     });
     const result = await saveDraft("a@example.com", "Hi", "body");
 
-    assert.equal(result.success, true);
-    assert.equal(result.folderPath, undefined);
-    assert.equal(result.error, undefined);
+    assert.match(result.error, /Drafts folder is not accessible/);
     assert.equal(JSON.stringify(result).includes(FOLDER), false);
+    assert.equal(saves.length, 0);
+  });
+
+  it("refuses an accessible destination without the Drafts flag", async () => {
+    const { saveDraft, saves } = loadSaveDraft({ draftFolder: FOLDER }, {
+      getAccessibleFolder(uri) { return { folder: draftsFolder(uri, false) }; },
+    });
+    const result = await saveDraft("a@example.com", "Hi", "body");
+
+    assert.match(result.error, /Drafts flag/);
+    assert.equal(saves.length, 0);
   });
 
   it("does not report a folder after a failed save", async () => {
@@ -190,6 +195,6 @@ describe("saveDraft reports the drafts folder", () => {
 
     assert.equal(result.error, "Save failed");
     assert.equal(result.folderPath, undefined);
-    assert.deepEqual(lookups, []);
+    assert.deepEqual(lookups, [FOLDER]);
   });
 });

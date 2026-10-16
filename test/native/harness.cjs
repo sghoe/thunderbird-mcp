@@ -17,7 +17,8 @@ const crypto = require("node:crypto");
 const { Marionette } = require("./marionette.cjs");
 
 const REPO_ROOT = path.resolve(__dirname, "../..");
-const EXTENSION_DIR = path.join(REPO_ROOT, "extension");
+// TBMCP_EXTENSION_DIR runs the suite against another build (e.g. a negative control).
+const EXTENSION_DIR = process.env.TBMCP_EXTENSION_DIR || path.join(REPO_ROOT, "extension");
 
 function thunderbirdBinary() {
   const bin = process.env.THUNDERBIRD_BIN;

@@ -46,6 +46,8 @@ function loadMessageTools({ mime = { contentType: "text/plain", body: "visible" 
       },
     }) },
     findMessage: () => ({ msgHdr: hdr, folder }),
+    // The message's own service: attachment bytes come only from its part URLs.
+    MailServices: { messageServiceFromURI: () => ({ getUrlForUri: () => ({ spec: "mailbox:///fixture/Inbox?number=1" }) }) },
     getUserTags: () => [],
     getConfiguredGetMessagesLimit: () => 10,
     readMessageStreamFully: () => raw,

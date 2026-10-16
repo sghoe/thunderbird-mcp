@@ -30,6 +30,7 @@ const Ci = {
   nsIMsgCompFields: Symbol("nsIMsgCompFields"),
   nsIMsgCompType: { New: 0 },
   nsIMsgCompDeliverMode: { SaveAsDraft: 4 },
+  nsMsgFolderFlags: { Drafts: 0x400 },
 };
 
 function loadSaveDraft() {
@@ -54,10 +55,10 @@ function loadSaveDraft() {
       "@mozilla.org/messengercompose/composeparams;1": { createInstance: () => ({}) },
       "@mozilla.org/messengercompose/composefields;1": { createInstance: () => composeFields },
     },
-    setComposeIdentity(params) { params.identity = {}; },
+    setComposeIdentity(params) { params.identity = { draftFolder: "imap://user@example.com/Drafts" }; },
     resolveComposeFormat: () => ({ useHtml: false, format: 1 }),
     buildBodyWithSignature: body => body || "",
-    getAccessibleFolder: uri => ({ folder: { URI: uri } }),
+    getAccessibleFolder: uri => ({ folder: { URI: uri, getFlag: flag => flag === Ci.nsMsgFolderFlags.Drafts } }),
     filePathsToAttachDescs() {
       calls.attachments++;
       return { descs: [], failed: [] };

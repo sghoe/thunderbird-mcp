@@ -16,3 +16,15 @@ v0.9.2 (enforced by `test/tool-contract.test.cjs` and the native parity run).
 | Attachment exports in `<TmpD>/thunderbird-mcp-hardened-exports/<message>/<file>` | exported paths change; re-attaching exports keeps working | none |
 | Runtime directory refused as an attachment source; `connection.json` refused in any `thunderbird-mcp*` directory | attaching discovery/staging files fails | none (these were never legitimate attachments) |
 | `resource://` alias no longer readable by web content | none for legitimate use | none |
+
+## Stage 2 – targeted security fixes
+
+| Change | Effect for users | Migration |
+|---|---|---|
+| External/detached attachments (`X-Mozilla-External-Attachment-URL`) are never fetched; bytes come only from the message's own part URLs | such attachments are reported with `external: true` and an `error` (additive fields) instead of being exported or shown as images; previously the referenced HTTP/file/UNC location was fetched with system privileges | export the real file from its original location yourself if needed |
+| Direct forward (`skipReview: true`) refuses originals with external/detached attachments, and originals whose attachment cannot be read from the message | previously the external location was fetched and mailed; unreadable attachments were dropped silently | use `skipReview: false` (native review forward) |
+| Filter Reply templates must be a unique message in an accessible Templates folder (create, update incl. retained actions, `applyFilters`) | rules with other templates are refused; `applyFilters` skips them with reason `inaccessible-template`; disabling and deleting stay possible | pick a template from an allowed account's Templates folder |
+| `updateTask` only changes tasks; `updateEvent`/`deleteEvent` only events; unknown item kinds are refused | an event ID passed to `updateTask` (or a task ID to the event tools) now fails | use the matching tool |
+| Tasks with attendees other than the calendar user follow Block `skipReview` like meetings | such tasks are read-only via MCP while the block is on | disable the block deliberately if needed |
+| `saveDraft` authorizes the identity's real Drafts destination before every save (exists, accessible, Drafts flag) | new drafts are refused when the identity saves into a restricted account, a missing folder or a folder without the Drafts flag; previously only replacements were checked | configure the identity's Drafts folder in an allowed account |
+| An ambiguous Message-ID (several messages in the folder) is refused by all message tools | previously an arbitrary match was read/changed/deleted | none yet; Stage 5 adds unique references |

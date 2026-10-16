@@ -1720,6 +1720,53 @@ function buildTerms(filter, conditions) {
 }
 
 // checkTargetFolder(uri) resolves an accessible folder, or returns { error }.
+// BEGIN REPLY TEMPLATE GUARD
+// nsMsgFolderFlags.Templates.
+const TEMPLATES_FOLDER_FLAG = 0x00400000;
+const REPLY_TEMPLATE_FORMAT_HINT = "<Templates folder URI>?messageId=<Message-ID>&subject=<subject>";
+
+// A Reply action names a template as "<folder URI>?messageId=<id>&subject=<s>"
+// (parsed this way by nsMsgComposeService::ReplyWithTemplate, which resolves
+// the folder in any account and takes the first header with that Message-ID).
+// The template's content is mailed automatically, so its folder must pass
+// the same account check as a Move/Copy target, carry the Templates flag, and
+// hold exactly one message with that Message-ID. Returns the value rebuilt
+// from the canonical folder URI; throws on any violation.
+function checkReplyTemplate(value, checkTargetFolder) {
+  const text = typeof value === "string" ? value : "";
+  const query = text.indexOf("?messageId=");
+  const subjectAt = query >= 0 ? text.indexOf("&subject=", query) : -1;
+  const messageId = subjectAt >= 0 ? text.slice(query + 11, subjectAt) : "";
+  if (query <= 0 || subjectAt < 0 || !messageId) {
+    throw new Error(`Reply template must be ${REPLY_TEMPLATE_FORMAT_HINT}`);
+  }
+  const folderUri = text.slice(0, query);
+  let folder = null;
+  try {
+    const target = checkTargetFolder(folderUri);
+    if (!target?.error) folder = target?.folder || null;
+  } catch { /* fail closed below */ }
+  // Access errors may contain a restricted URI; do not echo it back.
+  if (!folder || typeof folder.URI !== "string" || !folder.URI) {
+    throw new Error("Reply template folder not accessible");
+  }
+  let isTemplates = false;
+  try { isTemplates = typeof folder.getFlag === "function" && folder.getFlag(TEMPLATES_FOLDER_FLAG); } catch { /* fail closed */ }
+  if (!isTemplates) throw new Error("Reply template must be stored in a folder with the Templates flag");
+  let matches = 0;
+  try {
+    for (const hdr of folder.msgDatabase.enumerateMessages()) {
+      if (hdr.messageId === messageId && ++matches > 1) break;
+    }
+  } catch {
+    throw new Error("Reply template folder could not be read");
+  }
+  if (matches === 0) throw new Error("Reply template message not found in the Templates folder");
+  if (matches > 1) throw new Error("Reply template Message-ID is ambiguous: several messages in the Templates folder share it");
+  return `${folder.URI}${text.slice(query)}`;
+}
+// END REPLY TEMPLATE GUARD
+
 function buildActions(filter, actions, { checkTargetFolder } = {}) {
   if (!FILTER_ACTIONS_AVAILABLE) {
     throw new Error("Cannot build filter actions -- this Thunderbird did not expose nsMsgFilterAction");
@@ -1763,6 +1810,9 @@ function buildActions(filter, actions, { checkTargetFolder } = {}) {
         if (isOutboxFolder(targetCheck.folder)) throw new Error(OUTBOX_DESTINATION_ERROR);
         // Folder lookup accepts spellings the native action setter rejects.
         parsed = canonicalURI;
+      }
+      if (spec.action === "reply" && checkTargetFolder) {
+        parsed = checkReplyTemplate(parsed, checkTargetFolder);
       }
       action[spec.member] = parsed;
     }
@@ -1872,6 +1922,7 @@ function getFilterActionRestriction(filter, { allowSending = isFilterSendAllowed
   let sending = false;
   let inaccessibleDestination = false;
   let outboxDestination = false;
+  let inaccessibleTemplate = false;
   for (let i = 0; i < filter.actionCount; i++) {
     const action = filter.getActionAt(i);
     const type = action.type;
@@ -1879,6 +1930,13 @@ function getFilterActionRestriction(filter, { allowSending = isFilterSendAllowed
     const spec = ACTION_SPECS[type];
     if (!spec) throw new Error(`Unsupported filter action type: ${type}`);
     if (type === forward || type === reply) sending = true;
+    if (type === reply && checkTargetFolder) {
+      try {
+        checkReplyTemplate(action.strValue, checkTargetFolder);
+      } catch {
+        inaccessibleTemplate = true;
+      }
+    }
     if (spec.codec === "folder" && checkTargetFolder) {
       try {
         const targetCheck = checkTargetFolder(action[spec.member]);
@@ -1891,6 +1949,7 @@ function getFilterActionRestriction(filter, { allowSending = isFilterSendAllowed
   }
   if (inaccessibleDestination) return "inaccessible-destination";
   if (outboxDestination) return "outbox-destination";
+  if (inaccessibleTemplate) return "inaccessible-template";
   return sending && !allowSending ? "sending" : null;
 }
 
@@ -1936,6 +1995,9 @@ function validateFilterForWrite(filter, { onlyDisable = false, checkTargetFolder
     throw new Error("Filter target folder not accessible: a Move/Copy destination is missing or restricted");
   }
   if (restriction === "outbox-destination") throw new Error(OUTBOX_DESTINATION_ERROR);
+  if (restriction === "inaccessible-template") {
+    throw new Error("Reply template not accessible: it must be a unique message in an accessible Templates folder");
+  }
   if (restriction === "sending" && !onlyDisable) {
     throw new Error(`Forward/Reply filter actions are disabled. Enable ${FILTER_SEND_OPTION} to allow them.`);
   }
@@ -5332,28 +5394,24 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	              if (opened.error) return opened;
 
 	              const { folder, db } = opened;
+	              // RFC Message-IDs are chosen by the sender and need not be
+	              // unique: a second message can reuse another's ID. Never pick
+	              // one silently (getMsgHdrForMessageID returns an arbitrary
+	              // match); refuse when the ID is ambiguous in this folder.
 	              let msgHdr = null;
-
-	              const hasDirectLookup = typeof db.getMsgHdrForMessageID === "function";
-	              if (hasDirectLookup) {
-	                try {
-	                  msgHdr = db.getMsgHdrForMessageID(messageId);
-	                } catch {
-	                  msgHdr = null;
-	                }
-	              }
-
-	              if (!msgHdr) {
-	                for (const hdr of db.enumerateMessages()) {
-	                  if (hdr.messageId === messageId) {
-	                    msgHdr = hdr;
-	                    break;
-	                  }
+	              let matches = 0;
+	              for (const hdr of db.enumerateMessages()) {
+	                if (hdr.messageId === messageId) {
+	                  if (!msgHdr) msgHdr = hdr;
+	                  if (++matches > 1) break;
 	                }
 	              }
 
 	              if (!msgHdr) {
 	                return { error: `Message not found: ${messageId}` };
+	              }
+	              if (matches > 1) {
+	                return { error: `Message-ID is ambiguous: several messages in this folder share it; refusing to choose one: ${messageId}` };
 	              }
 
 	              return { msgHdr, folder, db };
@@ -5932,6 +5990,20 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
             // One write guard for both update/delete paths. Inspect the stored
             // series before a replacement list or recurrence can erase attendees.
+            // calIItemBase.isEvent()/isTodo(); cal.item helpers as a fallback.
+            // Unknown kinds fail closed: a lookup by ID can return any item type.
+            function getCalendarItemKind(item) {
+              try {
+                if (typeof item?.isTodo === "function" && item.isTodo()) return "task";
+                if (typeof item?.isEvent === "function" && item.isEvent()) return "event";
+              } catch { /* fall through */ }
+              try {
+                if (cal?.item?.isToDo?.(item)) return "task";
+                if (cal?.item?.isEvent?.(item)) return "event";
+              } catch { /* unknown */ }
+              return "unknown";
+            }
+
             function assertEventWriteAllowed(event, calendar, occurrence = null, attendees) {
               const blocked = isSkipReviewBlocked();
               if (!blocked && attendees == null) return;
@@ -6454,6 +6526,13 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   oldItem = items.find(i => i.id === taskId) || null;
                 }
                 if (!oldItem) return { error: `Task not found: ${taskId}` };
+                // A direct lookup returns events too; only tasks may change here.
+                if (getCalendarItemKind(oldItem) !== "task") {
+                  return { error: `Item ${taskId} is not a task. Use updateEvent for events.` };
+                }
+                // Assigned tasks (VTODO with attendees) can also trigger scheduling
+                // messages from the provider; apply the same guard as meetings.
+                assertEventWriteAllowed(oldItem, calendar);
 
                 const newItem = oldItem.clone();
                 const changes = [];
@@ -6940,6 +7019,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   oldItem = all.find(i => i.id === eventId) || null;
                 }
                 if (!oldItem) return { error: `Event not found: ${eventId}` };
+                if (getCalendarItemKind(oldItem) !== "event") {
+                  return { error: `Item ${eventId} is not an event. Use updateTask for tasks.` };
+                }
 
                 // ---- Single-occurrence path ----
                 if (recurrenceId != null) {
@@ -7031,6 +7113,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   item = all.find(i => i.id === eventId) || null;
                 }
                 if (!item) return { error: `Event not found: ${eventId}` };
+                if (getCalendarItemKind(item) !== "event") {
+                  return { error: `Item ${eventId} is not an event; deleteEvent only deletes events.` };
+                }
 
                 if (recurrenceId != null) {
                   if (!item.recurrenceInfo) {
@@ -7980,12 +8065,63 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   isInline: isInlineImage,
                   isAttachment,
                   insideRelated,
+                  // Detached/external parts only hold a notice locally; the
+                  // header names a location outside the message.
+                  external: !!getRawMimeHeader(entity.headers, "x-mozilla-external-attachment-url"),
                   bytes,
                 });
               }
 
               walkPart(top, false);
               return results;
+            }
+
+            // Thunderbird stores detached/external attachments as a local notice
+            // plus X-Mozilla-External-Attachment-URL; Gloda then reports that
+            // foreign location (http:, file:, UNC, ...) as the attachment URL.
+            // Attachment bytes must only ever come from the authorized message
+            // itself, so such records are never fetched. The scheme list only
+            // classifies; fetching is gated by isOwnMessagePartUrl below.
+            const EXTERNAL_ATTACHMENT_NOT_FETCHED =
+              "External or detached attachment: the message only stores a reference to another location, which is not fetched";
+            const FOREIGN_ATTACHMENT_URL_SCHEMES = new Set([
+              "http", "https", "file", "ftp", "smb", "data", "blob", "jar",
+              "resource", "chrome", "moz-extension", "about", "javascript",
+            ]);
+
+            function isExternalAttachmentRecord(att) {
+              if (att?.isExternal === true) return true;
+              const url = typeof att?.url === "string" ? att.url : "";
+              const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(url)?.[1]?.toLowerCase();
+              return !!scheme && FOREIGN_ATTACHMENT_URL_SCHEMES.has(scheme);
+            }
+
+            function getOwnMessageBaseUrl(msgHdr) {
+              const msgUri = msgHdr.folder.getUriForMsg(msgHdr);
+              return MailServices.messageServiceFromURI(msgUri).getUrlForUri(msgUri).spec || "";
+            }
+
+            // Builds the part URL from the message's own message service and a
+            // validated MIME part number instead of trusting a reported URL.
+            function getOwnMessagePartUrl(msgHdr, partName) {
+              if (typeof partName !== "string" || !/^\d+(?:\.\d+)*$/.test(partName)) return "";
+              try {
+                const base = getOwnMessageBaseUrl(msgHdr);
+                if (!base) return "";
+                return `${base}${base.includes("?") ? "&" : "?"}part=${partName}`;
+              } catch {
+                return "";
+              }
+            }
+
+            // Final guard before any privileged fetch: exactly this message's
+            // URL plus one numeric part selector.
+            function isOwnMessagePartUrl(msgHdr, url) {
+              if (typeof url !== "string" || !url) return false;
+              let base;
+              try { base = getOwnMessageBaseUrl(msgHdr); } catch { return false; }
+              if (!base || !url.startsWith(base)) return false;
+              return /^[?&]part=\d+(?:\.\d+)*$/.test(url.slice(base.length));
             }
             // END RAW MIME ATTACHMENT HELPERS
 
@@ -8754,11 +8890,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                         };
                         if (isInline) info.partName = part.partName;
                         if (isInline && includeInlineImages) info.contentId = part.contentId || null;
+                        if (part.external) info.external = true;
                         attachments.push(info);
-                        attachmentSources.push({ info, url: "", size: info.size, bytes: part.bytes });
+                        attachmentSources.push({ info, url: "", size: info.size, bytes: part.bytes, external: part.external });
                         if (isInline && includeInlineImages) {
                           inlineImageSources.push({
-                            info, url: "", size: info.size, partName: part.partName, bytes: part.bytes,
+                            info, url: "", size: info.size, partName: part.partName, bytes: part.bytes, external: part.external,
                           });
                         }
                       }
@@ -8772,10 +8909,16 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                           size: typeof att?.size === "number" ? att.size : null,
                           isInline: false,
                         };
+                        // SECURITY: att.url is never fetched; see
+                        // isExternalAttachmentRecord / getOwnMessagePartUrl.
+                        const external = isExternalAttachmentRecord(att);
+                        if (external) info.external = true;
                         const source = {
                           info,
-                          url: att?.url || "",
-                          size: typeof att?.size === "number" ? att.size : null
+                          url: external ? "" : getOwnMessagePartUrl(msgHdr, att?.partName),
+                          size: typeof att?.size === "number" ? att.size : null,
+                          partName: att?.partName || "",
+                          external,
                         };
                         attachments.push(info);
                         attachmentSources.push(source);
@@ -8851,7 +8994,6 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                       const inlineImages = [];
                       collectInlineImages(aMimeMsg, false, inlineImages);
                       if (inlineImages.length > 0) {
-                        const msgUri = msgHdr.folder.getUriForMsg(msgHdr);
                         const correlations = includeInlineImages
                           ? correlateInlineImageRecords(knownAttachmentRecords, inlineImages)
                           : {
@@ -8862,20 +9004,13 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                             };
                         for (const correlation of correlations.inlineImageEntries) {
                           const { part, name, ct, contentId } = correlation.inlineImage;
-                          // Resolve to a fetchable URL via the message service
-                          let partUrl;
-                          try {
-                            const svc = MailServices.messageServiceFromURI(msgUri);
-                            const baseUri = svc.getUrlForUri(msgUri);
-                            // Append part parameter to the resolved fetchable URL
-                            const sep = baseUri.spec.includes("?") ? "&" : "?";
-                            partUrl = `${baseUri.spec}${sep}part=${part.partName}`;
-                          } catch {
-                            partUrl = "";
-                          }
+                          // Fetchable URL from this message's own message service.
+                          const partUrl = getOwnMessagePartUrl(msgHdr, part.partName);
                           const partSize = typeof part.size === "number" && part.size > 0
                             ? part.size
                             : null;
+                          // A detached inline image only holds a local notice.
+                          let external = !!part.headers?.["x-mozilla-external-attachment-url"];
                           let info;
                           let fallbackUrl = "";
                           if (includeInlineImages && correlation.matchedKnownAttachment) {
@@ -8889,7 +9024,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                             info.partName = part.partName;
                             info.isInline = true;
                             info.contentId = contentId || knownRecord.contentId || null;
+                            // Only ever an own message-part URL (see above).
                             fallbackUrl = knownRecord.source?.url || "";
+                            external = external || knownRecord.source?.external === true;
+                            if (external && knownRecord.source) knownRecord.source.external = true;
                           } else {
                             info = {
                               name,
@@ -8900,15 +9038,17 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                             };
                             if (includeInlineImages) info.contentId = contentId || null;
                             attachments.push(info);
-                            if (partUrl) {
-                              attachmentSources.push({ info, url: partUrl, size: info.size });
+                            if (partUrl || external) {
+                              attachmentSources.push({ info, url: external ? "" : partUrl, size: info.size, partName: part.partName, external });
                             }
                           }
+                          if (external) info.external = true;
                           inlineImageSources.push({
                             info,
-                            url: partUrl || fallbackUrl,
+                            url: external ? "" : (partUrl || fallbackUrl),
                             size: info.size,
                             partName: part.partName,
+                            external,
                           });
                         }
                       }
@@ -8947,6 +9087,30 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                       }
                     }
 
+                    // Gloda keeps only Content-Type on MIME leaves, so a detached
+                    // inline image is invisible there. When bytes are about to be
+                    // read (export or image blocks), mark parts the stored message
+                    // declares external. Unreadable raw sources leave flags as is;
+                    // nothing is fetched outside the message either way.
+                    if (!useRawContent && (saveAttachments || includeInlineImages)) {
+                      const candidates = [...attachmentSources, ...inlineImageSources].filter(source => !source.external);
+                      if (candidates.length > 0) {
+                        const parsed = getRawMimeAttachmentParts(true);
+                        if (!parsed.error) {
+                          const externalPartNames = new Set((parsed.parts || [])
+                            .filter(part => part.external && part.partName)
+                            .map(part => part.partName));
+                          for (const source of candidates) {
+                            const partName = source.partName || source.info?.partName;
+                            if (partName && externalPartNames.has(partName)) {
+                              source.external = true;
+                              source.info.external = true;
+                            }
+                          }
+                        }
+                      }
+                    }
+
                     const msgTags = getUserTags(msgHdr);
                     const baseResponse = {
                       id: msgHdr.messageId,
@@ -8967,6 +9131,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                         // Largest decoded payload whose base64 representation fits
                         // exactly inside the per-image encoded budget.
                         const maxRawBytes = Math.floor(MAX_INLINE_IMAGE_BASE64_BYTES / 4) * 3;
+                        if (source.external) {
+                          resolve({ error: EXTERNAL_ATTACHMENT_NOT_FETCHED });
+                          return;
+                        }
                         if (source.bytes) {
                           resolve(source.bytes.length > maxRawBytes
                             ? { error: `Image exceeds per-image base64 limit (${MAX_INLINE_IMAGE_BASE64_BYTES} bytes)` }
@@ -8975,6 +9143,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                         }
                         if (!source.url) {
                           resolve({ error: "Inline image has no fetchable message-part URL" });
+                          return;
+                        }
+                        if (!isOwnMessagePartUrl(msgHdr, source.url)) {
+                          resolve({ error: EXTERNAL_ATTACHMENT_NOT_FETCHED });
                           return;
                         }
                         try {
@@ -9286,11 +9458,21 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                       return { size: recoveredSize };
                     }
 
-                                        const saveOne = ({ info, url, size, bytes }, index) =>
+                                        const saveOne = ({ info, url, size, bytes, external }, index) =>
                                           new Promise((done) => {
                         try {
+                          if (external) {
+                            info.error = EXTERNAL_ATTACHMENT_NOT_FETCHED;
+                            done();
+                            return;
+                          }
                           if (!url && !bytes) {
                             info.error = "Missing attachment URL";
+                            done();
+                            return;
+                          }
+                          if (!bytes && !isOwnMessagePartUrl(msgHdr, url)) {
+                            info.error = EXTERNAL_ATTACHMENT_NOT_FETCHED;
                             done();
                             return;
                           }
@@ -9685,15 +9867,23 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 const identityResult = setComposeIdentity(msgComposeParams, from, null);
                 if (identityResult && identityResult.error) return identityResult;
 
-                if (msgToReplace) {
-                  const draftURI = getIdentityDraftFolderURI(msgComposeParams.identity);
-                  if (!draftURI) return { error: "Cannot replace draft: the selected identity has no configured Drafts folder" };
-                  let destination;
-                  try { destination = getAccessibleFolder(draftURI); } catch { /* fail closed below */ }
-                  if (!destination || destination.error) return { error: "Cannot replace draft: the selected identity's Drafts folder is not accessible" };
-                  if (destination.folder.URI !== replaceFolder.URI) {
-                    return { error: "Cannot replace draft outside the selected identity's configured Drafts folder; select the matching from identity" };
-                  }
+                // Thunderbird saves into the identity's configured Drafts folder,
+                // which may belong to another (restricted) account. Authorize
+                // that real destination before every save, new or replacement.
+                const draftAction = msgToReplace ? "replace draft" : "save draft";
+                const draftURI = getIdentityDraftFolderURI(msgComposeParams.identity);
+                if (!draftURI) return { error: `Cannot ${draftAction}: the selected identity has no configured Drafts folder` };
+                let destination;
+                try { destination = getAccessibleFolder(draftURI); } catch { /* fail closed below */ }
+                // Access errors may contain a restricted URI; do not expose it.
+                if (!destination || destination.error) return { error: `Cannot ${draftAction}: the selected identity's Drafts folder is not accessible` };
+                let destinationIsDrafts = false;
+                try { destinationIsDrafts = destination.folder.getFlag(Ci.nsMsgFolderFlags.Drafts); } catch { /* fail closed */ }
+                if (!destinationIsDrafts) {
+                  return { error: `Cannot ${draftAction}: the selected identity's Drafts destination is not a folder with the Drafts flag` };
+                }
+                if (msgToReplace && destination.folder.URI !== replaceFolder.URI) {
+                  return { error: "Cannot replace draft outside the selected identity's configured Drafts folder; select the matching from identity" };
                 }
 
                 const { useHtml, format } = resolveComposeFormat(msgComposeParams.identity, isHtml, msgComposeParams.type);
@@ -10064,15 +10254,29 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                           composeFields.body = `${body ? body + '\n\n' : ''}${fwdHeader}${originalBody}`;
                         }
 
+                        // SECURITY: original attachments are attached from this
+                        // message's own part URLs only. External/detached parts
+                        // would make the send fetch a foreign location (http:,
+                        // file:, UNC) and mail its content, so they are refused.
                         const origDescs = [];
+                        const externalNames = [];
                         if (aMimeMsg && aMimeMsg.allUserAttachments) {
                           for (const att of aMimeMsg.allUserAttachments) {
-                            try {
-                              origDescs.push({ url: att.url, name: att.name, contentType: att.contentType });
-                            } catch {
-                              // Skip unreadable original attachments
+                            if (isExternalAttachmentRecord(att)) {
+                              externalNames.push(att?.name || "(unnamed)");
+                              continue;
                             }
+                            const url = getOwnMessagePartUrl(msgHdr, att?.partName);
+                            if (!url) {
+                              resolve({ error: `Direct forward refused: original attachment "${att?.name || "(unnamed)"}" cannot be read from the message. Use skipReview: false to review in Thunderbird.` });
+                              return;
+                            }
+                            origDescs.push({ url, name: att.name, contentType: att.contentType });
                           }
+                        }
+                        if (externalNames.length) {
+                          resolve({ error: `Direct forward refused: the original contains external or detached attachments (${externalNames.join(", ")}) that only reference another location. Use skipReview: false to review in Thunderbird.` });
+                          return;
                         }
                         const allDescs = [...origDescs, ...fileDescs];
 
@@ -10305,24 +10509,25 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 if (opened.error) return { error: opened.error };
                 const { folder, db } = opened;
 
-                // Find all requested message headers
+                // Find all requested message headers in one pass. Message-IDs
+                // need not be unique; refuse the whole call rather than
+                // deleting an arbitrary one of several matches.
                 const found = [];
                 const notFound = [];
+                const wanted = new Set(messageIds.filter(id => typeof id === "string" && id));
+                const matchesById = new Map();
+                for (const h of db.enumerateMessages()) {
+                  if (!wanted.has(h.messageId)) continue;
+                  const list = matchesById.get(h.messageId) || [];
+                  list.push(h);
+                  matchesById.set(h.messageId, list);
+                }
+                const ambiguous = [...matchesById].filter(([, list]) => list.length > 1).map(([id]) => id);
+                if (ambiguous.length) {
+                  return { error: `Message-ID is ambiguous: several messages in this folder share it; refusing to choose one: ${ambiguous.join(", ")}` };
+                }
                 for (const msgId of messageIds) {
-                  if (typeof msgId !== "string" || !msgId) {
-                    notFound.push(msgId);
-                    continue;
-                  }
-                  let hdr = null;
-                  const hasDirectLookup = typeof db.getMsgHdrForMessageID === "function";
-                  if (hasDirectLookup) {
-                    try { hdr = db.getMsgHdrForMessageID(msgId); } catch { hdr = null; }
-                  }
-                  if (!hdr) {
-                    for (const h of db.enumerateMessages()) {
-                      if (h.messageId === msgId) { hdr = h; break; }
-                    }
-                  }
+                  const hdr = typeof msgId === "string" && msgId ? matchesById.get(msgId)?.[0] : null;
                   if (hdr) {
                     found.push(hdr);
                   } else {
@@ -10448,23 +10653,25 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   if (isOutboxFolder(targetFolder)) return { error: OUTBOX_DESTINATION_ERROR };
                 }
 
+                // Find all requested message headers in one pass. Message-IDs
+                // need not be unique; refuse the whole call rather than
+                // changing an arbitrary one of several matches.
                 const foundHdrs = [];
                 const notFound = [];
+                const wanted = new Set(messageIds.filter(id => typeof id === "string" && id));
+                const matchesById = new Map();
+                for (const h of db.enumerateMessages()) {
+                  if (!wanted.has(h.messageId)) continue;
+                  const list = matchesById.get(h.messageId) || [];
+                  list.push(h);
+                  matchesById.set(h.messageId, list);
+                }
+                const ambiguous = [...matchesById].filter(([, list]) => list.length > 1).map(([id]) => id);
+                if (ambiguous.length) {
+                  return { error: `Message-ID is ambiguous: several messages in this folder share it; refusing to choose one: ${ambiguous.join(", ")}` };
+                }
                 for (const msgId of messageIds) {
-                  if (typeof msgId !== "string" || !msgId) {
-                    notFound.push(msgId);
-                    continue;
-                  }
-                  let hdr = null;
-                  const hasDirectLookup = typeof db.getMsgHdrForMessageID === "function";
-                  if (hasDirectLookup) {
-                    try { hdr = db.getMsgHdrForMessageID(msgId); } catch { hdr = null; }
-                  }
-                  if (!hdr) {
-                    for (const h of db.enumerateMessages()) {
-                      if (h.messageId === msgId) { hdr = h; break; }
-                    }
-                  }
+                  const hdr = typeof msgId === "string" && msgId ? matchesById.get(msgId)?.[0] : null;
                   if (hdr) {
                     foundHdrs.push(hdr);
                   } else {
@@ -10931,7 +11138,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                 buildTerms(filter, conditions);
                 buildActions(filter, actions, { checkTargetFolder: getAccessibleFolder });
-                validateFilterForWrite(filter, { addressBooksRestricted: isAddressBookAccessRestricted() });
+                validateFilterForWrite(filter, { checkTargetFolder: getAccessibleFolder, addressBooksRestricted: isAddressBookAccessRestricted() });
 
                 const idx = (insertAtIndex != null && insertAtIndex >= 0)
                   ? Math.min(insertAtIndex, filterList.filterCount)
