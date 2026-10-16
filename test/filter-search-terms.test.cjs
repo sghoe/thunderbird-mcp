@@ -2506,6 +2506,10 @@ describe("reply template authorization", () => {
     ["a value without messageId", "mailbox://nobody@Local%20Folders/Templates", /Reply template must be/],
     ["a value without subject", "mailbox://nobody@Local%20Folders/Templates?messageId=tpl@example.invalid", /Reply template must be/],
     ["an empty folder part", "?messageId=tpl@example.invalid&subject=x", /Reply template must be/],
+    // ReplyWithTemplate searches "&subject=" from the start; one inside the
+    // folder URI would make the native code abort Thunderbird.
+    ["\"&subject=\" inside the folder URI", "mailbox://nobody@Local%20Folders/Templates&subject=earlier?messageId=tpl@example.invalid&subject=Thanks", /Reply template must be/],
+    ["\"&subject=\" inside the Message-ID position", "mailbox://nobody@Local%20Folders/Templates?messageId=&subject=x&subject=y", /Reply template must be/],
   ]) {
     it(`refuses ${label} even with sending allowed`, () => {
       const h = makeFilterHarness({ allowSend: true, getAccessibleFolder: folderPolicy() });
@@ -2520,6 +2524,17 @@ describe("reply template authorization", () => {
   it("refuses an ambiguous Message-ID in the Templates folder", () => {
     const h = makeFilterHarness({ allowSend: true, getAccessibleFolder: folderPolicy({ duplicates: true }) });
     assert.match(create(h, REPLY_TEMPLATE).error, /ambiguous/);
+  });
+
+  it("refuses when the canonical folder URI would change the native parse", () => {
+    const tricky = {
+      URI: "mailbox://nobody@Local%20Folders/Templates&subject=x",
+      getFlag: (flag) => flag === 0x00400000,
+      msgDatabase: { enumerateMessages: () => [{ messageId: "tpl@example.invalid" }] },
+    };
+    const h = makeFilterHarness({ allowSend: true, getAccessibleFolder: () => ({ folder: tricky }) });
+    assert.match(create(h, REPLY_TEMPLATE).error, /cannot be used in a reply template/);
+    assert.equal(h.filterList.filterCount, 0);
   });
 
   it("refuses updates that retain a reply to an inaccessible template, but allows disabling", () => {

@@ -30,6 +30,10 @@ function loadDeleteMessages(dependencies) {
   assert.ok(end > start, "deleteMessages end marker missing");
 
   const snippet = source.slice(start, end);
+  const indexStart = source.indexOf("// BEGIN MESSAGE-ID INDEX");
+  const indexEnd = source.indexOf("// END MESSAGE-ID INDEX", indexStart);
+  assert.ok(indexStart >= 0 && indexEnd > indexStart, "Message-ID index markers missing");
+  const indexSnippet = source.slice(indexStart, indexEnd);
   const sandbox = {
     openFolder: dependencies.openFolder,
     findTrashFolder: dependencies.findTrashFolder,
@@ -38,7 +42,8 @@ function loadDeleteMessages(dependencies) {
   };
   vm.createContext(sandbox);
   vm.runInContext(
-    `${snippet}
+    `${indexSnippet}
+${snippet}
 this.deleteMessages = deleteMessages;`,
     sandbox
   );

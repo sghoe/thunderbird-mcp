@@ -1733,14 +1733,23 @@ const REPLY_TEMPLATE_FORMAT_HINT = "<Templates folder URI>?messageId=<Message-ID
 // hold exactly one message with that Message-ID. Returns the value rebuilt
 // from the canonical folder URI; throws on any violation.
 function checkReplyTemplate(value, checkTargetFolder) {
+  // Parse exactly like ReplyWithTemplate: both delimiters are searched from
+  // the start of the whole value (PL_strstr), so "&subject=" must not occur
+  // before the Message-ID; otherwise the native code computes a reversed
+  // substring and aborts Thunderbird.
+  const parse = (candidate) => {
+    const query = candidate.indexOf("?messageId=");
+    const subjectAt = candidate.indexOf("&subject=");
+    if (query <= 0 || subjectAt < query + 11) return null;
+    const messageId = candidate.slice(query + 11, subjectAt);
+    return messageId ? { folderUri: candidate.slice(0, query), messageId, tail: candidate.slice(query) } : null;
+  };
   const text = typeof value === "string" ? value : "";
-  const query = text.indexOf("?messageId=");
-  const subjectAt = query >= 0 ? text.indexOf("&subject=", query) : -1;
-  const messageId = subjectAt >= 0 ? text.slice(query + 11, subjectAt) : "";
-  if (query <= 0 || subjectAt < 0 || !messageId) {
+  const parsed = parse(text);
+  if (!parsed) {
     throw new Error(`Reply template must be ${REPLY_TEMPLATE_FORMAT_HINT}`);
   }
-  const folderUri = text.slice(0, query);
+  const { folderUri, messageId } = parsed;
   let folder = null;
   try {
     const target = checkTargetFolder(folderUri);
@@ -1763,7 +1772,13 @@ function checkReplyTemplate(value, checkTargetFolder) {
   }
   if (matches === 0) throw new Error("Reply template message not found in the Templates folder");
   if (matches > 1) throw new Error("Reply template Message-ID is ambiguous: several messages in the Templates folder share it");
-  return `${folder.URI}${text.slice(query)}`;
+  // The canonical folder URI must not change how the native code parses it.
+  const canonical = `${folder.URI}${parsed.tail}`;
+  const reparsed = parse(canonical);
+  if (!reparsed || reparsed.folderUri !== folder.URI || reparsed.messageId !== messageId) {
+    throw new Error("Reply template folder URI cannot be used in a reply template");
+  }
+  return canonical;
 }
 // END REPLY TEMPLATE GUARD
 
@@ -5389,32 +5404,76 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               return fallback;
             }
 
+	            // BEGIN MESSAGE-ID INDEX
+	            // RFC Message-IDs are chosen by the sender and need not be
+	            // unique; message tools refuse ambiguous IDs instead of picking
+	            // one. Counting needs one pass over the folder, so per-folder
+	            // counts are reused while the database object, its message count
+	            // and highest message key are unchanged (an added message raises
+	            // the key, a removed one lowers the count), for at most 60 s.
+	            const MESSAGE_ID_INDEX_TTL_MS = 60000;
+	            const MESSAGE_ID_INDEX_MAX_FOLDERS = 8;
+	            const _messageIdIndexes = new Map();
+
+	            function getMessageIdCounts(folder, db) {
+	              let stamp = null;
+	              try {
+	                const info = db.dBFolderInfo;
+	                if (Number.isFinite(info.numMessages) && Number.isFinite(info.highWater)) {
+	                  stamp = `${info.numMessages}:${info.highWater}`;
+	                }
+	              } catch { /* no stamp: never cache */ }
+	              const key = typeof folder?.URI === "string" ? folder.URI : "";
+	              const cached = key ? _messageIdIndexes.get(key) : null;
+	              if (cached && stamp !== null && cached.db === db && cached.stamp === stamp &&
+	                  Date.now() - cached.at < MESSAGE_ID_INDEX_TTL_MS) {
+	                _messageIdIndexes.delete(key);
+	                _messageIdIndexes.set(key, cached);
+	                return cached.counts;
+	              }
+	              const counts = new Map();
+	              for (const hdr of db.enumerateMessages()) {
+	                counts.set(hdr.messageId, (counts.get(hdr.messageId) || 0) + 1);
+	              }
+	              if (key && stamp !== null) {
+	                _messageIdIndexes.delete(key);
+	                _messageIdIndexes.set(key, { db, stamp, counts, at: Date.now() });
+	                while (_messageIdIndexes.size > MESSAGE_ID_INDEX_MAX_FOLDERS) {
+	                  _messageIdIndexes.delete(_messageIdIndexes.keys().next().value);
+	                }
+	              }
+	              return counts;
+	            }
+
+	            // { hdr } for a unique match, { ambiguous: true }, or {} if absent.
+	            function lookupUniqueMessage(folder, db, messageId) {
+	              const count = getMessageIdCounts(folder, db).get(messageId) || 0;
+	              if (count > 1) return { ambiguous: true };
+	              if (count === 0) return {};
+	              let hdr = null;
+	              try { hdr = db.getMsgHdrForMessageID(messageId); } catch { hdr = null; }
+	              if (!hdr || hdr.messageId !== messageId) {
+	                const scanned = [...db.enumerateMessages()].find(candidate => candidate.messageId === messageId);
+	                hdr = scanned || null;
+	              }
+	              return hdr ? { hdr } : {};
+	            }
+	            // END MESSAGE-ID INDEX
+
 	            function findMessage(messageId, folderPath) {
 	              const opened = openFolder(folderPath);
 	              if (opened.error) return opened;
 
 	              const { folder, db } = opened;
-	              // RFC Message-IDs are chosen by the sender and need not be
-	              // unique: a second message can reuse another's ID. Never pick
-	              // one silently (getMsgHdrForMessageID returns an arbitrary
-	              // match); refuse when the ID is ambiguous in this folder.
-	              let msgHdr = null;
-	              let matches = 0;
-	              for (const hdr of db.enumerateMessages()) {
-	                if (hdr.messageId === messageId) {
-	                  if (!msgHdr) msgHdr = hdr;
-	                  if (++matches > 1) break;
-	                }
-	              }
-
-	              if (!msgHdr) {
-	                return { error: `Message not found: ${messageId}` };
-	              }
-	              if (matches > 1) {
+	              const lookup = lookupUniqueMessage(folder, db, messageId);
+	              if (lookup.ambiguous) {
 	                return { error: `Message-ID is ambiguous: several messages in this folder share it; refusing to choose one: ${messageId}` };
 	              }
+	              if (!lookup.hdr) {
+	                return { error: `Message not found: ${messageId}` };
+	              }
 
-	              return { msgHdr, folder, db };
+	              return { msgHdr: lookup.hdr, folder, db };
 	            }
 
             // BEGIN MESSAGE SEARCH
@@ -10514,20 +10573,18 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 // deleting an arbitrary one of several matches.
                 const found = [];
                 const notFound = [];
-                const wanted = new Set(messageIds.filter(id => typeof id === "string" && id));
-                const matchesById = new Map();
-                for (const h of db.enumerateMessages()) {
-                  if (!wanted.has(h.messageId)) continue;
-                  const list = matchesById.get(h.messageId) || [];
-                  list.push(h);
-                  matchesById.set(h.messageId, list);
+                const lookups = new Map();
+                for (const msgId of messageIds) {
+                  if (typeof msgId === "string" && msgId && !lookups.has(msgId)) {
+                    lookups.set(msgId, lookupUniqueMessage(folder, db, msgId));
+                  }
                 }
-                const ambiguous = [...matchesById].filter(([, list]) => list.length > 1).map(([id]) => id);
+                const ambiguous = [...lookups].filter(([, lookup]) => lookup.ambiguous).map(([id]) => id);
                 if (ambiguous.length) {
                   return { error: `Message-ID is ambiguous: several messages in this folder share it; refusing to choose one: ${ambiguous.join(", ")}` };
                 }
                 for (const msgId of messageIds) {
-                  const hdr = typeof msgId === "string" && msgId ? matchesById.get(msgId)?.[0] : null;
+                  const hdr = typeof msgId === "string" && msgId ? lookups.get(msgId)?.hdr : null;
                   if (hdr) {
                     found.push(hdr);
                   } else {
@@ -10658,20 +10715,18 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 // changing an arbitrary one of several matches.
                 const foundHdrs = [];
                 const notFound = [];
-                const wanted = new Set(messageIds.filter(id => typeof id === "string" && id));
-                const matchesById = new Map();
-                for (const h of db.enumerateMessages()) {
-                  if (!wanted.has(h.messageId)) continue;
-                  const list = matchesById.get(h.messageId) || [];
-                  list.push(h);
-                  matchesById.set(h.messageId, list);
+                const lookups = new Map();
+                for (const msgId of messageIds) {
+                  if (typeof msgId === "string" && msgId && !lookups.has(msgId)) {
+                    lookups.set(msgId, lookupUniqueMessage(folder, db, msgId));
+                  }
                 }
-                const ambiguous = [...matchesById].filter(([, list]) => list.length > 1).map(([id]) => id);
+                const ambiguous = [...lookups].filter(([, lookup]) => lookup.ambiguous).map(([id]) => id);
                 if (ambiguous.length) {
                   return { error: `Message-ID is ambiguous: several messages in this folder share it; refusing to choose one: ${ambiguous.join(", ")}` };
                 }
                 for (const msgId of messageIds) {
-                  const hdr = typeof msgId === "string" && msgId ? matchesById.get(msgId)?.[0] : null;
+                  const hdr = typeof msgId === "string" && msgId ? lookups.get(msgId)?.hdr : null;
                   if (hdr) {
                     foundHdrs.push(hdr);
                   } else {
