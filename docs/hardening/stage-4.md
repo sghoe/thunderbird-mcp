@@ -300,3 +300,20 @@ Forward rule after the moved range.
   (`--test-concurrency=1`): parallel Thunderbird instances made the
   timing-based chain tests flaky under load (observed twice; isolated and
   repeated runs passed).
+
+## Review round 12 – fixes
+
+* Periodic rules (Opus): `PeriodicFilterManager` runs all enabled Periodic
+  rules over the Inbox every few minutes, so any changed state reaches
+  them regardless of position. List changes (also appends) and
+  `updateMessage` state changes (read, flag, tags) or moves/copies into an
+  account require that the client may run every enabled Periodic rule of
+  that account (and of the account a POP server delivers into). Clients
+  with full rights are exempt.
+* Address collection without read access (Sol): the check no longer looks
+  up contacts when the client may not read address books; it refuses
+  whenever collection could change anything (collection on, a recipient
+  name, an unknown reply recipient), so responses do not reveal contact
+  membership.
+* Repository: test leftovers committed by mistake in 348e807 removed;
+  `tb-mcp-*/` ignored.

@@ -665,9 +665,14 @@ describe("send chains and address collection (native)", { skip: !h.thunderbirdBi
       assert.match(forward.result?.error || "", /add or change contacts/, JSON.stringify(forward));
       const reply = await rule("account1", "Reply", 16, "never 42", [{ type: "reply", value: `${ALICE}/Templates?messageId=tpl@chain.test&subject=Thanks` }], { client: "no-contacts" });
       assert.match(reply.result?.error || "", /add or change contacts/, JSON.stringify(reply));
-      // A plain target address without a name changes nothing.
+      // A plain target address without a name changes nothing – and the
+      // answer does not depend on whether a contact exists (no probing).
       const plain = await rule("account1", "Plain forward", 16, "never 42", [{ type: "forward", value: "known@sink.test" }], { client: "no-contacts" });
       assert.equal(plain.result?.success, true, JSON.stringify(plain));
+      const unknown = await rule("account1", "Unknown forward", 16, "never 42", [{ type: "forward", value: "nobody-known@sink.test" }], { client: "no-contacts" });
+      assert.equal(unknown.result?.success, true, JSON.stringify(unknown));
+      const namedUnknown = await rule("account1", "Named unknown", 16, "never 42", [{ type: "forward", value: "Some One <nobody-known@sink.test>" }], { client: "no-contacts" });
+      assert.match(namedUnknown.result?.error || "", /add or change contacts/, JSON.stringify(namedUnknown));
     } finally {
       await clearFilters("account1");
     }

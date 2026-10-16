@@ -2379,6 +2379,18 @@ describe("stored filter actions need the calling client's capabilities", () => {
       assert.deepEqual(h.filterList.filters.map((f) => f.filterName), ["Raise confidential", "Stop if highest", "Forward all"]);
     });
 
+    it("periodic rules see every change, even appended rules after them", () => {
+      const h = makeFilterHarness({ allowSend: true, granted: [...readOnlyRun, "mail.flag"] });
+      h.seed({ name: "Periodic forward", filterType: h.ci.nsMsgFilterType.Periodic, actions: [{ type: "forward", value: "target@example.invalid" }] });
+      const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
+      const appended = h.api.createFilter("account", "Raise priority", true, undefined, conditions, [{ type: "changePriority", value: 6 }]);
+      assert.match(appended.error, /periodic filter "Periodic forward"/);
+      // Without a periodic rule, appending is fine.
+      const plain = makeFilterHarness({ allowSend: true, granted: [...readOnlyRun, "mail.flag"] });
+      plain.seed({ name: "Incoming forward", actions: [{ type: "forward", value: "target@example.invalid" }] });
+      assert.equal(plain.api.createFilter("account", "Raise priority", true, undefined, conditions, [{ type: "changePriority", value: 6 }]).success, true);
+    });
+
     it("allows changes when every affected rule is runnable by the client", () => {
       const h = makeFilterHarness({ allowSend: true, granted: [...readOnlyRun, "mail.flag"] });
       h.seed({ name: "Flag A", actions: [{ type: "markRead" }] });

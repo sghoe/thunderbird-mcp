@@ -10,6 +10,7 @@ function makeHarness({ crossAccount = false, denied = [], copyError = false } = 
   const mutations = [];
   const copies = [];
   const folderMoves = [];
+  const periodicBlocked = [];
   const server = { type: "imap" };
   const otherServer = { type: "imap" };
   const headers = [{ messageId: "one" }, { messageId: "two" }];
@@ -42,12 +43,32 @@ function makeHarness({ crossAccount = false, denied = [], copyError = false } = 
       copies.push(args);
     },
     copyFolder(...args) { folderMoves.push(args); },
+    periodicRulesRestriction: (srv) => (periodicBlocked.includes(srv) ? { error: "periodic filter refused" } : null),
   });
   async function update(args) {
     return runtime.callTool("updateMessage", { messageId: "one", folderPath: folder.URI, ...args });
   }
-  return { runtime, update, mutations, copies, folderMoves, root, folder, target, trash, outbox, nestedOutbox, headers };
+  return { runtime, update, mutations, copies, folderMoves, periodicBlocked, root, folder, target, trash, outbox, nestedOutbox, headers };
 }
+
+describe("periodic filters see changed state and moved messages", () => {
+  it("refuses state changes in an account whose periodic filters the client may not run", async () => {
+    const h = makeHarness();
+    h.periodicBlocked.push(h.folder.server);
+    for (const change of [{ read: true }, { flagged: true }, { addTags: ["$label1"] }, { removeTags: ["$label1"] }]) {
+      const result = await h.update(change);
+      assert.equal(result.error, "periodic filter refused", JSON.stringify(change));
+    }
+    assert.equal(h.mutations.length, 0);
+  });
+
+  it("refuses moving or copying into such an account", async () => {
+    const h = makeHarness();
+    h.periodicBlocked.push(h.target.server);
+    assert.equal((await h.update({ copyTo: h.target.URI })).error, "periodic filter refused");
+    assert.equal(h.copies.length, 0);
+  });
+});
 
 describe("production updateMessage tag keys", () => {
   it("passes Thunderbird escape keys and the other permitted ASCII symbols unchanged", async () => {

@@ -31,3 +31,5 @@ scripts/default-profile
 node_modules/
 package-lock.json
 npm-debug.log*
+# Leftovers of interrupted bridge/auth test runs
+tb-mcp-*/

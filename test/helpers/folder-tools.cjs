@@ -17,11 +17,13 @@ function snippet(startMarker, endMarker) {
 
 // Load real folder access, handlers, dispatch and sanitization; mock only the
 // account preference and native Thunderbird services they call.
-function loadFolderTools({ accounts, folders, isAccountAllowed = () => true, copyMessages = () => {}, copyFolder = () => {} }) {
+function loadFolderTools({ accounts, folders, isAccountAllowed = () => true, copyMessages = () => {}, copyFolder = () => {}, periodicRulesRestriction = () => null }) {
   const runtime = vm.createContext({
     console,
     Ci: { nsMsgFolderFlags: { Trash: 0x100 } },
     isAccountAllowed,
+    // Periodic filters of the affected account (Stage 4).
+    periodicRulesRestriction,
     buildTools: () => [{ name: "listFolders", group: "system" }, { name: "updateMessage", group: "messages" }],
     MailServices: {
       accounts: {

@@ -3913,6 +3913,15 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               try {
                 const createCards = Services.prefs.getBoolPref("mail.collect_email_address_outgoing", false) &&
                   !!Services.prefs.getStringPref("mail.collect_addressbook", "");
+                // Without read access the decision must not depend on which
+                // contacts exist (no membership probing): refuse whenever
+                // collection could change anything.
+                if (!clientHasCapability("contacts.read") || isAddressBookAccessRestricted()) {
+                  const relevant = recipients.filter(r => r.email !== "");
+                  if (createCards && relevant.length) return refusal;
+                  if (relevant.some(r => r.email === null || r.name !== "")) return refusal;
+                  return null;
+                }
                 for (const { email, name } of recipients) {
                   // Unknown recipients (Reply rules) may match an unnamed contact.
                   if (email === null) return refusal;
@@ -11024,6 +11033,13 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   return { error: "No matching messages found" };
                 }
 
+                // Periodic filters run over the Inbox again and see changed
+                // state and messages moved or copied in.
+                const stateChanges = read !== undefined || flagged !== undefined || addTags || removeTags;
+                const periodicCheck = (stateChanges && periodicRulesRestriction(folder.server)) ||
+                  (targetFolder && (moveTo || copyTo) && periodicRulesRestriction(targetFolder.server));
+                if (periodicCheck) return periodicCheck;
+
                 const actions = [];
 
                 if (read !== undefined) {
@@ -11648,12 +11664,47 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               return getFilterConditionRestriction(filter, { addressBooksRestricted: filterAddressBooksRestricted() });
             }
 
+            // Periodic rules run over the whole Inbox again every few minutes
+            // (PeriodicFilterManager), so state another rule or the client
+            // changes reaches them regardless of their position. Every enabled
+            // Periodic rule of the server (and of the account a POP server
+            // delivers into) must be runnable by this client.
+            function periodicRulesRestriction(server) {
+              if (clientIsUnrestricted()) return null;
+              try {
+                const periodic = resolveXpcomConstant("nsMsgFilterType", "Periodic");
+                if (periodic === undefined) return null;
+                const servers = [server];
+                try {
+                  const target = server?.type === "pop3" ? server.rootMsgFolder.server : null;
+                  if (target && target !== server) servers.push(target);
+                } catch { /* checked below via the server itself */ }
+                for (const candidate of servers) {
+                  if (!candidate || candidate.canHaveFilters === false) continue;
+                  const list = candidate.getFilterList(null);
+                  for (let i = 0; i < list.filterCount; i++) {
+                    const rule = list.getFilterAt(i);
+                    if (!rule.enabled || !(rule.filterType & periodic)) continue;
+                    const reason = storedRuleRestriction(rule, candidate);
+                    if (reason) {
+                      return { error: `Not permitted for this client: the periodic filter "${rule.filterName}" runs over the Inbox again and would act on the changed messages, and this client may not run it (${reason})` };
+                    }
+                  }
+                }
+                return null;
+              } catch {
+                return { error: "Not permitted for this client: the periodic filters could not be checked" };
+              }
+            }
+
             // Every enabled rule in [start, end] (and the incoming rules of a
-            // deferred-to account) must be runnable by this client.
+            // deferred-to account, and periodic rules) must be runnable.
             function reachableRulesRestriction(filterList, server, start, end = filterList.filterCount - 1) {
               if (clientIsUnrestricted()) return null;
               const deferred = deferredListRestriction(server);
               if (deferred) return deferred;
+              const periodic = periodicRulesRestriction(server);
+              if (periodic) return periodic;
               for (let i = Math.max(0, start); i <= end && i < filterList.filterCount; i++) {
                 const rule = filterList.getFilterAt(i);
                 const reason = storedRuleRestriction(rule, server);
@@ -11768,7 +11819,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   const reach = reachableRulesRestriction(filterList, server, idx);
                   if (reach) return reach;
                 } else if (!clientIsUnrestricted()) {
-                  const deferred = deferredListRestriction(server);
+                  const deferred = deferredListRestriction(server) || periodicRulesRestriction(server);
                   if (deferred) return deferred;
                 }
                 filterList.insertFilterAt(idx, filter);
