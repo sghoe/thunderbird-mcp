@@ -24,20 +24,21 @@ function thunderbirdBinary() {
   return bin && fs.existsSync(bin) ? bin : null;
 }
 
-function addonId() {
-  const manifest = JSON.parse(fs.readFileSync(path.join(EXTENSION_DIR, "manifest.json"), "utf8"));
+function addonId(extensionDir = EXTENSION_DIR) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(extensionDir, "manifest.json"), "utf8"));
   return manifest.browser_specific_settings.gecko.id;
 }
 
-function prefNamespace() {
+function prefNamespace(extensionDir = EXTENSION_DIR) {
   // Read from source so the harness follows a namespace change.
-  const source = fs.readFileSync(path.join(EXTENSION_DIR, "mcp_server", "api.js"), "utf8");
+  const source = fs.readFileSync(path.join(extensionDir, "mcp_server", "api.js"), "utf8");
   return source.match(/const PREF_ALLOWED_ACCOUNTS = "(.+)allowedAccounts"/)[1];
 }
 
-function runtimeSubdir() {
-  const source = fs.readFileSync(path.join(REPO_ROOT, "mcp-bridge.cjs"), "utf8");
-  return source.match(/const THUNDERBIRD_MCP_SUBDIR = '([^']+)'/)[1];
+function runtimeSubdir(extensionDir = EXTENSION_DIR) {
+  const source = fs.readFileSync(path.join(extensionDir, "mcp_server", "api.js"), "utf8");
+  const writer = source.slice(source.indexOf("function writeConnectionInfo("));
+  return writer.match(/tmpDir\.append\("([^"]+)"\)/)[1];
 }
 
 // ── Local SMTP sink ──────────────────────────────────────────────────────
@@ -48,6 +49,7 @@ function startSmtpSink() {
   const server = net.createServer((socket) => {
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket));
+    socket.on("error", () => sockets.delete(socket));
     socket.setEncoding("latin1");
     let buffer = "";
     let inData = false;
@@ -135,7 +137,7 @@ function buildProfile({ root, smtpPort, mailboxes = {}, extraPrefs = {}, extensi
   fs.mkdirSync(path.join(profileDir, "extensions"), { recursive: true });
 
   // Unpacked extension via a proxy file pointing at the working tree.
-  fs.writeFileSync(path.join(profileDir, "extensions", addonId()), extensionDir);
+  fs.writeFileSync(path.join(profileDir, "extensions", addonId(extensionDir)), extensionDir);
   for (const { id, xpi } of extraAddons) {
     fs.copyFileSync(xpi, path.join(profileDir, "extensions", `${id}.xpi`));
   }
@@ -156,7 +158,7 @@ function buildProfile({ root, smtpPort, mailboxes = {}, extraPrefs = {}, extensi
     }
   }
 
-  const ns = prefNamespace();
+  const ns = prefNamespace(extensionDir);
   const prefs = {
     // Unattended, offline-safe startup.
     "extensions.autoDisableScopes": 0,
@@ -273,8 +275,8 @@ async function waitFor(fn, { timeoutMs = 60000, intervalMs = 250, label = "condi
   throw new Error(`Timed out waiting for ${label}${lastError ? `: ${lastError.message}` : ""}`);
 }
 
-function readConnection(tmpDir) {
-  const file = path.join(tmpDir, runtimeSubdir(), "connection.json");
+function readConnection(tmpDir, extensionDir = EXTENSION_DIR) {
+  const file = path.join(tmpDir, runtimeSubdir(extensionDir), "connection.json");
   if (!fs.existsSync(file)) return null;
   const data = JSON.parse(fs.readFileSync(file, "utf8"));
   return data && data.port ? { ...data, file } : null;
@@ -322,7 +324,7 @@ const REPARSE_SCRIPT = `
  * Starts a fully isolated Thunderbird. Returns an object with
  * call(tool, args), rpc(method, params), stop(), and the probe/sink.
  */
-async function startThunderbird({ mailboxes, extraPrefs, headless = true, authHeader, extensionDir, extraAddons } = {}) {
+async function startThunderbird({ mailboxes, extraPrefs, headless = true, authHeader, extensionDir = EXTENSION_DIR, extraAddons } = {}) {
   const bin = thunderbirdBinary();
   if (!bin) throw new Error("THUNDERBIRD_BIN is not set");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "tbmcp-native-"));
@@ -355,7 +357,7 @@ async function startThunderbird({ mailboxes, extraPrefs, headless = true, authHe
   try {
     connection = await waitFor(() => {
       if (exited) throw new Error(`Thunderbird exited early:\n${log.join("").slice(-4000)}`);
-      return readConnection(tmpDir);
+      return readConnection(tmpDir, extensionDir);
     }, { timeoutMs: 90000, label: "connection.json" });
   } catch (e) {
     try { child.kill(); } catch {}

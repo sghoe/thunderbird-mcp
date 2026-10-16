@@ -30,6 +30,8 @@
   },
   "scripts": {
     "test": "node --test test/*.cjs",
+    "test:native:parity": "node test/native/run-parity.cjs",
+    "test:native": "node --test test/native/*.native.cjs",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix"
   },

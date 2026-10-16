@@ -61,20 +61,22 @@ fi
 echo "{\"version\":\"$VERSION\",\"builtAt\":\"$BUILT_AT\"}" > "$EXTENSION_DIR/buildinfo.json"
 echo "Build version: $VERSION"
 
-# Update manifest.json version from package.json
+# Update manifest.json version from package.json. Fork versions are
+# X.Y.Z-hardened.N in package.json; Gecko needs the numeric X.Y.Z.N.
+MANIFEST_VERSION=$(echo "$PACKAGE_VERSION" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)-hardened\.([0-9]+)$/\1.\2/')
 if command -v node > /dev/null 2>&1; then
   node -e "
     const fs = require('fs');
     const p = '$EXTENSION_DIR/manifest.json';
     const m = JSON.parse(fs.readFileSync(p, 'utf8'));
-    m.version = '$PACKAGE_VERSION';
+    m.version = '$MANIFEST_VERSION';
     fs.writeFileSync(p, JSON.stringify(m, null, 2) + '\n');
   "
 else
-  sed -i.bak "s/\"version\": *\"[^\"]*\"/\"version\": \"$PACKAGE_VERSION\"/" "$EXTENSION_DIR/manifest.json"
+  sed -i.bak "s/\"version\": *\"[^\"]*\"/\"version\": \"$MANIFEST_VERSION\"/" "$EXTENSION_DIR/manifest.json"
   rm -f "$EXTENSION_DIR/manifest.json.bak"
 fi
-echo "Manifest version: $PACKAGE_VERSION"
+echo "Manifest version: $MANIFEST_VERSION"
 
 # Package extension
 cd "$EXTENSION_DIR"

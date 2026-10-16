@@ -326,7 +326,7 @@ curl -X POST http://127.0.0.1:$PORT \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
-**Dev-only extension reload:** After changing extension source locally, remove the add-on from Thunderbird, restart, reinstall the XPI, and restart again. Thunderbird caches aggressively. Regular users should install the latest release once and let auto-update handle later releases.
+**Dev-only extension reload:** After changing extension source locally, remove the add-on from Thunderbird, restart, reinstall the XPI, and restart again. Thunderbird caches aggressively. The fork has no auto-update; install each new build by hand.
 
 ---
 

@@ -136,7 +136,7 @@ function loadServerLifecycle(overrides = {}) {
     },
     getStableAuthTokenPref: () => "a".repeat(64),
     isListenAllEnabled: () => false,
-    isLoopbackPortInUse: async (port) => (state.busyPorts || []).includes(port),
+    isLoopbackPortInUse: async (port) => (state.probe ? state.probe(port) : (state.busyPorts || []).includes(port)),
     PREF_LISTEN_ALL: "extensions.thunderbird-mcp-hardened.listenAll",
     readConnectionInfo: () => ({ path: connectionPath, data: state.connection }),
     removeConnectionInfo() {
@@ -385,6 +385,26 @@ describe("server startup lifecycle", () => {
     assert.equal(result.port, 8767);
     assert.deepEqual(state.servers[0].binds, [8767]);
     assert.equal(state.connection.port, 8767);
+  });
+
+  it("does not bind or publish after a shutdown that happened during the port probe", async () => {
+    let releaseProbe;
+    const { api, sandbox, state } = loadServerLifecycle({
+      probe: () => new Promise((resolve) => { releaseProbe = resolve; }),
+    });
+    const start = api.start();
+    await flushStartup();
+    // What onShutdown does: invalidate pending startups and clear state.
+    sandbox.__tbMcpHardenedShutdownGeneration = (sandbox.__tbMcpHardenedShutdownGeneration || 0) + 1;
+    sandbox.__tbMcpHardenedStartPromise = null;
+    releaseProbe(false);
+    const result = await start;
+    assert.equal(result.success, false);
+    assert.match(result.error, /shut down during startup/);
+    assert.deepEqual(state.servers[0].binds, []);
+    assert.equal(state.connection, null);
+    assert.equal(state.timers.length, 0);
+    assert.equal(sandbox.__tbMcpHardenedServer ?? null, null);
   });
 
   it("fails when every port in the range already has a listener", async () => {

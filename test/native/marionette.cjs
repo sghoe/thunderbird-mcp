@@ -28,6 +28,10 @@ class Marionette {
         socket.once("connect", () => {
           this.socket = socket;
           socket.on("data", (d) => this._onData(d));
+          socket.on("error", (e) => {
+            for (const p of this.pending.values()) p.reject(e);
+            this.pending.clear();
+          });
           this.greeting = new Promise((r) => { this._greet = r; });
           this.greeting.then(() => resolve()).catch(reject);
         });

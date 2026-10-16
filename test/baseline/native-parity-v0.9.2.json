@@ -1,0 +1,961 @@
+{
+  "results": [
+    {
+      "label": "listAccounts",
+      "tool": "listAccounts",
+      "ok": true,
+      "shape": [
+        {
+          "id": "string",
+          "identities": [
+            "object"
+          ],
+          "name": "string",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "label": "getAccountAccess",
+      "tool": "getAccountAccess",
+      "ok": true,
+      "shape": {
+        "accounts": [
+          {
+            "id": "string",
+            "name": "string",
+            "type": "string"
+          }
+        ],
+        "mode": "string"
+      }
+    },
+    {
+      "label": "listFolders all",
+      "tool": "listFolders",
+      "ok": true,
+      "shape": [
+        {
+          "accountId": "string",
+          "depth": "number",
+          "isFavorite": "boolean",
+          "name": "string",
+          "path": "string",
+          "totalMessages": "number",
+          "type": "string",
+          "unreadMessages": "number"
+        }
+      ]
+    },
+    {
+      "label": "listFolders table",
+      "tool": "listFolders",
+      "ok": true,
+      "shape": {
+        "columns": [
+          "string"
+        ],
+        "rows": [
+          [
+            "string"
+          ]
+        ]
+      }
+    },
+    {
+      "label": "searchMessages query",
+      "tool": "searchMessages",
+      "ok": true,
+      "shape": [
+        {
+          "author": "string",
+          "ccList": "string",
+          "date": "string",
+          "flagged": "boolean",
+          "folderPath": "string",
+          "id": "string",
+          "read": "boolean",
+          "recipients": "string",
+          "subject": "string",
+          "tags": [],
+          "threadId": "number"
+        }
+      ]
+    },
+    {
+      "label": "searchMessages from:",
+      "tool": "searchMessages",
+      "ok": true,
+      "shape": [
+        {
+          "author": "string",
+          "ccList": "string",
+          "date": "string",
+          "flagged": "boolean",
+          "folderPath": "string",
+          "id": "string",
+          "read": "boolean",
+          "recipients": "string",
+          "subject": "string",
+          "tags": [],
+          "threadId": "number"
+        }
+      ]
+    },
+    {
+      "label": "searchMessages paginated",
+      "tool": "searchMessages",
+      "ok": true,
+      "shape": {
+        "hasMore": "boolean",
+        "limit": "number",
+        "messages": [
+          {
+            "author": "string",
+            "ccList": "string",
+            "date": "string",
+            "flagged": "boolean",
+            "folderPath": "string",
+            "id": "string",
+            "read": "boolean",
+            "recipients": "string",
+            "subject": "string",
+            "tags": [],
+            "threadId": "number"
+          }
+        ],
+        "offset": "number",
+        "totalMatches": "number"
+      }
+    },
+    {
+      "label": "searchMessages countOnly",
+      "tool": "searchMessages",
+      "ok": true,
+      "shape": {
+        "count": "number"
+      }
+    },
+    {
+      "label": "getRecentMessages",
+      "tool": "getRecentMessages",
+      "ok": true,
+      "shape": [
+        {
+          "author": "string",
+          "ccList": "string",
+          "date": "string",
+          "flagged": "boolean",
+          "folderPath": "string",
+          "id": "string",
+          "read": "boolean",
+          "recipients": "string",
+          "subject": "string",
+          "tags": [],
+          "threadId": "number"
+        }
+      ]
+    },
+    {
+      "label": "getMessage markdown",
+      "tool": "getMessage",
+      "ok": true,
+      "shape": {
+        "attachments": [],
+        "author": "string",
+        "body": "string",
+        "bodyIsHtml": "boolean",
+        "ccList": "string",
+        "date": "string",
+        "id": "string",
+        "recipients": "string",
+        "subject": "string",
+        "tags": []
+      }
+    },
+    {
+      "label": "getMessage text",
+      "tool": "getMessage",
+      "ok": true,
+      "shape": {
+        "attachments": [],
+        "author": "string",
+        "body": "string",
+        "bodyIsHtml": "boolean",
+        "ccList": "string",
+        "date": "string",
+        "id": "string",
+        "recipients": "string",
+        "subject": "string",
+        "tags": []
+      }
+    },
+    {
+      "label": "getMessage html",
+      "tool": "getMessage",
+      "ok": true,
+      "shape": {
+        "attachments": [],
+        "author": "string",
+        "body": "string",
+        "bodyIsHtml": "boolean",
+        "ccList": "string",
+        "date": "string",
+        "id": "string",
+        "recipients": "string",
+        "subject": "string",
+        "tags": []
+      }
+    },
+    {
+      "label": "getMessage rawSource",
+      "tool": "getMessage",
+      "ok": true,
+      "shape": {
+        "id": "string",
+        "rawSource": "string",
+        "subject": "string"
+      }
+    },
+    {
+      "label": "getMessage saveAttachments",
+      "tool": "getMessage",
+      "ok": true,
+      "shape": {
+        "attachments": [
+          {
+            "contentType": "string",
+            "filePath": "string",
+            "isInline": "boolean",
+            "name": "string",
+            "size": "number"
+          }
+        ],
+        "author": "string",
+        "body": "string",
+        "bodyIsHtml": "boolean",
+        "ccList": "string",
+        "date": "string",
+        "id": "string",
+        "recipients": "string",
+        "subject": "string",
+        "tags": []
+      }
+    },
+    {
+      "label": "getMessage includeInlineImages",
+      "tool": "getMessage",
+      "ok": true,
+      "shape": {
+        "attachments": [
+          {
+            "contentId": "string",
+            "contentType": "string",
+            "isInline": "boolean",
+            "mcpImage": "object",
+            "name": "string",
+            "partName": "string",
+            "size": "null"
+          }
+        ],
+        "author": "string",
+        "body": "string",
+        "bodyIsHtml": "boolean",
+        "ccList": "string",
+        "date": "string",
+        "id": "string",
+        "inlineImageContent": {
+          "included": "number",
+          "limits": {
+            "perImageBase64Bytes": "number",
+            "totalBase64Bytes": "number"
+          },
+          "skipped": "number",
+          "totalBase64Bytes": "number"
+        },
+        "recipients": "string",
+        "subject": "string",
+        "tags": []
+      }
+    },
+    {
+      "label": "getMessages batch",
+      "tool": "getMessages",
+      "ok": true,
+      "shape": {
+        "failed": "number",
+        "max": "number",
+        "messages": [
+          {
+            "attachments": [],
+            "author": "string",
+            "body": "string",
+            "bodyIsHtml": "boolean",
+            "ccList": "string",
+            "date": "string",
+            "folderPath": "string",
+            "id": "string",
+            "index": "number",
+            "messageId": "string",
+            "recipients": "string",
+            "subject": "string",
+            "tags": []
+          }
+        ],
+        "requested": "number",
+        "succeeded": "number"
+      }
+    },
+    {
+      "label": "displayMessage 3pane",
+      "tool": "displayMessage",
+      "ok": true,
+      "shape": {
+        "displayMode": "string",
+        "subject": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "displayMessage tab",
+      "tool": "displayMessage",
+      "ok": true,
+      "shape": {
+        "displayMode": "string",
+        "subject": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "updateMessage read/flag/tag",
+      "tool": "updateMessage",
+      "ok": true,
+      "shape": {
+        "actions": [
+          {
+            "type": "string",
+            "value": "boolean"
+          }
+        ],
+        "success": "boolean",
+        "updated": "number"
+      }
+    },
+    {
+      "label": "createFolder",
+      "tool": "createFolder",
+      "ok": true,
+      "shape": {
+        "message": "string",
+        "path": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "createFolder target",
+      "tool": "createFolder",
+      "ok": true,
+      "shape": {
+        "message": "string",
+        "path": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "renameFolder",
+      "tool": "renameFolder",
+      "ok": true,
+      "shape": {
+        "message": "string",
+        "oldPath": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "moveFolder",
+      "tool": "moveFolder",
+      "ok": true,
+      "shape": {
+        "message": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "updateMessage copyTo",
+      "tool": "updateMessage",
+      "ok": true,
+      "shape": {
+        "actions": [
+          {
+            "to": "string",
+            "type": "string"
+          }
+        ],
+        "success": "boolean",
+        "updated": "number"
+      }
+    },
+    {
+      "label": "updateMessage moveTo",
+      "tool": "updateMessage",
+      "ok": true,
+      "shape": {
+        "actions": [
+          {
+            "to": "string",
+            "type": "string"
+          }
+        ],
+        "success": "boolean",
+        "updated": "number"
+      }
+    },
+    {
+      "label": "deleteMessages",
+      "tool": "deleteMessages",
+      "ok": true,
+      "shape": {
+        "deleted": "number",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "deleteFolder",
+      "tool": "deleteFolder",
+      "ok": true,
+      "shape": {
+        "message": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "emptyTrash",
+      "tool": "emptyTrash",
+      "ok": true,
+      "shape": {
+        "results": [
+          {
+            "account": "string",
+            "folder": "string",
+            "status": "string"
+          }
+        ],
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "emptyJunk",
+      "tool": "emptyJunk",
+      "ok": true,
+      "shape": {
+        "results": [
+          {
+            "account": "string",
+            "deleted": "number",
+            "folder": "string"
+          }
+        ],
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "sendMail review",
+      "tool": "sendMail",
+      "ok": true,
+      "shape": {
+        "message": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "sendMail direct",
+      "tool": "sendMail",
+      "ok": true,
+      "shape": {
+        "message": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "sendMail direct with exported file",
+      "tool": "sendMail",
+      "ok": true,
+      "shape": {
+        "message": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "saveDraft new",
+      "tool": "saveDraft",
+      "ok": true,
+      "shape": {
+        "folderPath": "string",
+        "message": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "saveDraft replace",
+      "tool": "saveDraft",
+      "ok": true,
+      "shape": {
+        "folderPath": "string",
+        "message": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "replyToMessage review",
+      "tool": "replyToMessage",
+      "ok": true,
+      "shape": {
+        "message": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "replyToMessage direct",
+      "tool": "replyToMessage",
+      "ok": true,
+      "shape": {
+        "message": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "replyToMessage saveAsDraft",
+      "tool": "replyToMessage",
+      "ok": true,
+      "shape": {
+        "message": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "forwardMessage review",
+      "tool": "forwardMessage",
+      "ok": true,
+      "shape": {
+        "message": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "forwardMessage direct",
+      "tool": "forwardMessage",
+      "ok": true,
+      "shape": {
+        "message": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "listFilters",
+      "tool": "listFilters",
+      "ok": true,
+      "shape": [
+        {
+          "accountId": "string",
+          "accountName": "string",
+          "filterCount": "number",
+          "filters": [],
+          "loggingEnabled": "boolean"
+        }
+      ]
+    },
+    {
+      "label": "createFilter",
+      "tool": "createFilter",
+      "ok": true,
+      "shape": {
+        "filterCount": "number",
+        "index": "number",
+        "name": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "createFilter second",
+      "tool": "createFilter",
+      "ok": true,
+      "shape": {
+        "filterCount": "number",
+        "index": "number",
+        "name": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "updateFilter",
+      "tool": "updateFilter",
+      "ok": true,
+      "shape": {
+        "changes": [
+          "string"
+        ],
+        "filter": {
+          "actions": [
+            "object"
+          ],
+          "enabled": "boolean",
+          "index": "number",
+          "name": "string",
+          "temporary": "boolean",
+          "terms": [
+            "object"
+          ],
+          "type": "number"
+        },
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "reorderFilters",
+      "tool": "reorderFilters",
+      "ok": true,
+      "shape": {
+        "fromIndex": "number",
+        "name": "string",
+        "success": "boolean",
+        "toIndex": "number"
+      }
+    },
+    {
+      "label": "applyFilters",
+      "tool": "applyFilters",
+      "ok": true,
+      "shape": {
+        "folder": "string",
+        "message": "string",
+        "skipped": [
+          {
+            "name": "string",
+            "reason": "string"
+          }
+        ],
+        "submitted": [
+          "string"
+        ],
+        "submittedFilters": "number",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "deleteFilter",
+      "tool": "deleteFilter",
+      "ok": true,
+      "shape": {
+        "deleted": "string",
+        "remainingCount": "number",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "createContact",
+      "tool": "createContact",
+      "ok": true,
+      "shape": {
+        "addressBook": "string",
+        "displayName": "string",
+        "email": "string",
+        "id": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "searchContacts",
+      "tool": "searchContacts",
+      "ok": true,
+      "shape": [
+        {
+          "addressBook": "string",
+          "addressBookId": "string",
+          "addresses": [],
+          "birthday": "string",
+          "displayName": "string",
+          "email": "string",
+          "firstName": "string",
+          "id": "string",
+          "lastName": "string",
+          "note": "string",
+          "organization": "string",
+          "phones": [
+            "object"
+          ],
+          "title": "string"
+        }
+      ]
+    },
+    {
+      "label": "getContact",
+      "tool": "getContact",
+      "ok": true,
+      "shape": {
+        "addressBook": "string",
+        "addressBookId": "string",
+        "addresses": [],
+        "birthday": "string",
+        "displayName": "string",
+        "email": "string",
+        "firstName": "string",
+        "id": "string",
+        "lastName": "string",
+        "note": "string",
+        "organization": "string",
+        "phones": [
+          {
+            "number": "string",
+            "type": "string"
+          }
+        ],
+        "title": "string"
+      }
+    },
+    {
+      "label": "updateContact",
+      "tool": "updateContact",
+      "ok": true,
+      "shape": {
+        "displayName": "string",
+        "email": "string",
+        "firstName": "string",
+        "id": "string",
+        "lastName": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "deleteContact",
+      "tool": "deleteContact",
+      "ok": true,
+      "shape": {
+        "message": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "listCalendars",
+      "tool": "listCalendars",
+      "ok": true,
+      "shape": [
+        {
+          "disabled": "boolean",
+          "id": "string",
+          "name": "string",
+          "readOnly": "boolean",
+          "supportsEvents": "boolean",
+          "supportsTasks": "boolean",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "label": "listCategories",
+      "tool": "listCategories",
+      "ok": true,
+      "shape": [
+        "string"
+      ]
+    },
+    {
+      "label": "createEvent direct",
+      "tool": "createEvent",
+      "ok": true,
+      "shape": {
+        "message": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "createEvent review",
+      "tool": "createEvent",
+      "ok": true,
+      "shape": {
+        "message": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "listEvents",
+      "tool": "listEvents",
+      "ok": true,
+      "shape": [
+        {
+          "allDay": "boolean",
+          "attendeeCount": "number",
+          "attendees": [],
+          "calendarId": "string",
+          "calendarName": "string",
+          "categories": [],
+          "description": "string",
+          "endDate": "string",
+          "id": "string",
+          "isRecurring": "boolean",
+          "location": "string",
+          "myParticipationStatus": "string",
+          "onlineMeetingURL": "null",
+          "organizer": "null",
+          "recurrence": "string",
+          "recurrenceId": "string",
+          "startDate": "string",
+          "status": "string",
+          "title": "string"
+        }
+      ]
+    },
+    {
+      "label": "updateEvent series",
+      "tool": "updateEvent",
+      "ok": true,
+      "shape": {
+        "success": "boolean",
+        "updated": [
+          "string"
+        ],
+        "warning": "string"
+      }
+    },
+    {
+      "label": "updateEvent occurrence",
+      "tool": "updateEvent",
+      "ok": true,
+      "shape": {
+        "mode": "string",
+        "recurrenceId": "string",
+        "success": "boolean",
+        "updated": [
+          "string"
+        ]
+      }
+    },
+    {
+      "label": "deleteEvent occurrence",
+      "tool": "deleteEvent",
+      "ok": true,
+      "shape": {
+        "deleted": "string",
+        "mode": "string",
+        "recurrenceId": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "deleteEvent series",
+      "tool": "deleteEvent",
+      "ok": true,
+      "shape": {
+        "deleted": "string",
+        "success": "boolean",
+        "warning": "string"
+      }
+    },
+    {
+      "label": "createTask direct",
+      "tool": "createTask",
+      "ok": true,
+      "shape": {
+        "message": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "createTask review",
+      "tool": "createTask",
+      "ok": true,
+      "shape": {
+        "message": "string",
+        "success": "boolean"
+      }
+    },
+    {
+      "label": "listTasks",
+      "tool": "listTasks",
+      "ok": true,
+      "shape": [
+        {
+          "calendarId": "string",
+          "calendarName": "string",
+          "completed": "boolean",
+          "completedDate": "null",
+          "description": "string",
+          "dueDate": "string",
+          "id": "string",
+          "percentComplete": "number",
+          "priority": "number",
+          "startDate": "null",
+          "title": "string"
+        }
+      ]
+    },
+    {
+      "label": "updateTask",
+      "tool": "updateTask",
+      "ok": true,
+      "shape": {
+        "success": "boolean",
+        "task": {
+          "calendarId": "string",
+          "calendarName": "string",
+          "completed": "boolean",
+          "completedDate": "null",
+          "description": "string",
+          "dueDate": "string",
+          "id": "string",
+          "percentComplete": "number",
+          "priority": "number",
+          "startDate": "null",
+          "title": "string"
+        },
+        "updated": [
+          "string"
+        ]
+      }
+    }
+  ],
+  "smtpMessages": 4,
+  "tools": [
+    "applyFilters",
+    "createContact",
+    "createEvent",
+    "createFilter",
+    "createFolder",
+    "createTask",
+    "deleteContact",
+    "deleteEvent",
+    "deleteFilter",
+    "deleteFolder",
+    "deleteMessages",
+    "displayMessage",
+    "emptyJunk",
+    "emptyTrash",
+    "forwardMessage",
+    "getAccountAccess",
+    "getContact",
+    "getMessage",
+    "getMessages",
+    "getRecentMessages",
+    "listAccounts",
+    "listCalendars",
+    "listCategories",
+    "listEvents",
+    "listFilters",
+    "listFolders",
+    "listTasks",
+    "moveFolder",
+    "renameFolder",
+    "reorderFilters",
+    "replyToMessage",
+    "saveDraft",
+    "searchContacts",
+    "searchMessages",
+    "sendMail",
+    "updateContact",
+    "updateEvent",
+    "updateFilter",
+    "updateMessage",
+    "updateTask"
+  ],
+  "target": "upstream 1ab10183a7ce914f3964d6c98fcc6265f3dc01d3",
+  "thunderbird": "Mozilla Thunderbird 153.5.0esr"
+}

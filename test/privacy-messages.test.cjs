@@ -1526,7 +1526,7 @@ describe("Clear-signed mail with the encrypted-message preference off", () => {
       append(name) { this.path += `/${name}`; },
       clone() { return makeFile(this.path); },
       create() {}, createUnique() {}, remove() {},
-      exists: () => true, isDirectory: () => true,
+      exists: () => true, isDirectory: () => true, isSymlink: () => false, permissions: 0o700,
     });
     api.Services.dirsvc = { get: () => makeFile("/tmp") };
     api.Ci.nsIFile = { DIRECTORY_TYPE: 1, NORMAL_FILE_TYPE: 0 };

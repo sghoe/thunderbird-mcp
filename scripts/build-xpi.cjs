@@ -146,7 +146,10 @@ try {
 
 try {
   const manifest = JSON.parse(fs.readFileSync(MANIFEST_FILE, 'utf8'));
-  manifest.version = packageVersion;
+  // Fork versions are "X.Y.Z-hardened.N" in package.json; Gecko extension
+  // versions must be numeric, so the manifest uses "X.Y.Z.N".
+  const fork = /^(\d+\.\d+\.\d+)-hardened\.(\d+)$/.exec(packageVersion);
+  manifest.version = fork ? `${fork[1]}.${fork[2]}` : packageVersion;
   fs.writeFileSync(MANIFEST_FILE, JSON.stringify(manifest, null, 2) + '\n');
 } catch (err) {
   console.error(`Error: could not update manifest.json version: ${err.message}`);

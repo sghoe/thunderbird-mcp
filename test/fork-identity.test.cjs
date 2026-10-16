@@ -77,6 +77,6 @@ describe("fork identity", () => {
     const attempts = Number(api.match(/^const MCP_MAX_PORT_ATTEMPTS = (\d+);$/m)[1]);
     // Upstream uses 8765-8774.
     assert.ok(port > 8774 || port + attempts - 1 < 8765, `${port}-${port + attempts - 1}`);
-    assert.match(api, /if \(await isLoopbackPortInUse\(tryPort\)\)/);
+    assert.match(api, /const portInUse = await isLoopbackPortInUse\(tryPort\);/);
   });
 });

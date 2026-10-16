@@ -319,11 +319,9 @@ find_profile() {
     select_profile "${profiles[@]}"
 }
 
-# Build if needed
-if [[ ! -f "$XPI_FILE" ]]; then
-    echo "Building extension first..."
-    "$SCRIPT_DIR/build.sh"
-fi
+# Always build from the working tree so a stale XPI is never installed.
+echo "Building extension..."
+"$SCRIPT_DIR/build.sh"
 
 PROFILE_DIR=$(find_profile)
 EXTENSIONS_DIR="$PROFILE_DIR/extensions"
@@ -336,6 +334,11 @@ mkdir -p "$EXTENSIONS_DIR"
 # Copy extension under the add-on ID from the manifest (the hardened fork has
 # its own ID and no automatic update channel).
 ADDON_ID=$(node -p "require('$PROJECT_DIR/extension/manifest.json').browser_specific_settings.gecko.id")
+XPI_ID=$(unzip -p "$XPI_FILE" manifest.json | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).browser_specific_settings.gecko.id))")
+if [[ "$XPI_ID" != "$ADDON_ID" ]]; then
+    echo "Error: $XPI_FILE has add-on ID $XPI_ID, expected $ADDON_ID; refusing to install." >&2
+    exit 1
+fi
 echo "Warning: Re-running install.sh overwrites the AddonManager-managed file and can downgrade an installed build."
 cp "$XPI_FILE" "$EXTENSIONS_DIR/$ADDON_ID.xpi"
 

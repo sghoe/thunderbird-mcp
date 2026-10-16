@@ -2161,7 +2161,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
           properties: {
             messageId: { type: "string", description: "The message ID (from searchMessages results)" },
             folderPath: { type: "string", description: "The folder URI path (from searchMessages results)" },
-            saveAttachments: { type: "boolean", description: "If true, save attachments to <OS temp dir>/thunderbird-mcp/<messageId>/ and include filePath in response (default: false)" },
+            saveAttachments: { type: "boolean", description: "If true, save attachments to <OS temp dir>/thunderbird-mcp-hardened-exports/<messageId>/ and include filePath in response (default: false)" },
             includeInlineImages: { type: "boolean", description: "If true, append supported inline email images as MCP image content blocks after the text result (default: false; max 1 MiB base64 per image and 4 MiB total). Images referenced by the rendered body are attempted first in document order, followed by remaining inline images in MIME order. Ignored when rawSource is true." },
             bodyFormat: { type: "string", enum: ["markdown", "text", "html"], description: "Body output format: 'markdown' (default; HTML conversion allows only http/https/mailto links and replaces images with alt text; plain-text bodies only escape image openers, preserving other Markdown/HTML), 'text' (plain text), 'html' (unchanged, untrusted HTML). HTML input over 2 MiB is truncated before markdown/text conversion, with a notice." },
             rawSource: { type: "boolean", description: "If true, return untrusted raw RFC 2822 message source (all headers + MIME parts). Useful for extracting calendar invites, S/MIME data, or debugging. Other fields (body, attachments) are omitted when this is set. Note: requires local/offline message copy; IMAP messages not cached offline may fail." },
@@ -3027,6 +3027,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             return await globalThis.__tbMcpHardenedStartPromise;
           }
           const startPromise = (async () => {
+          const shutdownGeneration = globalThis.__tbMcpHardenedShutdownGeneration || 0;
           let startedServer = null;
           try {
             // Stop any previously running server (e.g. extension reload)
@@ -9131,22 +9132,35 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                     // BEGIN ATTACHMENT EXPORT DIRECTORY
                     function ensureAttachmentDir(sanitizedId) {
+                      // On a shared POSIX /tmp another user could pre-create the
+                      // export root or plant symlinks in it. Apply the same
+                      // fail-closed checks as the runtime directory: no
+                      // symlinks, and 0700 enforced or the export is refused (a
+                      // non-owner cannot chmod a directory someone else owns).
+                      const posix = Services.appinfo?.OS !== "WINNT";
+                      function ensurePrivateDirectory(dir) {
+                        try {
+                          dir.create(Ci.nsIFile.DIRECTORY_TYPE, 0o700);
+                        } catch (e) {
+                          if (!dir.exists() || !dir.isDirectory()) throw e;
+                          // already exists; verified below
+                        }
+                        if (dir.isSymlink()) throw new Error("export directory is a symlink");
+                        if (!posix) return;
+                        const mode = dir.permissions;
+                        if (typeof mode === "number" && (mode & 0o077) !== 0) {
+                          try { dir.permissions = 0o700; } catch { /* checked below */ }
+                          if ((dir.permissions & 0o077) !== 0) {
+                            throw new Error("export directory has group/world permissions");
+                          }
+                        }
+                      }
                       const root = Services.dirsvc.get("TmpD", Ci.nsIFile);
                       root.append("thunderbird-mcp-hardened-exports");
-                      try {
-                        root.create(Ci.nsIFile.DIRECTORY_TYPE, 0o700);
-                      } catch (e) {
-                        if (!root.exists() || !root.isDirectory()) throw e;
-                        // already exists, fine
-                      }
+                      ensurePrivateDirectory(root);
                       const dir = root.clone();
                       dir.append(sanitizedId);
-                      try {
-                        dir.create(Ci.nsIFile.DIRECTORY_TYPE, 0o700);
-                      } catch (e) {
-                        if (!dir.exists() || !dir.isDirectory()) throw e;
-                        // already exists, fine
-                      }
+                      ensurePrivateDirectory(dir);
                       return dir;
                     }
 
@@ -11686,8 +11700,13 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             const listenAll = isListenAllEnabled();
             for (let attempt = 0; attempt < MCP_MAX_PORT_ATTEMPTS; attempt++) {
               const tryPort = MCP_DEFAULT_PORT + attempt;
+              const portInUse = await isLoopbackPortInUse(tryPort);
+              // The add-on may have been shut down while the probe ran.
+              if ((globalThis.__tbMcpHardenedShutdownGeneration || 0) !== shutdownGeneration) {
+                throw new Error("Add-on shut down during startup");
+              }
               try {
-                if (await isLoopbackPortInUse(tryPort)) {
+                if (portInUse) {
                   throw new Error(`port ${tryPort} already accepts connections`);
                 }
                 if (listenAll) {
@@ -12126,6 +12145,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
     }
     // END UNINSTALL LISTENER REMOVAL
     // Stop the HTTP server so the port is released
+    // Invalidate a startup that is still suspended in the port probe; it
+    // re-checks this generation before binding (see SERVER LIFECYCLE).
+    globalThis.__tbMcpHardenedShutdownGeneration = (globalThis.__tbMcpHardenedShutdownGeneration || 0) + 1;
     if (globalThis.__tbMcpHardenedServer) {
       try { globalThis.__tbMcpHardenedServer.stop(() => {}); } catch { /* ignore */ }
       globalThis.__tbMcpHardenedServer = null;
