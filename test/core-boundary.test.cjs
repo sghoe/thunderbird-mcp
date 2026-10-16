@@ -16,8 +16,13 @@ const FORBIDDEN = [
   "globalThis", "window", "self", "global", "process", "require",
   "Components", "Services", "ChromeUtils", "Cc", "Ci", "Cu", "Cr",
   "IOUtils", "PathUtils", "MailServices", "NetUtil", "browser", "messenger",
-  "fetch", "XMLHttpRequest", "WebSocket", "eval", "Function",
+  "fetch", "XMLHttpRequest", "WebSocket", "eval", "Function", "Reflect",
 ];
+
+// (() => {}).constructor("return this")() compiles code without naming
+// eval or Function; constructor access is therefore refused as well.
+const CONSTRUCTOR_ACCESS = /\.\s*constructor(?![\w$])/;
+const CONSTRUCTOR_STRING = /(["'`])constructor\1/;
 
 // Removes comments, string/template literals and regex literals so only
 // code identifiers remain. Template ${...} expressions are kept as code.
@@ -109,6 +114,11 @@ describe("core module boundary", () => {
       }
     });
 
+    it(`${file} reaches no constructors (no dynamic code)`, () => {
+      assert.doesNotMatch(code, CONSTRUCTOR_ACCESS, `${file} accesses .constructor`);
+      assert.doesNotMatch(source, CONSTRUCTOR_STRING, `${file} names "constructor"`);
+    });
+
     it(`${file} is a leaf module (no imports or re-exports)`, () => {
       assert.doesNotMatch(code, /(^|[;\s])import(\s|\(|\{|\*)/m, `${file} imports other code`);
       assert.doesNotMatch(code, /export\s*(\*|\{[^}]*\}\s*from)/, `${file} re-exports other code`);
@@ -125,5 +135,30 @@ describe("core module boundary", () => {
     assert.match(code, /(^|[^.\w$])Services(?![\w$])/);
     assert.match(code, /(^|[^.\w$])Cc(?![\w$])/);
     assert.doesNotMatch(codeOnly('const s = "ChromeUtils" /* ChromeUtils */;'), /ChromeUtils/);
+  });
+
+  const DYNAMIC_CODE_PROBES = [
+    'export function host() { return (() => {}).constructor("return this")()["ChromeUtils"]; }',
+    'export function host() { return (async () => {})["constructor"]("return 1"); }',
+    "export function host() { return Reflect.get(() => {}, `constructor`); }",
+  ];
+
+  it("the lexical check itself catches constructor-based dynamic code", () => {
+    for (const probe of DYNAMIC_CODE_PROBES) {
+      const caught = CONSTRUCTOR_ACCESS.test(codeOnly(probe)) || CONSTRUCTOR_STRING.test(probe);
+      assert.ok(caught, probe);
+    }
+  });
+
+  it("ESLint rejects forbidden globals and constructor-based dynamic code in core modules", async () => {
+    const { ESLint } = require("eslint");
+    const eslint = new ESLint({ cwd: path.resolve(__dirname, "..") });
+    const filePath = path.join(CORE_DIR, "boundary-probe.sys.mjs");
+    for (const probe of [...DYNAMIC_CODE_PROBES, "export const x = () => Services.prefs;", 'import { x } from "./policy.sys.mjs"; export { x };']) {
+      const [result] = await eslint.lintText(probe, { filePath });
+      assert.ok(result.errorCount > 0, `ESLint accepted: ${probe}`);
+    }
+    const [clean] = await eslint.lintText("export const add = (a, b) => a + b;", { filePath });
+    assert.equal(clean.errorCount, 0, JSON.stringify(clean.messages));
   });
 });

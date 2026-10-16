@@ -55,9 +55,68 @@ export const PROFILES = Object.freeze({
   automation: Object.freeze(Object.keys(CAPABILITIES)),
 });
 
+// Requirements are meant to be evaluated on coerced and validated arguments.
+// For raw or unexpected values they fail closed: a value that is not clearly
+// the harmless variant counts as the risky one, and a non-array where an
+// array is expected is UNCLASSIFIED.
 const nonEmpty = (v) => v !== undefined && v !== null;
-const truthy = (v) => v === true || v === "true";
-const attachmentsUseFiles = (a) => Array.isArray(a) && a.some((x) => typeof x === "string");
+// Adds requirements: anything but an explicit false/absent value.
+const notFalse = (v) => nonEmpty(v) && v !== false && v !== "false";
+// Removes requirements: only an explicit true.
+const isTrue = (v) => v === true || v === "true";
+const arrayRule = (fn) => (v, all, ctx) => {
+  if (!nonEmpty(v)) return [];
+  if (!Array.isArray(v)) return [UNCLASSIFIED];
+  return fn(v, all, ctx);
+};
+const htmlFormat = (v) => (!nonEmpty(v) || v === "markdown" || v === "text" ? [] : ["mail.html"]);
+
+// The bridge reads local file paths itself and forwards their content
+// inline, so the extension cannot tell its inline objects from client data.
+// The caller passes { inlinedLocalFiles: true } for such requests.
+const attachmentRule = arrayRule((v, _all, ctx) => {
+  if (v.some((x) => typeof x === "string")) return ["files.attach"];
+  if (v.some((x) => !x || typeof x !== "object")) return [UNCLASSIFIED];
+  return ctx.inlinedLocalFiles && v.length ? ["files.attach"] : [];
+});
+
+// Capabilities matching the effect of each filter action when the filter
+// runs (on new mail or via applyFilters).
+const FILTER_ACTION_CAPABILITIES = Object.freeze({
+  moveToFolder: ["mail.move"],
+  copyToFolder: ["mail.move"],
+  delete: ["mail.delete"],
+  deleteFromServer: ["mail.deletePermanent"],
+  forward: ["filters.autosend"],
+  reply: ["filters.autosend"],
+  markRead: ["mail.flag"],
+  markUnread: ["mail.flag"],
+  markFlagged: ["mail.flag"],
+  addTag: ["mail.flag"],
+  changePriority: ["mail.flag"],
+  junkScore: ["mail.flag"],
+  label: ["mail.flag"],
+  killThread: ["mail.flag"],
+  killSubthread: ["mail.flag"],
+  watchThread: ["mail.flag"],
+  stopExecution: [],
+  leaveOnServer: [],
+  fetchBody: [],
+});
+
+// Capabilities needed for filters with these actions ({type} objects or
+// action names). Unknown actions are UNCLASSIFIED.
+export function filterActionCapabilities(actions) {
+  if (!Array.isArray(actions)) return [UNCLASSIFIED];
+  const needed = new Set();
+  for (const action of actions) {
+    const type = typeof action === "string" ? action : action && typeof action === "object" ? action.type : undefined;
+    const caps = typeof type === "string" && Object.hasOwn(FILTER_ACTION_CAPABILITIES, type)
+      ? FILTER_ACTION_CAPABILITIES[type] : [UNCLASSIFIED];
+    for (const cap of caps) needed.add(cap);
+  }
+  return [...needed].sort();
+}
 
 // Per tool: a fixed base requirement plus requirements for each argument.
 // Every input property of every tool must appear here (enforced by
@@ -65,7 +124,7 @@ const attachmentsUseFiles = (a) => Array.isArray(a) && a.some((x) => typeof x ==
 // that does not change the effect.
 const COMPOSE_ARGS = {
   to: null, cc: null, bcc: null, body: null, isHtml: null, from: null,
-  attachments: (v) => (attachmentsUseFiles(v) ? ["files.attach"] : []),
+  attachments: attachmentRule,
 };
 
 const TOOL_RULES = {
@@ -89,19 +148,19 @@ const TOOL_RULES = {
     base: ["mail.metadata", "mail.body"],
     args: {
       messageId: null, folderPath: null,
-      bodyFormat: (v) => (v === "html" ? ["mail.html"] : []),
-      rawSource: (v) => (truthy(v) ? ["mail.raw"] : []),
-      saveAttachments: (v) => (truthy(v) ? ["attachments.export"] : []),
-      includeInlineImages: (v) => (truthy(v) ? ["attachments.read"] : []),
+      bodyFormat: htmlFormat,
+      rawSource: (v) => (notFalse(v) ? ["mail.raw"] : []),
+      saveAttachments: (v) => (notFalse(v) ? ["attachments.export"] : []),
+      includeInlineImages: (v) => (notFalse(v) ? ["attachments.read"] : []),
     },
   },
   getMessages: {
     base: ["mail.metadata", "mail.body"],
     args: {
       messages: null,
-      bodyFormat: (v) => (v === "html" ? ["mail.html"] : []),
-      rawSource: (v) => (truthy(v) ? ["mail.raw"] : []),
-      saveAttachments: (v) => (truthy(v) ? ["attachments.export"] : []),
+      bodyFormat: htmlFormat,
+      rawSource: (v) => (notFalse(v) ? ["mail.raw"] : []),
+      saveAttachments: (v) => (notFalse(v) ? ["attachments.export"] : []),
     },
   },
   displayMessage: { base: ["gui.display"], args: { messageId: null, folderPath: null, displayMode: null } },
@@ -116,9 +175,11 @@ const TOOL_RULES = {
       removeTags: (v) => (nonEmpty(v) ? ["mail.flag"] : []),
       moveTo: (v) => (nonEmpty(v) ? ["mail.move"] : []),
       copyTo: (v) => (nonEmpty(v) ? ["mail.move"] : []),
-      trash: (v) => (truthy(v) ? ["mail.delete"] : []),
+      trash: (v) => (notFalse(v) ? ["mail.delete"] : []),
     },
   },
+  // Deleting from Trash (or without a Trash folder / IMAP without move-to-trash)
+  // is permanent; the handler requires mail.deletePermanent at runtime then.
   deleteMessages: { base: ["mail.delete"], args: { messageIds: null, folderPath: null } },
 
   createFolder: { base: ["folders.write"], args: { parentFolderPath: null, name: null } },
@@ -131,7 +192,7 @@ const TOOL_RULES = {
 
   sendMail: {
     base: [],
-    args: { ...COMPOSE_ARGS, subject: null, includeSignature: null, skipReview: (v) => (truthy(v) ? ["compose.send"] : ["compose.review"]) },
+    args: { ...COMPOSE_ARGS, subject: null, includeSignature: null, skipReview: (v) => (notFalse(v) ? ["compose.send"] : ["compose.review"]) },
     // skipReview omitted still opens a review window.
     defaults: { skipReview: false },
   },
@@ -147,8 +208,8 @@ const TOOL_RULES = {
     base: ["mail.metadata", "mail.body"],
     args: {
       ...COMPOSE_ARGS, messageId: null, folderPath: null, replyAll: null,
-      skipReview: (v, all) => (truthy(v) ? ["compose.send"] : truthy(all.saveAsDraft) ? [] : ["compose.review"]),
-      saveAsDraft: (v) => (truthy(v) ? ["compose.draft"] : []),
+      skipReview: (v, all) => (notFalse(v) ? ["compose.send"] : isTrue(all.saveAsDraft) ? [] : ["compose.review"]),
+      saveAsDraft: (v) => (notFalse(v) ? ["compose.draft"] : []),
     },
     defaults: { skipReview: false },
   },
@@ -156,7 +217,7 @@ const TOOL_RULES = {
     base: ["mail.metadata", "mail.body"],
     args: {
       ...COMPOSE_ARGS, messageId: null, folderPath: null,
-      skipReview: (v) => (truthy(v) ? ["compose.send"] : ["compose.review"]),
+      skipReview: (v) => (notFalse(v) ? ["compose.send"] : ["compose.review"]),
     },
     defaults: { skipReview: false },
   },
@@ -166,18 +227,20 @@ const TOOL_RULES = {
     base: ["filters.manage"],
     args: {
       accountId: null, name: null, enabled: null, type: null, conditions: null, insertAtIndex: null,
-      actions: (v) => (sendsAutomatically(v) ? ["filters.autosend"] : []),
+      actions: (v) => (nonEmpty(v) ? filterActionCapabilities(v) : []),
     },
   },
   updateFilter: {
     base: ["filters.manage"],
     args: {
       accountId: null, filterIndex: null, name: null, enabled: null, type: null, conditions: null,
-      actions: (v) => (sendsAutomatically(v) ? ["filters.autosend"] : []),
+      actions: (v) => (nonEmpty(v) ? filterActionCapabilities(v) : []),
     },
   },
   deleteFilter: { base: ["filters.manage"], args: { accountId: null, filterIndex: null } },
   reorderFilters: { base: ["filters.manage"], args: { accountId: null, fromIndex: null, toIndex: null } },
+  // The stored filters' actions are checked by the handler at runtime
+  // (filterActionCapabilities), as they are not part of the arguments.
   applyFilters: { base: ["filters.run"], args: { accountId: null, folderPath: null } },
 
   searchContacts: { base: ["contacts.read"], args: { query: null, maxResults: null } },
@@ -207,13 +270,14 @@ const TOOL_RULES = {
     args: {
       title: null, startDate: null, endDate: null, location: null, description: null, calendarId: null,
       allDay: null, status: null, showAs: null, categories: null, onlineMeeting: null, recurrence: null,
-      attendees: (v) => (Array.isArray(v) && v.length ? ["calendar.schedule"] : []),
-      skipReview: (v) => (truthy(v) ? ["calendar.write"] : ["compose.review"]),
+      attendees: arrayRule((v) => (v.length ? ["calendar.schedule"] : [])),
+      skipReview: (v) => (notFalse(v) ? ["calendar.write"] : ["compose.review"]),
     },
     defaults: { skipReview: false },
   },
-  // Updates and deletions of meetings may notify attendees; the handler's
-  // attendee guard still applies on top (Block skipReview).
+  // Updates and deletions of meetings may notify attendees: the handlers
+  // require calendar.schedule at runtime when the stored item has attendees,
+  // and the attendee guard (Block skipReview) still applies on top.
   updateEvent: {
     base: ["calendar.read", "calendar.write"],
     args: {
@@ -228,7 +292,7 @@ const TOOL_RULES = {
     base: [],
     args: {
       title: null, dueDate: null, calendarId: null, description: null, priority: null, categories: null,
-      skipReview: (v) => (truthy(v) ? ["calendar.write"] : ["compose.review"]),
+      skipReview: (v) => (notFalse(v) ? ["calendar.write"] : ["compose.review"]),
     },
     defaults: { skipReview: false },
   },
@@ -241,10 +305,6 @@ const TOOL_RULES = {
   },
 };
 
-function sendsAutomatically(actions) {
-  return Array.isArray(actions) && actions.some((a) => a && (a.type === "forward" || a.type === "reply"));
-}
-
 export function knownTools() {
   return Object.keys(TOOL_RULES);
 }
@@ -255,16 +315,19 @@ export function knownArguments(tool) {
 }
 
 // Capabilities a call needs, derived from the tool and its effective
-// arguments. Unknown tools/arguments yield UNCLASSIFIED.
-export function requiredCapabilities(tool, args = {}) {
+// arguments. Unknown tools/arguments yield UNCLASSIFIED. context carries
+// facts about the request that are not in the arguments
+// ({ inlinedLocalFiles }).
+export function requiredCapabilities(tool, args = {}, context = {}) {
   if (typeof tool !== "string" || !Object.hasOwn(TOOL_RULES, tool)) return [UNCLASSIFIED];
   const rule = TOOL_RULES[tool];
   const input = { ...(rule.defaults || {}), ...(args && typeof args === "object" ? args : {}) };
+  const ctx = context && typeof context === "object" ? context : {};
   const needed = new Set(rule.base);
   for (const [name, value] of Object.entries(input)) {
     if (!Object.hasOwn(rule.args, name)) { needed.add(UNCLASSIFIED); continue; }
     const effect = rule.args[name];
-    if (typeof effect === "function") for (const cap of effect(value, input)) needed.add(cap);
+    if (typeof effect === "function") for (const cap of effect(value, input, ctx)) needed.add(cap);
   }
   return [...needed].sort();
 }
@@ -282,9 +345,9 @@ export function capabilitiesForProfile(profile) {
 
 // Decision for one call. `granted` is the client's normalised capability
 // list; returns { allowed, missing }.
-export function decide(tool, args, granted) {
+export function decide(tool, args, granted, context = {}) {
   const have = new Set(normalizeCapabilities(granted));
-  const missing = requiredCapabilities(tool, args).filter((c) => !have.has(c));
+  const missing = requiredCapabilities(tool, args, context).filter((c) => !have.has(c));
   return { allowed: missing.length === 0, missing };
 }
 

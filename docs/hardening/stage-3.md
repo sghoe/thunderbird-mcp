@@ -25,6 +25,29 @@ and add the pure policy core used by Stage 4. No behaviour change.
   policy module directly and checks that every input property of every tool
   is classified.
 
+## Review round 1 (Sol 6.1, Opus 5.5) – fixes
+
+* Boundary: constructor-based dynamic code (`(() => {}).constructor("...")`)
+  passed both checks. ESLint and the boundary test now refuse `.constructor`,
+  the string `"constructor"` and `Reflect`; violating probes are part of
+  the test for both mechanisms.
+* Policy (only effective once Stage 4 wires it):
+  * Raw values fail closed: a non-array where an array is expected is
+    unclassified; any value other than an explicit false counts as the risky
+    variant; only an explicit `true` may drop the review requirement.
+    Stage 4 evaluates the policy after coercion and validation.
+  * Filter actions require the capabilities of their effect
+    (`filterActionCapabilities`: move/copy → `mail.move`, delete →
+    `mail.delete`, delete from POP server → `mail.deletePermanent`,
+    forward/reply → `filters.autosend`, flags/tags → `mail.flag`; unknown →
+    unclassified).
+  * Request context `{ inlinedLocalFiles }`: inline attachments that the
+    bridge read from local paths require `files.attach` like paths do.
+  * Effects that depend on stored state (permanent deletion from Trash or by
+    the IMAP delete model, the actions of stored filters for `applyFilters`
+    and `updateFilter`, meetings and assigned tasks with attendees) are
+    checked by the handlers against the calling client in Stage 4.
+
 ## Verification
 
 * Unit: all tests pass except the 2 pre-existing Windows-only Flatpak tests.

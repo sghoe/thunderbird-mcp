@@ -32,11 +32,14 @@ direct HTTP client is held to the same rules.
 * Files in `extension/mcp_server/core/` must not use XPCOM, file, network,
   host or browser globals (`Cc`, `Ci`, `Services`, `ChromeUtils`, `IOUtils`,
   `MailServices`, `NetUtil`, `fetch`, `globalThis`, `process`, …), must not
-  import or re-export anything and must not use `eval`/`Function`.
+  import or re-export anything and must not compile code (`eval`,
+  `Function`, `Reflect`, or any `.constructor` / `"constructor"` access such
+  as `(() => {}).constructor("...")`).
 * Enforced twice: an ESLint block without those globals plus
   `no-restricted-globals`/`no-restricted-syntax` (`npm run lint`), and the
   zero-dependency `test/core-boundary.test.cjs` (lexical check, and each
-  module is imported in plain Node).
+  module is imported in plain Node). Both mechanisms are exercised with
+  violating probes in the same test (ESLint via its Node API).
 * api.js passes plain values or narrow callbacks in (for example
   `checkReplyTemplate(value, resolveFolder)`).
 

@@ -57,7 +57,11 @@ describe("requirements follow the effective arguments", () => {
     ["updateMessage", { moveTo: "x" }, ["mail.metadata", "mail.move"]],
     ["updateMessage", { trash: true }, ["mail.delete", "mail.metadata"]],
     ["emptyTrash", {}, ["mail.deletePermanent"]],
-    ["createFilter", { actions: [{ type: "markRead" }] }, ["filters.manage"]],
+    ["createFilter", { actions: [{ type: "markRead" }] }, ["filters.manage", "mail.flag"]],
+    ["createFilter", { actions: [{ type: "stopExecution" }] }, ["filters.manage"]],
+    ["createFilter", { actions: [{ type: "moveToFolder", value: "x" }, { type: "delete" }] }, ["filters.manage", "mail.delete", "mail.move"]],
+    ["updateFilter", { actions: [{ type: "deleteFromServer" }] }, ["filters.manage", "mail.deletePermanent"]],
+    ["createFilter", { actions: [{ type: "customAction" }] }, ["filters.manage", "unclassified"]],
     ["createFilter", { actions: [{ type: "reply", value: "x" }] }, ["filters.autosend", "filters.manage"]],
     ["createEvent", {}, ["compose.review"]],
     ["createEvent", { skipReview: true, attendees: [{ email: "a@b.c" }] }, ["calendar.schedule", "calendar.write"]],
@@ -68,6 +72,59 @@ describe("requirements follow the effective arguments", () => {
       assert.deepEqual(plain(P.requiredCapabilities(tool, args)), expected);
     });
   }
+});
+
+describe("unexpected raw values fail closed", () => {
+  const cases = [
+    // JSON-encoded arrays (coerceToolArgs would decode them) are unclassified.
+    ["sendMail", { attachments: '["C:/secret"]' }, ["compose.review", "unclassified"]],
+    ["createFilter", { actions: '[{"type":"forward","value":"x@y.z"}]' }, ["filters.manage", "unclassified"]],
+    ["createEvent", { attendees: '[{"email":"a@b.c"}]' }, ["compose.review", "unclassified"]],
+    ["sendMail", { attachments: [7] }, ["compose.review", "unclassified"]],
+    // Values that are not clearly the harmless variant count as the risky one.
+    ["sendMail", { skipReview: "yes" }, ["compose.send"]],
+    ["getMessage", { bodyFormat: "HTML" }, ["mail.body", "mail.html", "mail.metadata"]],
+    ["getMessage", { rawSource: 1 }, ["mail.body", "mail.metadata", "mail.raw"]],
+    ["getMessage", { saveAttachments: "1" }, ["attachments.export", "mail.body", "mail.metadata"]],
+    ["updateMessage", { trash: "on" }, ["mail.delete", "mail.metadata"]],
+    // Only an explicit true may drop the review requirement.
+    ["replyToMessage", { saveAsDraft: "yes" }, ["compose.draft", "compose.review", "mail.body", "mail.metadata"]],
+    ["getMessage", { rawSource: false, bodyFormat: "text" }, ["mail.body", "mail.metadata"]],
+  ];
+  for (const [tool, args, expected] of cases) {
+    it(`${tool} ${JSON.stringify(args)}`, () => {
+      assert.deepEqual(plain(P.requiredCapabilities(tool, args)), expected);
+    });
+  }
+});
+
+describe("request context", () => {
+  it("requires files.attach when the bridge inlined local files", () => {
+    const inline = { attachments: [{ name: "id_rsa", base64: "eA==" }] };
+    for (const tool of ["sendMail", "saveDraft", "replyToMessage", "forwardMessage"]) {
+      assert.ok(!P.requiredCapabilities(tool, inline).includes("files.attach"), tool);
+      assert.ok(P.requiredCapabilities(tool, inline, { inlinedLocalFiles: true }).includes("files.attach"), tool);
+    }
+    const drafts = P.capabilitiesForProfile("drafts");
+    assert.equal(P.decide("saveDraft", inline, drafts).allowed, true);
+    assert.deepEqual(plain(P.decide("saveDraft", inline, drafts, { inlinedLocalFiles: true }).missing), ["files.attach"]);
+    assert.ok(!P.requiredCapabilities("saveDraft", { attachments: [] }, { inlinedLocalFiles: true }).includes("files.attach"));
+  });
+
+  it("classifies every filter action api.js knows", () => {
+    const source = fs.readFileSync(path.join(root, "extension/mcp_server/api.js"), "utf8");
+    const defs = source.slice(source.indexOf("const FILTER_ACTION_DEFS = ["), source.indexOf("const FILTER_ACTIONS = "));
+    const names = [...defs.matchAll(/\{ action: "([A-Za-z]+)"/g)].map((m) => m[1]);
+    assert.ok(names.length >= 19, names.join());
+    for (const name of names) assert.ok(!P.filterActionCapabilities([name]).includes(P.UNCLASSIFIED), name);
+  });
+
+  it("maps stored filter actions to the capabilities of their effect", () => {
+    assert.deepEqual(plain(P.filterActionCapabilities(["forward", { type: "markRead" }])), ["filters.autosend", "mail.flag"]);
+    assert.deepEqual(plain(P.filterActionCapabilities([])), []);
+    assert.deepEqual(plain(P.filterActionCapabilities(["unknown"])), [P.UNCLASSIFIED]);
+    assert.deepEqual(plain(P.filterActionCapabilities(null)), [P.UNCLASSIFIED]);
+  });
 });
 
 describe("profiles", () => {
