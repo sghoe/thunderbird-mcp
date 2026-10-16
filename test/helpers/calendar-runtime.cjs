@@ -5,6 +5,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { ReadableStream } = require("node:stream/web");
 const vm = require("node:vm");
+// Registers a before() hook that loads the real core modules.
+const { Core } = require("./core-modules.cjs");
 
 const source = fs.readFileSync(path.resolve(__dirname, "../../extension/mcp_server/api.js"), "utf8");
 const CALENDAR_FILTERS = Object.freeze({
@@ -413,7 +415,7 @@ function loadCalendarRuntime({
     },
   };
   const sandbox = {
-    cal, CalEvent: CalendarItem, CalTodo: CalendarTodo, CalAttendee: CalendarAttendee, Cc,
+    cal, CalEvent: CalendarItem, CalTodo: CalendarTodo, CalAttendee: CalendarAttendee, Cc, Core,
     Ci: { nsIPrefBranch: prefTypes, calICalendar: CALENDAR_FILTERS },
     Services: { prefs: preferences, wm: { getMostRecentWindow: () => window } },
     MailServices: { accounts: { getIdentity() {

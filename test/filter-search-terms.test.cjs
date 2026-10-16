@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const { Core } = require("./helpers/core-modules.cjs");
 
 // The real nsMsgSearchAttrib enum, from
 // comm-central/mailnews/search/public/nsMsgSearchCore.idl. Note the gaps: the
@@ -124,6 +125,7 @@ function loadFilterHelpers({ ci = makeCi(), prefs = {}, globals = {}, handlers =
       ...prefs,
     },
   };
+  sandbox.Core = Core;
   Object.assign(sandbox, globals);
   vm.createContext(sandbox);
   vm.runInContext(

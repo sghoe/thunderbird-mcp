@@ -39,6 +39,13 @@ try {
 // isolated snippets; test/fork-identity.test.cjs keeps every use consistent
 // with the manifest and mcp-bridge.cjs.
 
+// BEGIN CORE MODULE REGISTRY
+// Pure core modules (extension/mcp_server/core/*.sys.mjs: contracts, policy
+// and decisions without XPCOM) are imported by getAPI() with a per-load
+// version query; top-level helpers reach them through this registry.
+let Core = null;
+// END CORE MODULE REGISTRY
+
 const resProto = Cc[
   "@mozilla.org/network/protocol;1?name=resource"
 ].getService(Ci.nsISubstitutingProtocolHandler);
@@ -1721,64 +1728,12 @@ function buildTerms(filter, conditions) {
 
 // checkTargetFolder(uri) resolves an accessible folder, or returns { error }.
 // BEGIN REPLY TEMPLATE GUARD
-// nsMsgFolderFlags.Templates.
-const TEMPLATES_FOLDER_FLAG = 0x00400000;
-const REPLY_TEMPLATE_FORMAT_HINT = "<Templates folder URI>?messageId=<Message-ID>&subject=<subject>";
-
-// A Reply action names a template as "<folder URI>?messageId=<id>&subject=<s>"
-// (parsed this way by nsMsgComposeService::ReplyWithTemplate, which resolves
-// the folder in any account and takes the first header with that Message-ID).
-// The template's content is mailed automatically, so its folder must pass
-// the same account check as a Move/Copy target, carry the Templates flag, and
-// hold exactly one message with that Message-ID. Returns the value rebuilt
-// from the canonical folder URI; throws on any violation.
+// A Reply action's template is mailed automatically; the rules (native-exact
+// parsing, accessible Templates folder, unique Message-ID, canonical value)
+// live in core/reply-template.sys.mjs. checkTargetFolder(uri) is the
+// Thunderbird adapter returning { folder } or { error }.
 function checkReplyTemplate(value, checkTargetFolder) {
-  // Parse exactly like ReplyWithTemplate: both delimiters are searched from
-  // the start of the whole value (PL_strstr), so "&subject=" must not occur
-  // before the Message-ID; otherwise the native code computes a reversed
-  // substring and aborts Thunderbird.
-  const parse = (candidate) => {
-    const query = candidate.indexOf("?messageId=");
-    const subjectAt = candidate.indexOf("&subject=");
-    if (query <= 0 || subjectAt < query + 11) return null;
-    const messageId = candidate.slice(query + 11, subjectAt);
-    return messageId ? { folderUri: candidate.slice(0, query), messageId, tail: candidate.slice(query) } : null;
-  };
-  const text = typeof value === "string" ? value : "";
-  const parsed = parse(text);
-  if (!parsed) {
-    throw new Error(`Reply template must be ${REPLY_TEMPLATE_FORMAT_HINT}`);
-  }
-  const { folderUri, messageId } = parsed;
-  let folder = null;
-  try {
-    const target = checkTargetFolder(folderUri);
-    if (!target?.error) folder = target?.folder || null;
-  } catch { /* fail closed below */ }
-  // Access errors may contain a restricted URI; do not echo it back.
-  if (!folder || typeof folder.URI !== "string" || !folder.URI) {
-    throw new Error("Reply template folder not accessible");
-  }
-  let isTemplates = false;
-  try { isTemplates = typeof folder.getFlag === "function" && folder.getFlag(TEMPLATES_FOLDER_FLAG); } catch { /* fail closed */ }
-  if (!isTemplates) throw new Error("Reply template must be stored in a folder with the Templates flag");
-  let matches = 0;
-  try {
-    for (const hdr of folder.msgDatabase.enumerateMessages()) {
-      if (hdr.messageId === messageId && ++matches > 1) break;
-    }
-  } catch {
-    throw new Error("Reply template folder could not be read");
-  }
-  if (matches === 0) throw new Error("Reply template message not found in the Templates folder");
-  if (matches > 1) throw new Error("Reply template Message-ID is ambiguous: several messages in the Templates folder share it");
-  // The canonical folder URI must not change how the native code parses it.
-  const canonical = `${folder.URI}${parsed.tail}`;
-  const reparsed = parse(canonical);
-  if (!reparsed || reparsed.folderUri !== folder.URI || reparsed.messageId !== messageId) {
-    throw new Error("Reply template folder URI cannot be used in a reply template");
-  }
-  return canonical;
+  return Core.replyTemplate.checkReplyTemplate(value, checkTargetFolder);
 }
 // END REPLY TEMPLATE GUARD
 
@@ -2105,6 +2060,25 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
       extensionRoot,
       0
     );
+
+    // BEGIN CORE MODULE LOADER
+    // An unchanged module URL stays cached for the whole process, even after
+    // the add-on is updated or re-enabled (verified natively, Stage 0 spike).
+    // Every load of this script therefore imports the core modules under a
+    // fresh query. Core modules are leaf modules (no imports, enforced by
+    // lint and test/core-boundary.test.cjs), so no unversioned module can be
+    // pulled in transitively and one load never mixes old and new code.
+    const coreQuery = `v=${encodeURIComponent(`${context.extension.version}-${Date.now()}`)}`;
+    const loadCoreModule = (name) => ChromeUtils.importESModule(
+      `resource://thunderbird-mcp-hardened/mcp_server/core/${name}.sys.mjs?${coreQuery}`
+    );
+    Core = Object.freeze({
+      attachmentSource: loadCoreModule("attachment-source"),
+      replyTemplate: loadCoreModule("reply-template"),
+      calendarKind: loadCoreModule("calendar-kind"),
+      policy: loadCoreModule("policy"),
+    });
+    // END CORE MODULE LOADER
 
     function normalizeGetMessagesLimit(value) {
       const limit = Number(value);
@@ -6096,20 +6070,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
             // One write guard for both update/delete paths. Inspect the stored
             // series before a replacement list or recurrence can erase attendees.
-            // calIItemBase.isEvent()/isTodo(); cal.item helpers as a fallback.
-            // Unknown kinds fail closed: a lookup by ID can return any item type.
+            // A lookup by ID can return any item type; unknown kinds fail
+            // closed. Rules: core/calendar-kind.sys.mjs (cal.item as fallback).
             function getCalendarItemKind(item) {
-              try {
-                if (typeof item?.isTodo === "function" && item.isTodo()) return "task";
-                if (typeof item?.isEvent === "function" && item.isEvent()) return "event";
-              } catch { /* fall through */ }
-              try {
-                if (cal?.item?.isToDo?.(item)) return "task";
-                if (cal?.item?.isEvent?.(item)) return "event";
-              } catch { /* unknown */ }
-              return "unknown";
+              return Core.calendarKind.getCalendarItemKind(item, cal?.item);
             }
-
             function assertEventWriteAllowed(event, calendar, occurrence = null, attendees) {
               const blocked = isSkipReviewBlocked();
               if (!blocked && attendees == null) return;
@@ -8182,24 +8147,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               return results;
             }
 
-            // Thunderbird stores detached/external attachments as a local notice
-            // plus X-Mozilla-External-Attachment-URL; Gloda then reports that
-            // foreign location (http:, file:, UNC, ...) as the attachment URL.
-            // Attachment bytes must only ever come from the authorized message
-            // itself, so such records are never fetched. The scheme list only
-            // classifies; fetching is gated by isOwnMessagePartUrl below.
-            const EXTERNAL_ATTACHMENT_NOT_FETCHED =
-              "External or detached attachment: the message only stores a reference to another location, which is not fetched";
-            const FOREIGN_ATTACHMENT_URL_SCHEMES = new Set([
-              "http", "https", "file", "ftp", "smb", "data", "blob", "jar",
-              "resource", "chrome", "moz-extension", "about", "javascript",
-            ]);
-
+            // Attachment bytes may only come from the authorized message's own
+            // part URLs; external/detached references are reported, never
+            // fetched. Rules: core/attachment-source.sys.mjs; the functions
+            // below only add the Thunderbird lookup of the message's base URL.
             function isExternalAttachmentRecord(att) {
-              if (att?.isExternal === true) return true;
-              const url = typeof att?.url === "string" ? att.url : "";
-              const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(url)?.[1]?.toLowerCase();
-              return !!scheme && FOREIGN_ATTACHMENT_URL_SCHEMES.has(scheme);
+              return Core.attachmentSource.isExternalAttachmentRecord(att);
             }
 
             function getOwnMessageBaseUrl(msgHdr) {
@@ -8207,27 +8160,17 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               return MailServices.messageServiceFromURI(msgUri).getUrlForUri(msgUri).spec || "";
             }
 
-            // Builds the part URL from the message's own message service and a
-            // validated MIME part number instead of trusting a reported URL.
             function getOwnMessagePartUrl(msgHdr, partName) {
-              if (typeof partName !== "string" || !/^\d+(?:\.\d+)*$/.test(partName)) return "";
-              try {
-                const base = getOwnMessageBaseUrl(msgHdr);
-                if (!base) return "";
-                return `${base}${base.includes("?") ? "&" : "?"}part=${partName}`;
-              } catch {
-                return "";
-              }
+              let base;
+              try { base = getOwnMessageBaseUrl(msgHdr); } catch { return ""; }
+              return Core.attachmentSource.buildPartUrl(base, partName);
             }
 
-            // Final guard before any privileged fetch: exactly this message's
-            // URL plus one numeric part selector.
+            // Final guard before any privileged fetch.
             function isOwnMessagePartUrl(msgHdr, url) {
-              if (typeof url !== "string" || !url) return false;
               let base;
               try { base = getOwnMessageBaseUrl(msgHdr); } catch { return false; }
-              if (!base || !url.startsWith(base)) return false;
-              return /^[?&]part=\d+(?:\.\d+)*$/.test(url.slice(base.length));
+              return Core.attachmentSource.isPartUrlOf(base, url);
             }
             // END RAW MIME ATTACHMENT HELPERS
 
@@ -9238,7 +9181,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                         // exactly inside the per-image encoded budget.
                         const maxRawBytes = Math.floor(MAX_INLINE_IMAGE_BASE64_BYTES / 4) * 3;
                         if (source.external) {
-                          resolve({ error: EXTERNAL_ATTACHMENT_NOT_FETCHED });
+                          resolve({ error: Core.attachmentSource.EXTERNAL_ATTACHMENT_NOT_FETCHED });
                           return;
                         }
                         if (source.bytes) {
@@ -9252,7 +9195,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                           return;
                         }
                         if (!isOwnMessagePartUrl(msgHdr, source.url)) {
-                          resolve({ error: EXTERNAL_ATTACHMENT_NOT_FETCHED });
+                          resolve({ error: Core.attachmentSource.EXTERNAL_ATTACHMENT_NOT_FETCHED });
                           return;
                         }
                         try {
@@ -9568,7 +9511,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                                           new Promise((done) => {
                         try {
                           if (external) {
-                            info.error = EXTERNAL_ATTACHMENT_NOT_FETCHED;
+                            info.error = Core.attachmentSource.EXTERNAL_ATTACHMENT_NOT_FETCHED;
                             done();
                             return;
                           }
@@ -9578,7 +9521,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                             return;
                           }
                           if (!bytes && !isOwnMessagePartUrl(msgHdr, url)) {
-                            info.error = EXTERNAL_ATTACHMENT_NOT_FETCHED;
+                            info.error = Core.attachmentSource.EXTERNAL_ATTACHMENT_NOT_FETCHED;
                             done();
                             return;
                           }

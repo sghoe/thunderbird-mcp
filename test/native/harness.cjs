@@ -421,6 +421,25 @@ async function startThunderbird({ mailboxes, extraPrefs, headless = true, authHe
     throw e;
   }
 
+  // After an add-on reload the server may come back on another port.
+  async function reconnect({ timeoutMs = 60000 } = {}) {
+    const previousPid = connection.pid;
+    const next = await waitFor(async () => {
+      const info = readConnection(tmpDir, extensionDir);
+      if (!info) return null;
+      try {
+        const res = await fetch(`http://127.0.0.1:${info.port}/`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${info.token}` },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 0, method: "tools/list" }),
+        });
+        return res.status === 200 ? info : null;
+      } catch { return null; }
+    }, { timeoutMs, intervalMs: 500, label: `server after reload (pid ${previousPid})` });
+    connection = next;
+    return next;
+  }
+
   async function stop() {
     marionette.close();
     if (!exited) {
@@ -436,7 +455,7 @@ async function startThunderbird({ mailboxes, extraPrefs, headless = true, authHe
     }
   }
 
-  return { root, tmpDir, profileDir, connection, smtp, probe, rpc, call, waitForMessages, marionette, folderCounts, stop, log, child };
+  return { root, tmpDir, profileDir, get connection() { return connection; }, smtp, probe, rpc, call, waitForMessages, reconnect, marionette, folderCounts, stop, log, child };
 }
 
 function randomId(prefix) {

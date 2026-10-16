@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const { Core } = require("./helpers/core-modules.cjs");
 
 const source = fs.readFileSync(path.resolve(__dirname, "../extension/mcp_server/api.js"), "utf8");
 // Same marker assertions and VM loading pattern as validation.test.cjs.
@@ -46,6 +47,7 @@ function loadMessageTools({ mime = { contentType: "text/plain", body: "visible" 
       },
     }) },
     findMessage: () => ({ msgHdr: hdr, folder }),
+    Core,
     // The message's own service: attachment bytes come only from its part URLs.
     MailServices: { messageServiceFromURI: () => ({ getUrlForUri: () => ({ spec: "mailbox:///fixture/Inbox?number=1" }) }) },
     getUserTags: () => [],

@@ -60,6 +60,8 @@ export default [
   // ── Extension chrome-context code ────────────────────────────────
   {
     files: ["extension/**/*.{js,mjs}"],
+    // Core modules get the stricter block below instead.
+    ignores: ["extension/mcp_server/core/**"],
     languageOptions: {
       ecmaVersion: "latest",
       sourceType: "module",
@@ -104,6 +106,37 @@ export default [
 
       "no-empty": ["warn", { allowEmptyCatch: true }],
       "no-control-regex": "off",  // we filter JSON-RPC control chars intentionally
+    },
+  },
+
+  // ── Pure core modules (contracts, policy, decisions) ─────────────
+  // No XPCOM, file, network or browser globals and no imports: the
+  // Thunderbird adapters in api.js pass plain values in. This is a
+  // dependency rule, not a sandbox (see docs/hardening/architecture.md).
+  {
+    files: ["extension/mcp_server/core/**/*.{js,mjs}"],
+    languageOptions: {
+      ecmaVersion: "latest",
+      sourceType: "module",
+      globals: { ...globals.es2024 },
+    },
+    rules: {
+      "no-undef": "error",
+      "no-restricted-globals": ["error",
+        "globalThis", "window", "self", "global", "process", "require",
+        "Components", "Services", "ChromeUtils", "Cc", "Ci", "Cu", "Cr",
+        "IOUtils", "PathUtils", "MailServices", "NetUtil", "browser", "messenger",
+        "fetch", "XMLHttpRequest", "WebSocket", "eval",
+      ],
+      "no-restricted-syntax": ["error",
+        { selector: "ImportDeclaration", message: "Core modules are leaf modules; pass dependencies in from api.js." },
+        { selector: "ImportExpression", message: "Core modules must not load other code." },
+        { selector: "ExportAllDeclaration", message: "Core modules must not re-export other modules." },
+        { selector: "ExportNamedDeclaration[source]", message: "Core modules must not re-export other modules." },
+      ],
+      "no-eval": "error",
+      "no-new-func": "error",
+      "no-unused-vars": ["warn", { argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
     },
   },
 

@@ -348,8 +348,11 @@ thunderbird-mcp/
 │   ├── icons/                  # Extension icons
 │   └── mcp_server/
 │       ├── api.js              # All 40 MCP tools + auth + access control
+│       ├── core/               # Pure policy/decision modules (no XPCOM, enforced)
 │       └── schema.json
 ├── test/                       # Test suite (node:test, zero dependencies)
+│   └── native/                 # Native Thunderbird tests (THUNDERBIRD_BIN)
+├── docs/hardening/             # Hardening decisions, architecture, migration
 └── scripts/
     ├── build.sh
     └── install.sh

@@ -8,6 +8,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const { Core } = require("./helpers/core-modules.cjs");
 
 const source = fs.readFileSync(path.resolve(__dirname, "../extension/mcp_server/api.js"), "utf8");
 const START = "// BEGIN RAW MIME PARSING HELPERS";
@@ -19,7 +20,7 @@ const BASE = "mailbox:///C:/profile/Mail/alice/Inbox?number=42";
 
 function load() {
   const sandbox = {
-    Uint8Array, TextDecoder, atob: globalThis.atob,
+    Uint8Array, TextDecoder, atob: globalThis.atob, Core,
     MailServices: { messageServiceFromURI: () => ({ getUrlForUri: () => ({ spec: BASE }) }) },
   };
   vm.createContext(sandbox);

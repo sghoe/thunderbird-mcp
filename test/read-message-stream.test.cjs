@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const { Core } = require("./helpers/core-modules.cjs");
 
 const NS_BASE_STREAM_CLOSED = "NS_BASE_STREAM_CLOSED";
 const FIXED_CHUNK_SIZE = 64 * 1024;
@@ -78,6 +79,7 @@ function loadInlineImageFetcher({
   const sandbox = {
     // getMessage scope: the authorized message and its own message service.
     msgHdr: { folder: { getUriForMsg: () => "message-uri" } },
+    Core,
     MailServices: { messageServiceFromURI: () => ({ getUrlForUri: () => ({ spec: OWN_MESSAGE_URL }) }) },
     btoa: globalThis.btoa,
     Cr: { NS_BASE_STREAM_CLOSED },
@@ -129,6 +131,7 @@ function loadGetMessage({ stream, log, findMessageError }) {
     PREF_ALLOW_ENCRYPTED_MESSAGES: "allowEncryptedMessages",
     isPrivacyOptInEnabled: () => false,
     classifyMimeMessageEncryption: () => "clear",
+    Core,
     ChromeUtils: {
       importESModule: () => ({
         MsgHdrToMimeMessage: (hdr, _listener, callback) => callback(hdr, { parts: [] }),
