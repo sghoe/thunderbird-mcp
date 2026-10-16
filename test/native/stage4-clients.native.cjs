@@ -252,3 +252,71 @@ describe("pairing in the options page (native)", { skip: !h.thunderbirdBinary() 
     assert.equal(stored, true);
   });
 });
+
+// Filters run with the authority of the client that creates or runs them.
+describe("filters respect the client's sender account and permanent deletion (native)", { skip: !h.thunderbirdBinary() && "THUNDERBIRD_BIN not set" }, () => {
+  let tb;
+  const LOCAL = "mailbox://nobody@Local%20Folders";
+  const subjectIs = (value) => [{ attrib: "subject", op: "contains", value }];
+  const folderCount = (uri) => tb.marionette.run(`
+    const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+    return [...MailServices.folderLookup.getFolderForURL(args.uri).msgDatabase.enumerateMessages()].length;
+  `, { uri });
+
+  before(async () => {
+    tb = await h.startThunderbird({
+      mailboxes: {
+        alice: {
+          Inbox: f.simple({ id: "fwd@sender.test", from: "Carol <carol@sender.test>", to: f.ALLOWED_EMAIL, subject: "Forward me", text: "x" }),
+          Trash: f.simple({ id: "trash@sender.test", from: "Carol <carol@sender.test>", to: f.ALLOWED_EMAIL, subject: "Trashed", text: "x" }),
+        },
+        "Local Folders": { Inbox: f.simple({ id: "local@sender.test", from: "Eve <eve@sender.test>", to: "nobody@local", subject: "Local forward", text: "x" }) },
+      },
+      extraPrefs: { [`${NS}allowFilterSendActions`]: true },
+      clients: [
+        { name: "harness" },
+        { name: "local-filters", capabilities: ["accounts.read", "mail.metadata", "filters.read", "filters.manage", "filters.run", "filters.autosend"], accounts: ["account3"] },
+        { name: "trash-filters", capabilities: ["accounts.read", "mail.metadata", "filters.read", "filters.manage", "filters.run", "mail.delete"], accounts: ["account1"] },
+      ],
+    });
+    await tb.waitForMessages(`${ALICE}/Inbox`, 1);
+    await tb.waitForMessages(`${ALICE}/Trash`, 1);
+    await tb.waitForMessages(`${LOCAL}/Inbox`, 1);
+  });
+  after(async () => { await tb?.stop(); });
+
+  it("refuses Forward rules where Thunderbird would send from another account", async () => {
+    const sent = tb.smtp.messages.length;
+    const r = await tb.call("createFilter", {
+      accountId: "account3", name: "Local forward", type: 16, conditions: subjectIs("Local forward"),
+      actions: [{ type: "forward", value: "target@sink.test" }],
+    }, { client: "local-filters" });
+    assert.match(r.result.error, /identity of this \(accessible\) account/, JSON.stringify(r));
+    await h.sleep(1000);
+    assert.equal(tb.smtp.messages.length, sent);
+  });
+
+  it("still forwards through the account's own identity (positive control)", async () => {
+    const sent = tb.smtp.messages.length;
+    const created = await tb.call("createFilter", {
+      accountId: "account1", name: "Alice forward", type: 16, conditions: subjectIs("Forward me"),
+      actions: [{ type: "forward", value: "target@sink.test" }],
+    });
+    assert.equal(created.result.success, true, JSON.stringify(created));
+    const applied = await tb.call("applyFilters", { accountId: "account1", folderPath: `${ALICE}/Inbox` });
+    assert.deepEqual(applied.result.submitted, ["Alice forward"], JSON.stringify(applied));
+    await h.waitFor(() => tb.smtp.messages.length > sent, { label: "forwarded message" });
+    assert.match(tb.smtp.messages.at(-1).from || JSON.stringify(tb.smtp.messages.at(-1)), /alice/i);
+  });
+
+  it("does not let a Delete rule purge Trash without mail.deletePermanent", async () => {
+    const created = await tb.call("createFilter", {
+      accountId: "account1", name: "Purge", type: 16, conditions: subjectIs("Trashed"), actions: [{ type: "delete" }],
+    }, { client: "trash-filters" });
+    assert.equal(created.result.success, true, JSON.stringify(created));
+    const applied = await tb.call("applyFilters", { accountId: "account1", folderPath: `${ALICE}/Trash` }, { client: "trash-filters" });
+    assert.ok(applied.result.skipped.some((s) => s.name === "Purge" && s.reason === "missing-capability"), JSON.stringify(applied));
+    await h.sleep(1500);
+    assert.equal(await folderCount(`${ALICE}/Trash`), 1);
+  });
+});

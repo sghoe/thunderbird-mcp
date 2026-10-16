@@ -43,3 +43,4 @@ v0.9.2 (enforced by `test/tool-contract.test.cjs` and the native parity run).
 | Calls of different clients never run concurrently (fair queue); calls of one client may | heavy parallel use by several clients is serialised | none |
 | A corrupt client list admits no client; the settings page offers "Remove all clients" | all requests get 403 until repaired | remove all clients and pair again |
 | Revocation and changed rights apply to the next request | calls already running finish | none |
+| Forward filter rules need an accessible account with its own identity (Thunderbird would otherwise send from the default account); Delete rules need `mail.deletePermanent` where they delete permanently (Trash, IMAP without move-to-Trash) | such rules are refused on create/update; `applyFilters` skips them (`unauthorized-sender` / `missing-capability`) | add an identity to the account or grant the capability |

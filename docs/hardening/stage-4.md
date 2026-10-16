@@ -72,3 +72,25 @@ on every call. Migration effects: [migration.md](migration.md#stage-4--paired-cl
   Negative control: against the Stage 3 build 7 of 8 client tests fail.
 * Native parity: the harness pairs a full-access client; 64 calls / 40 tools
   identical to upstream v0.9.2.
+
+## Review round 1 (Sol 6.1, Opus 5.5) – fixes
+
+* Permanent deletion by filters (both reviewers): a filter "Delete" runs as
+  a permanent delete in Trash (and below) and on IMAP accounts whose delete
+  model is not move-to-Trash (`nsMsgFilterAfterTheFact` → `DeleteMessages`
+  without storage flag). `applyFilters` now requires `mail.deletePermanent`
+  for such rules where they run (Trash target or IMAP model), and
+  `createFilter`/`updateFilter` require it on IMAP accounts without
+  move-to-Trash. Unreadable state counts as permanent.
+* Forward filters and the sender account (Sol): `nsMsgComposeService::
+  ForwardMessage` sends from the default identity of the account that owns
+  the filtered folder and falls back to the global default identity when
+  that account has none (Local Folders). A client limited to Local Folders
+  could thus send from an excluded account. Forward rules now need an
+  accessible account with its own identity: `createFilter`/`updateFilter`
+  refuse them otherwise, `applyFilters` skips them (`unauthorized-sender`).
+  Reply templates only use the account's own identities (verified in the
+  same file) and are unaffected.
+* Native regression (`stage4-clients.native.cjs`, filter block): both
+  scenarios fail on 5a87531 and pass now; forwarding from an account with
+  its own identity still sends (positive control).

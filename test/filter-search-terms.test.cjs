@@ -310,6 +310,8 @@ function makeFilterHarness({
   addressBooksRestricted = false,
   // Capabilities of the calling client (default: every capability).
   granted = Object.keys(Core.policy.CAPABILITIES),
+  // The account's default identity (Forward filters send through it).
+  identity = { email: "user@example.invalid" },
 } = {}) {
   const prefReads = [];
   const submissions = [];
@@ -355,6 +357,7 @@ function makeFilterHarness({
   const filterList = makeList();
   const account = {
     key: "account",
+    defaultIdentity: identity,
     incomingServer: {
       canHaveFilters: true,
       prettyName: "Test account",
@@ -362,6 +365,7 @@ function makeFilterHarness({
       getFilterList: () => filterList,
     },
   };
+  folder.server = account.incomingServer;
   const api = loadFilterHelpers({
     ci,
     handlers: true,
@@ -377,9 +381,17 @@ function makeFilterHarness({
       clientHasCapability: (capability) => granted.includes(capability),
       isAddressBookAccessRestricted: () => addressBooksRestricted,
       getAccessibleAccounts: () => [account],
-      getAccessibleFolder,
+      // Folders belong to the account's server unless a test says otherwise.
+      getAccessibleFolder(uri) {
+        const result = getAccessibleFolder(uri);
+        if (result?.folder && !("server" in result.folder)) result.folder.server = account.incomingServer;
+        return result;
+      },
       MailServices: {
-        accounts: { getAccount: (id) => id === account.key ? account : null },
+        accounts: {
+          getAccount: (id) => id === account.key ? account : null,
+          findAccountForServer: (server) => server === account.incomingServer ? account : null,
+        },
         filters: {
           getTempFilterList() {
             const list = makeList();
@@ -2103,6 +2115,65 @@ describe("stored filter actions need the calling client's capabilities", () => {
     }
     assert.equal(h.snapshot(), before);
     assert.equal(h.filterList.saveAttempts, 0);
+  });
+
+  // Folders whose Trash flag a test controls.
+  function trashAwareFolders() {
+    const folders = {
+      "local://account/Trash": { URI: "local://account/Trash", isSpecialFolder: () => true },
+      "local://account/Inbox": { URI: "local://account/Inbox", isSpecialFolder: () => false },
+    };
+    return { folders, getAccessibleFolder: (uri) => ({ folder: folders[uri] || makeAccessibleFolder(uri) }) };
+  }
+
+  it("Delete rules need mail.deletePermanent where they delete permanently", () => {
+    const granted = ["filters.manage", "filters.run", "mail.delete", "mail.metadata"];
+    const { getAccessibleFolder } = trashAwareFolders();
+    const h = makeFilterHarness({ granted, getAccessibleFolder });
+    h.ci.nsMsgFolderFlags = { Trash: 0x100 };
+    h.seed({ name: "Delete", actions: [{ type: "delete" }] });
+    // Trash: Thunderbird deletes storage there.
+    const inTrash = h.api.applyFilters("account", "local://account/Trash");
+    assert.deepEqual(Array.from(inTrash.skipped, (entry) => `${entry.name}:${entry.reason}`), ["Delete:missing-capability"]);
+    assert.equal(h.submissions.length, 0);
+    // Elsewhere on a non-IMAP account it moves to Trash.
+    const inInbox = h.api.applyFilters("account", "local://account/Inbox");
+    assert.deepEqual(Array.from(inInbox.submitted), ["Delete"]);
+  });
+
+  it("Delete rules on IMAP without move-to-Trash need mail.deletePermanent", () => {
+    const granted = ["filters.manage", "filters.run", "mail.delete", "mail.metadata"];
+    const h = makeFilterHarness({ granted });
+    const server = h.folder.server;
+    h.folder.isSpecialFolder = () => false;
+    server.type = "imap";
+    server.QueryInterface = () => ({ deleteModel: 1 });
+    h.ci.nsIImapIncomingServer = {};
+    h.ci.nsMsgImapDeleteModels = { IMAPDelete: 0, MoveToTrash: 1, DeleteNoTrash: 2 };
+    h.ci.nsMsgFolderFlags = { Trash: 0x100 };
+    const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
+    const created = h.api.createFilter("account", "Move model", true, undefined, conditions, [{ type: "delete" }]);
+    assert.equal(created.success, true, created.error);
+    server.QueryInterface = () => ({ deleteModel: 2 });
+    const refused = h.api.createFilter("account", "No trash", true, undefined, conditions, [{ type: "delete" }]);
+    assert.match(refused.error, /require mail\.deletePermanent/);
+    const applied = h.api.applyFilters("account", h.folder.URI);
+    assert.deepEqual(Array.from(applied.skipped, (entry) => `${entry.name}:${entry.reason}`), ["Move model:missing-capability"]);
+    assert.equal(h.submissions.length, 0);
+  });
+
+  it("Forward rules need an identity of the filtered account", () => {
+    const h = makeFilterHarness({ allowSend: true, identity: null });
+    const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
+    const created = h.api.createFilter("account", "Forward", true, undefined, conditions, [{ type: "forward", value: "target@example.invalid" }]);
+    assert.match(created.error, /identity of this \(accessible\) account/);
+    h.seed({ name: "Stored forward", actions: [{ type: "forward", value: "target@example.invalid" }] });
+    const applied = h.api.applyFilters("account", h.folder.URI);
+    assert.deepEqual(Array.from(applied.skipped, (entry) => ({ ...entry })), [{ name: "Stored forward", reason: "unauthorized-sender" }]);
+    assert.equal(h.submissions.length, 0);
+    const updated = h.api.updateFilter("account", 0, "Renamed");
+    assert.match(updated.error, /identity of this \(accessible\) account/);
+    assert.equal(h.api.updateFilter("account", 0, undefined, false).success, true);
   });
 
   it("updateFilter always allows disabling such a rule", () => {

@@ -1925,13 +1925,17 @@ function getFilterActionRestriction(filter, { allowSending = isFilterSendAllowed
 
 // Capabilities a stored filter's actions need when it runs that the calling
 // client lacks (rules: core/policy.sys.mjs). Unknown actions never pass.
-function missingFilterCapabilities(filter, hasCapability) {
+// deletesPermanently: where the rule runs, "Delete" does not move to Trash
+// (Trash itself, IMAP without move-to-Trash).
+function missingFilterCapabilities(filter, hasCapability, { deletesPermanently = false } = {}) {
   const names = [];
   for (let i = 0; i < filter.actionCount; i++) {
     const spec = ACTION_SPECS[filter.getActionAt(i).type];
     names.push(spec ? spec.action : "custom");
   }
-  return Core.policy.filterActionCapabilities(names).filter(cap => !hasCapability(cap));
+  const needed = Core.policy.filterActionCapabilities(names);
+  if (deletesPermanently && names.includes("delete")) needed.push("mail.deletePermanent");
+  return [...new Set(needed)].filter(cap => !hasCapability(cap));
 }
 
 // isInAB/isntInAB conditions consult an address book whenever the rule runs,
@@ -11176,6 +11180,46 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               };
             }
 
+            // Whether a filter "Delete" action deletes permanently: Thunderbird
+            // deletes storage in Trash (and below) and for IMAP delete models
+            // other than move-to-Trash. Unreadable state counts as permanent.
+            function filterDeleteIsPermanent(server, folder = null) {
+              try {
+                if (folder && folder.isSpecialFolder(Ci.nsMsgFolderFlags.Trash, true)) return true;
+                if (server?.type !== "imap") return false;
+                return server.QueryInterface(Ci.nsIImapIncomingServer).deleteModel !==
+                  Ci.nsMsgImapDeleteModels.MoveToTrash;
+              } catch {
+                return true;
+              }
+            }
+
+            // Forward actions send through the default identity of the account
+            // that owns the filtered folder's server; without one Thunderbird
+            // falls back to the global default identity (nsMsgComposeService::
+            // ForwardMessage), which may belong to an account this client must
+            // not use. Reply templates only use the account's own identities.
+            function filterHasForward(filter) {
+              const forward = resolveXpcomConstant("nsMsgFilterAction", "Forward");
+              for (let i = 0; i < filter.actionCount; i++) {
+                if (filter.getActionAt(i).type === forward) return true;
+              }
+              return false;
+            }
+            function forwardSenderAuthorized(server) {
+              try {
+                const account = MailServices.accounts.findAccountForServer(server);
+                return !!account && isAccountAllowed(account.key) && !!account.defaultIdentity;
+              } catch {
+                return false;
+              }
+            }
+            const FORWARD_SENDER_ERROR = "Forward filter actions need an identity of this (accessible) account; otherwise Thunderbird would send from the default account";
+
+            function filterCapabilityError(missing) {
+              return { error: `Not permitted for this client: the filter's actions require ${missing.join(", ")}. Grant it in the Thunderbird MCP options.` };
+            }
+
             // ── Filter tool handlers ──
 
             function listFilters(accountId) {
@@ -11252,7 +11296,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                 const fl = getFilterListForAccount(accountId);
                 if (fl.error) return fl;
-                const { filterList } = fl;
+                const { filterList, server } = fl;
 
                 const filter = filterList.createFilter(name);
                 filter.enabled = enabled !== false;
@@ -11260,6 +11304,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                 buildTerms(filter, conditions);
                 buildActions(filter, actions, { checkTargetFolder: getAccessibleFolder });
+                const missing = missingFilterCapabilities(filter, clientHasCapability, {
+                  deletesPermanently: filterDeleteIsPermanent(server),
+                });
+                if (missing.length) return filterCapabilityError(missing);
+                if (filterHasForward(filter) && !forwardSenderAuthorized(server)) return { error: FORWARD_SENDER_ERROR };
                 validateFilterForWrite(filter, { checkTargetFolder: getAccessibleFolder, addressBooksRestricted: isAddressBookAccessRestricted() });
 
                 const idx = (insertAtIndex != null && insertAtIndex >= 0)
@@ -11310,7 +11359,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                 const fl = getFilterListForAccount(accountId);
                 if (fl.error) return fl;
-                const { filterList } = fl;
+                const { filterList, server } = fl;
 
                 if (filterIndex < 0 || filterIndex >= filterList.filterCount) {
                   return { error: `Invalid filter index: ${filterIndex}` };
@@ -11320,16 +11369,6 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 const changes = [];
                 if (filter.unparseable) {
                   return { error: "Cannot update an unparseable filter; repair it in Thunderbird or delete it" };
-                }
-                // Enabling, renaming or widening a stored rule changes what its
-                // existing actions do; only disabling is always allowed. New
-                // actions replace the stored ones and were checked by the policy.
-                const onlyDisables = enabled === false && name === undefined && type === undefined
-                  && conditions === undefined;
-                const missingForStored = onlyDisables || actions !== undefined
-                  ? [] : missingFilterCapabilities(filter, clientHasCapability);
-                if (missingForStored.length) {
-                  return { error: `Not permitted for this client: the filter's actions require ${missingForStored.join(", ")}. Grant it in the Thunderbird MCP options.` };
                 }
 
                 // Validate a detached replacement even for metadata-only updates.
@@ -11356,6 +11395,15 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 }
                 const onlyDisable = enabled === false && name === undefined && type === undefined
                   && conditions === undefined && actions === undefined;
+                // The resulting rule (new or retained actions) runs with this
+                // client's authority; only disabling is always allowed.
+                if (!onlyDisable) {
+                  const missing = missingFilterCapabilities(candidate, clientHasCapability, {
+                    deletesPermanently: filterDeleteIsPermanent(server),
+                  });
+                  if (missing.length) return filterCapabilityError(missing);
+                  if (filterHasForward(candidate) && !forwardSenderAuthorized(server)) return { error: FORWARD_SENDER_ERROR };
+                }
                 validateFilterForWrite(candidate, {
                   onlyDisable,
                   checkTargetFolder: getAccessibleFolder,
@@ -11452,11 +11500,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               try {
                 const fl = getFilterListForAccount(accountId);
                 if (fl.error) return fl;
-                const { filterList } = fl;
+                const { filterList, server } = fl;
 
                 const afResult = getAccessibleFolder(folderPath);
                 if (afResult.error) return afResult;
                 const folder = afResult.folder;
+                const deletesPermanently = filterDeleteIsPermanent(server, folder);
 
                 // Try MailServices.filters first, fall back to XPCOM contract ID
                 let filterService;
@@ -11488,7 +11537,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   else reason = getFilterActionRestriction(filter, { allowSending, checkTargetFolder: getAccessibleFolder });
                   // Rules run with this client's authority: skip rules whose
                   // actions it may not perform (forward/reply, move, delete...).
-                  if (!reason && missingFilterCapabilities(filter, clientHasCapability).length) reason = "missing-capability";
+                  if (!reason && missingFilterCapabilities(filter, clientHasCapability, { deletesPermanently }).length) {
+                    reason = "missing-capability";
+                  }
+                  if (!reason && filterHasForward(filter) && !forwardSenderAuthorized(folder.server)) {
+                    reason = "unauthorized-sender";
+                  }
                   if (reason === "custom") {
                     return { error: `Custom filter actions are unsupported (filter: ${filter.filterName})` };
                   }
