@@ -1677,7 +1677,7 @@ const FILTER_ACTION_VALUE_DESCRIPTION = (() => {
   return `Action parameter, required for every action that takes one. ${groups.join("; ")}`;
 })();
 
-const ADDRESS_BOOK_CONDITION_ERROR = 'Address book not accessible: isInAB/isntInAB conditions require "Allow all address books" while account restrictions are active';
+const ADDRESS_BOOK_CONDITION_ERROR = 'Address book not accessible: isInAB/isntInAB conditions need contacts.read and address-book access for this client, and "Allow all address books" while account restrictions are active';
 
 const CUSTOM_ONLY_NOTE = "needs a customId this API does not expose; listFilters reports existing ones and updateFilter keeps them";
 
@@ -4798,17 +4798,18 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               if (mode !== Ci.nsIMsgCompDeliverMode.SaveAsDraft) {
                 // Replies may be filed in the original's folder
                 // (fccReplyFollowsParent, MimeMessageUtils getFcc).
-                const extraServers = [];
+                const extraTargets = [];
                 const replyTypes = ["Reply", "ReplyAll", "ReplyToSender", "ReplyToGroup", "ReplyToSenderAndGroup", "ReplyToList"]
                   .map(name => Ci.nsIMsgCompType[name]).filter(value => value !== undefined);
                 if (originalMsgURI && replyTypes.includes(compType) && identity.fccReplyFollowsParent) {
                   try {
-                    extraServers.push(MailServices.messageServiceFromURI(originalMsgURI).messageURIToMsgHdr(originalMsgURI).folder.server);
+                    const parent = MailServices.messageServiceFromURI(originalMsgURI).messageURIToMsgHdr(originalMsgURI).folder;
+                    extraTargets.push({ server: parent.server, folder: parent });
                   } catch {
                     return Promise.resolve({ error: "Not sent: the folder of the original message could not be determined for the reply copy" });
                   }
                 }
-                const restriction = postOutgoingFilterRestriction(identity, { extraServers });
+                const restriction = postOutgoingFilterRestriction(identity, { extraTargets });
                 if (restriction) return Promise.resolve({ error: `Not sent: ${restriction}` });
                 let recipients;
                 try {
@@ -11459,7 +11460,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             }
             // Returns an error message, or null if the rule's sending actions
             // can only send through accounts this client may use.
-            function filterSenderRestriction(filter, server, { includeDeferred, visited = new Set() }) {
+            // folder: where the rule runs, if known (reply copies may be filed there).
+            function filterSenderRestriction(filter, server, { includeDeferred, visited = new Set(), folder = null }) {
               const { forward, reply } = filterSendingActions(filter);
               if (!forward && !reply) return null;
               try {
@@ -11515,8 +11517,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   // copy's account; a reply may be filed next to the original.
                   for (const identity of identities) {
                     const followsParent = reply && identity.fccReplyFollowsParent;
-                    const extraServers = followsParent ? [server, sender.incomingServer] : [];
-                    const restriction = postOutgoingFilterRestriction(identity, { extraServers, visited });
+                    const extraTargets = !followsParent ? []
+                      : folder ? [{ server: folder.server, folder }]
+                      : [{ server, folder: null }, { server: sender.incomingServer, folder: null }];
+                    const restriction = postOutgoingFilterRestriction(identity, { extraTargets, visited });
                     if (restriction) return `Forward/Reply filter actions are refused: ${restriction}`;
                   }
                 }
@@ -11534,32 +11538,38 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             // Sends that these filters trigger are followed transitively;
             // visited holds the filters already checked on this chain, so
             // every filter is checked once and the walk terminates.
-            function postOutgoingFilterRestriction(identity, { extraServers = [], visited = new Set() } = {}) {
+            // extraTargets: [{ server, folder }] where the copy may be filed
+            // instead (folder null when unknown); the folder matters for
+            // permanent deletion (Trash) and is part of the visited key.
+            function postOutgoingFilterRestriction(identity, { extraTargets = [], visited = new Set() } = {}) {
               try {
                 if (!identity.doFcc) return null;
                 const postOutgoing = resolveXpcomConstant("nsMsgFilterType", "PostOutgoing");
                 if (postOutgoing === undefined) return null;
-                const targets = identityFolderTargetServers(identity, identity.fccFolderURI || identity.fccFolder || "");
-                if (!targets) return "the Sent folder's account could not be determined";
-                const servers = [...targets];
-                for (const server of extraServers) if (server && !servers.includes(server)) servers.push(server);
-                const addressBooksRestricted = isAddressBookAccessRestricted();
-                for (const server of servers) {
+                const fccUri = identity.fccFolderURI || identity.fccFolder || "";
+                let fccFolder = null;
+                try { fccFolder = fccUri ? MailServices.folderLookup.getFolderForURL(fccUri) : null; } catch { fccFolder = null; }
+                const servers = identityFolderTargetServers(identity, fccUri);
+                if (!servers) return "the Sent folder's account could not be determined";
+                const targets = fccFolder ? [{ server: fccFolder.server, folder: fccFolder }] : servers.map(server => ({ server, folder: null }));
+                for (const target of extraTargets) if (target?.server) targets.push(target);
+                const addressBooksRestricted = filterAddressBooksRestricted();
+                for (const { server, folder } of targets) {
                   if (server.canHaveFilters === false) continue;
                   const filterList = server.getFilterList(null);
                   for (let i = 0; i < filterList.filterCount; i++) {
                     const filter = filterList.getFilterAt(i);
                     if (!filter.enabled || !(filter.filterType & postOutgoing)) continue;
-                    const key = `${server.serverURI}#${i}#${filter.filterName}`;
+                    const key = `${server.serverURI}#${i}#${filter.filterName}#${folder?.URI || ""}`;
                     if (visited.has(key)) continue;
                     visited.add(key);
                     let reason = filter.unparseable ? "unparseable" : null;
                     if (!reason) reason = getFilterActionRestriction(filter, { allowSending: true, checkTargetFolder: getAccessibleFolder });
-                    if (!reason && missingFilterCapabilities(filter, clientHasCapability, { deletesPermanently: filterDeleteIsPermanent(server) }).length) {
+                    if (!reason && missingFilterCapabilities(filter, clientHasCapability, { deletesPermanently: filterDeleteIsPermanent(server, folder) }).length) {
                       reason = "missing-capability";
                     }
                     if (!reason) {
-                      const senderError = filterSenderRestriction(filter, server, { includeDeferred: false, visited });
+                      const senderError = filterSenderRestriction(filter, server, { includeDeferred: false, visited, folder });
                       if (senderError) reason = `sends: ${senderError}`;
                     }
                     if (!reason) reason = getFilterConditionRestriction(filter, { addressBooksRestricted });
@@ -11575,6 +11585,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             const INLINE_FORWARD_ERROR = "Forward filter actions are refused while Thunderbird forwards inline (mail.forward_message_mode != 0) and identities of accounts this client may not use exist: the forwarded message can choose the sender identity. Forward as attachment or grant the client all accounts";
             const SENT_COPY_ERROR = "Forward/Reply filter actions would file sent copies into an account this client may not use (identity's Sent folder)";
             const SENDER_ACCOUNT_ERROR = "Forward/Reply filter actions may only send through accessible accounts (including POP accounts that deliver into this account, and Thunderbird's default identity when the account has none); otherwise Thunderbird would send from another account";
+
+            // isInAB/isntInAB conditions reveal address-book membership, so
+            // they need contacts.read on top of address-book access.
+            function filterAddressBooksRestricted() {
+              return isAddressBookAccessRestricted() || !clientHasCapability("contacts.read");
+            }
 
             function filterCapabilityError(missing) {
               return { error: `Not permitted for this client: the filter's actions require ${missing.join(", ")}. Grant it in the Thunderbird MCP options.` };
@@ -11670,7 +11686,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 if (missing.length) return filterCapabilityError(missing);
                 const senderError = filterSenderRestriction(filter, server, { includeDeferred: true });
                 if (senderError) return { error: senderError };
-                validateFilterForWrite(filter, { checkTargetFolder: getAccessibleFolder, addressBooksRestricted: isAddressBookAccessRestricted() });
+                validateFilterForWrite(filter, { checkTargetFolder: getAccessibleFolder, addressBooksRestricted: filterAddressBooksRestricted() });
 
                 const idx = (insertAtIndex != null && insertAtIndex >= 0)
                   ? Math.min(insertAtIndex, filterList.filterCount)
@@ -11769,7 +11785,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 validateFilterForWrite(candidate, {
                   onlyDisable,
                   checkTargetFolder: getAccessibleFolder,
-                  addressBooksRestricted: isAddressBookAccessRestricted(),
+                  addressBooksRestricted: filterAddressBooksRestricted(),
                 });
 
                 filterList.setFilterAt(filterIndex, candidate);
@@ -11888,7 +11904,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 const manualType = resolveXpcomConstant("nsMsgFilterType", "Manual");
                 if (manualType === undefined) return { error: "Manual filters are unavailable in this Thunderbird version" };
                 const allowSending = isFilterSendAllowed();
-                const addressBooksRestricted = isAddressBookAccessRestricted();
+                const addressBooksRestricted = filterAddressBooksRestricted();
                 const temporaryList = filterService.getTempFilterList(folder);
                 const submitted = [];
                 const skipped = [];
@@ -11904,7 +11920,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   if (!reason && missingFilterCapabilities(filter, clientHasCapability, { deletesPermanently }).length) {
                     reason = "missing-capability";
                   }
-                  if (!reason && filterSenderRestriction(filter, folder.server, { includeDeferred: false })) {
+                  if (!reason && filterSenderRestriction(filter, folder.server, { includeDeferred: false, folder })) {
                     reason = "unauthorized-sender";
                   }
                   if (reason === "custom") {

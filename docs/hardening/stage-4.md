@@ -236,3 +236,18 @@ Both reviewers reported the same three points:
 * Note: one full native run (all files in parallel) failed 3 subtests of the
   send-chain block once; the file alone and two further full runs passed.
   Treated as load-related flakiness of the timing-based chain test.
+
+## Review round 8 – fixes
+
+Opus: no substantive findings. Sol:
+
+* Address-book filter conditions (`isInAB`/`isntInAB`) reveal contact
+  membership through the rule's effect; they now need `contacts.read` in
+  addition to address-book access (create, update, `applyFilters`,
+  Post-outgoing checks).
+* The Post-outgoing check keeps the actual folder of each possible copy
+  target (configured Sent folder if it exists, reply-parent folder with
+  `fccReplyFollowsParent`), so a Delete rule on a reply copy filed in Trash
+  is recognised as permanent. The folder is part of the visited key.
+* Native: both refused for restricted clients, allowed for full access;
+  both fail on 562726c.

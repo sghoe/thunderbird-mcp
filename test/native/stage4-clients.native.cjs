@@ -673,3 +673,58 @@ describe("send chains and address collection (native)", { skip: !h.thunderbirdBi
     }
   });
 });
+
+// Round 8: address-book conditions need contacts.read; a Post-outgoing Delete
+// on a reply copy filed in Trash deletes permanently.
+describe("filter conditions and reply copies in Trash (native)", { skip: !h.thunderbirdBinary() && "THUNDERBIRD_BIN not set" }, () => {
+  let tb;
+  let allCaps;
+  before(async () => {
+    const policy = await import(require("node:url").pathToFileURL(require("node:path").join(h.EXTENSION_DIR, "mcp_server", "core", "policy.sys.mjs")).href);
+    allCaps = Object.keys(policy.CAPABILITIES);
+    tb = await h.startThunderbird({
+      mailboxes: { alice: { Trash: f.simple({ id: "trashed@sender.test", from: "Carol <carol@sender.test>", to: f.ALLOWED_EMAIL, subject: "trashreply original", text: "x" }) } },
+      extraPrefs: { "mail.identity.id1.fcc_reply_follows_parent": true },
+      clients: [
+        { name: "harness" },
+        { name: "no-contacts-read", capabilities: allCaps.filter((c) => c !== "contacts.read") },
+        { name: "no-permanent-delete", capabilities: allCaps.filter((c) => c !== "mail.deletePermanent") },
+      ],
+    });
+    await tb.waitForMessages(`${ALICE}/Trash`, 1);
+  });
+  after(async () => { await tb?.stop(); });
+
+  it("refuses address-book filter conditions without contacts.read", async () => {
+    const args = {
+      accountId: "account1", name: "Known senders", type: 16,
+      conditions: [{ attrib: "from", op: "isInAB", value: "jsaddrbook://abook.sqlite" }],
+      actions: [{ type: "markRead" }],
+    };
+    const refused = await tb.call("createFilter", args, { client: "no-contacts-read" });
+    assert.match(refused.result?.error || "", /Address book not accessible: .*contacts\.read/, JSON.stringify(refused));
+    const ok = await tb.call("createFilter", args);
+    assert.equal(ok.result?.success, true, JSON.stringify(ok));
+    await tb.call("deleteFilter", { accountId: "account1", filterIndex: 0 });
+  });
+
+  it("refuses a direct reply whose copy in Trash a Post-outgoing Delete would purge", async () => {
+    const del = await tb.call("createFilter", {
+      accountId: "account1", name: "Delete sent", type: 64,
+      conditions: [{ attrib: "subject", op: "contains", value: "trashreply" }], actions: [{ type: "delete" }],
+    });
+    assert.equal(del.result?.success, true, JSON.stringify(del));
+    try {
+      const refused = await tb.call("replyToMessage", {
+        messageId: "trashed@sender.test", folderPath: `${ALICE}/Trash`, body: "r", skipReview: true,
+      }, { client: "no-permanent-delete" });
+      assert.match(refused.result?.error || "", /Post-outgoing filter "Delete sent".*missing-capability/, JSON.stringify(refused));
+      const ok = await tb.call("replyToMessage", {
+        messageId: "trashed@sender.test", folderPath: `${ALICE}/Trash`, body: "r", skipReview: true,
+      });
+      assert.equal(ok.result?.success, true, JSON.stringify(ok));
+    } finally {
+      await tb.call("deleteFilter", { accountId: "account1", filterIndex: 0 });
+    }
+  });
+});

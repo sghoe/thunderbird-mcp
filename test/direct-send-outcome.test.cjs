@@ -217,9 +217,12 @@ describe("Post-outgoing filters of the reply's copy folder", () => {
       await new Promise(resolve => setImmediate(resolve));
       const contexts = h.state.postOutgoingContexts || [];
       assert.equal(contexts.length, 1);
-      const extra = contexts[0].extraServers || [];
+      const extra = contexts[0].extraTargets || [];
       assert.equal(extra.length, followsParent ? 1 : 0);
-      if (followsParent) assert.equal(extra[0], h.hdr.folder.server);
+      if (followsParent) {
+        assert.equal(extra[0].server, h.hdr.folder.server);
+        assert.equal(extra[0].folder, h.hdr.folder, "the actual folder (e.g. Trash) is passed on");
+      }
       h.state.deliveryStarted();
       h.state.listener.onStopSending("id", 0);
       assert.equal((await result).success, true);
