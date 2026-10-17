@@ -2577,6 +2577,17 @@ describe("stored filter actions need the calling client's capabilities", () => {
       assert.equal(disabled.success, true, disabled.error);
     });
 
+    it("treats switching a rule on as a change that must be registered", () => {
+      const h = makeFilterHarness({ granted: own, registryError: "The filter register is full" });
+      h.seed({ name: "Off rule", enabled: false });
+      assert.match(h.api.updateFilter("account", 0, undefined, true).error, /register is full/);
+      assert.equal(h.filterList.filters[0].enabled, false, "still off");
+      const failing = makeFilterHarness({ granted: own, registerFails: true });
+      failing.seed({ name: "Off rule", enabled: false });
+      assert.match(failing.api.updateFilter("account", 0, undefined, true).error, /could not be recorded.*not applied/);
+      assert.equal(failing.filterList.filters[0].enabled, false, "taken back");
+    });
+
     it("needs filters.foreign to change, reorder or delete rules not created through MCP", () => {
       const h = makeFilterHarness({ granted: own, registered: () => false });
       h.seed({ name: "User rule A" });

@@ -73,6 +73,7 @@ function loadSend(options = {}) {
       accounts: { accounts: [{ key: "account", identities: [identity] }] },
       messageServiceFromURI: () => ({ messageURIToMsgHdr: () => hdr }),
     },
+    _pinnedAttachFiles: state.pinned = new Set(),
     releaseOutgoingAttachments(descs) { state.released = [...(state.released || []), descs]; },
     // Whether a saved message is found in its folder (STORED MESSAGE CONFIRMATION).
     folderMessageKeys: (folderURI) => new Set([`known:${folderURI}`]),
@@ -126,7 +127,7 @@ function loadSend(options = {}) {
           undefined, undefined, undefined, undefined, true);
       } else {
         result = sandbox.sendMessageDirectly({ body: "Body", addAttachment() {} },
-          options.noIdentity ? null : identity, [], "message-uri", 0, mode, "text/plain");
+          options.noIdentity ? null : identity, options.attachDescs || [], "message-uri", 0, mode, "text/plain");
       }
       state.promise = result.then(value => { state.result = value; return value; });
       return state.promise;
@@ -473,5 +474,37 @@ describe("saved drafts must be found in their folder (Stage 5 review round 2)", 
     assert.equal(value.operationState, "unknown");
     assert.match(value.error, /could not be found in the intended folder/);
     assert.equal((h.state.released || []).length, 0, "copies stay after an unknown outcome");
+  });
+});
+
+describe("direct saves run one at a time; their files are pinned (Stage 5 review round 3)", () => {
+  const tick = () => new Promise(resolve => setImmediate(resolve));
+
+  it("starts a second Drafts save only after the first one has finished", async () => {
+    const h = loadSend();
+    const first = h.start("direct", modes.SaveAsDraft);
+    const firstListener = h.state.listener;
+    const second = h.start("direct", modes.SaveAsDraft);
+    await tick();
+    assert.equal(h.state.calls.length, 1, "the second save waits");
+    firstListener.onStopCopy(0);
+    assert.equal((await first).operationState, "completed");
+    await tick();
+    assert.equal(h.state.calls.length, 2);
+    h.state.listener.onStopCopy(0);
+    assert.equal((await second).operationState, "completed");
+  });
+
+  it("does not queue immediate sends behind a save", async () => {
+    const h = loadSend();
+    h.start("direct", modes.SaveAsDraft);
+    h.start("direct", modes.Now);
+    assert.equal(h.state.calls.length, 2);
+  });
+
+  it("pins the operation's private files while it runs", async () => {
+    const h = loadSend({ attachDescs: [{ tempPath: "/outgoing/1_1_a.txt" }] });
+    h.start("direct", modes.Now);
+    assert.ok(h.state.pinned.has("/outgoing/1_1_a.txt"));
   });
 });

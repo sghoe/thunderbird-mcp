@@ -31,6 +31,7 @@ function load({ content = Buffer.from("contract v1"), growBy = 0, shrinkBy = 0, 
   }
   const sandbox = {
     _tempAttachFiles: new Set(["/unrelated"]),
+    _pinnedAttachFiles: new Set(),
     _tempFileCounter: 0,
     console: { warn() {} },
     Ci: { nsIFile: { DIRECTORY_TYPE: 1 } },
@@ -133,11 +134,13 @@ describe("content-bound path attachments (Stage 5)", () => {
   it("releases only this call's tracked copies", () => {
     const { sandbox, state, original } = load();
     const copy = sandbox.copyCheckedAttachmentFile(original, original.fileSize, []);
+    sandbox._pinnedAttachFiles.add(copy.path);
     sandbox.releaseOutgoingAttachments([
       { tempPath: copy.path }, { tempPath: "/untracked" }, { url: "mailbox-message://part" }, null,
     ]);
     assert.deepEqual(state.removed, [copy.path]);
     assert.equal(sandbox._tempAttachFiles.has(copy.path), false);
+    assert.equal(sandbox._pinnedAttachFiles.has(copy.path), false, "unpinned once released");
     assert.ok(sandbox._tempAttachFiles.has("/unrelated"));
   });
 });

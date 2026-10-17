@@ -167,6 +167,13 @@ Negative controls: without adoption the native hand-over test fails
 (file left behind); the unit tests cover the multibyte size limit,
 partial groups, undo after a failed register write, the unconfirmed
 draft and the refused waiting call.
+## Review round 3 (Sol, Opus)
+
+| Finding | Fix |
+|---|---|
+| Switching a disabled rule on does not change its fingerprint, so it skipped the register pre-check and the undo; with a full register a client could switch on a user's Forward rule that revocation never reaches (Sol, Opus) | switching a rule on counts as a change that must be recorded: pre-check before saving, undo if recording fails (renaming and disabling stay always possible) |
+| Two concurrent saves replacing drafts with the same Message-ID could each find the other's new header (a failed one reporting `completed`) (Sol) | direct saves into Drafts/Outbox run one at a time (immediate sends are not queued), so the key snapshot of a save only sees its own copy. Residual: a save that timed out (`unknown`) may still finish while the next one runs; a draft the user re-saves by hand in the same moment is not distinguished |
+| Add-on shutdown deleted files of running direct operations and of `unknown` outcomes (no compose window references them) (Sol) | such files are pinned from the start of the operation until a known outcome releases them; pinned files survive an add-on shutdown and are handed over like window files; adopted files stay pinned until application shutdown. The cleanup is a marked block with unit tests (`test/shutdown-cleanup.test.cjs`; negative control: without the pin check the test fails) |
 ## Bound approvals – how each approval is tied to the concrete action
 
 | Approval | Bound to | Where |

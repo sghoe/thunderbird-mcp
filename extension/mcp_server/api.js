@@ -819,7 +819,12 @@ function adoptRetainedAttachmentFiles() {
   } catch { /* nothing to adopt */ }
   return adopted;
 }
-const _tempAttachFiles = new Set(adoptRetainedAttachmentFiles());
+const _adoptedAttachFiles = adoptRetainedAttachmentFiles();
+const _tempAttachFiles = new Set(_adoptedAttachFiles);
+// Files a direct send/save still needs (running, or outcome unknown); they
+// survive an add-on shutdown like files of open compose windows. Adopted
+// files stay pinned until application shutdown.
+const _pinnedAttachFiles = new Set(_adoptedAttachFiles);
 // Track compose windows already claimed by an in-flight replyToMessage or
 // forwardMessage call, so concurrent reply/forward operations on the same
 // original message never bind two observers to the same compose window
@@ -4290,6 +4295,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   const file = createLocalFile(desc.tempPath);
                   if (file.exists()) file.remove(false);
                   _tempAttachFiles.delete(desc.tempPath);
+                  _pinnedAttachFiles.delete(desc.tempPath);
                 } catch (e) {
                   console.warn("thunderbird-mcp: temporary attachment cleanup failed:", e);
                 }
@@ -5195,8 +5201,26 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
             // Private attachment copies are no longer needed once the outcome is
             // known; after an unknown outcome Thunderbird may still read them.
+            // Saves into Drafts/Outbox run one at a time: their completion is
+            // confirmed by a message that appeared in the folder since the copy
+            // started, and a replaced draft's new header carries the old
+            // Message-ID, so two concurrent saves could claim each other's copy.
+            let directSaveTail = null; // last queued save, null while idle
             function sendMessageDirectly(composeFields, identity, attachDescs, ...rest) {
-              return sendMessageDirectlyUnreleased(composeFields, identity, attachDescs, ...rest).then(result => {
+              for (const desc of attachDescs || []) if (desc?.tempPath) _pinnedAttachFiles.add(desc.tempPath);
+              const mode = rest[2] ?? Ci.nsIMsgCompDeliverMode.Now;
+              const run = () => sendMessageDirectlyUnreleased(composeFields, identity, attachDescs, ...rest);
+              let operation;
+              if (mode === Ci.nsIMsgCompDeliverMode.Now) {
+                operation = run();
+              } else {
+                operation = directSaveTail ? directSaveTail.then(run) : run();
+                const tail = operation.catch(() => {}).then(() => {
+                  if (directSaveTail === tail) directSaveTail = null;
+                });
+                directSaveTail = tail;
+              }
+              return operation.then(result => {
                 if (result?.operationState !== Core.operationState.OPERATION_STATES.UNKNOWN) releaseOutgoingAttachments(attachDescs);
                 return result;
               });
@@ -12588,9 +12612,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   addressBooksRestricted: filterAddressBooksRestricted(),
                 });
 
-                // A change of effect must be registrable; renaming or
-                // enabling/disabling keeps the effect and is always possible.
-                const effectChanged = filterFingerprint(candidate) !== oldFingerprint;
+                // A change of effect, and switching a rule on (the fingerprint
+                // leaves out the enabled state), must be registrable so that
+                // revoking the client reaches the rule; renaming and disabling
+                // are always possible.
+                const effectChanged = filterFingerprint(candidate) !== oldFingerprint || (candidate.enabled && !filter.enabled);
                 if (effectChanged) {
                   const registryError = filterRegistryRestriction(currentClientId(), account.key, { name: candidate.filterName, oldFingerprint, oldLiveMatches });
                   if (registryError) return registryError;
@@ -13878,8 +13904,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
     // the add-on stops (disable, update), files that open compose windows
     // still attach are kept and handed to the next instance; if the windows
     // cannot be inspected, all are kept. Application shutdown removes all.
+    // BEGIN SHUTDOWN ATTACHMENT CLEANUP
     // A window that is still loading, or a compose window without its
-    // compose state, cannot be inspected: then every file is kept.
+    // compose state, cannot be inspected: then every file is kept. Files of
+    // running or uncertain direct operations are kept as well.
     let attachmentsInUse = new Set();
     if (!isAppShutdown) {
       try {
@@ -13904,7 +13932,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
       try {
         const f = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
         f.initWithPath(tmpPath);
-        if (!isAppShutdown && (attachmentsInUse === null || attachmentsInUse.has(Services.io.newFileURI(f).spec))) {
+        if (!isAppShutdown && (attachmentsInUse === null || _pinnedAttachFiles.has(tmpPath) ||
+            attachmentsInUse.has(Services.io.newFileURI(f).spec))) {
           retainedAttachments.push(tmpPath);
           continue;
         }
@@ -13912,10 +13941,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
       } catch {}
     }
     _tempAttachFiles.clear();
+    _pinnedAttachFiles.clear();
     try {
       if (retainedAttachments.length) Services.prefs.setStringPref(PREF_RETAINED_ATTACHMENTS, JSON.stringify(retainedAttachments));
       else Services.prefs.clearUserPref(PREF_RETAINED_ATTACHMENTS);
     } catch { /* best effort */ }
+    // END SHUTDOWN ATTACHMENT CLEANUP
     if (isAppShutdown) return;
     resProto.setSubstitution("thunderbird-mcp-hardened", null);
     Services.obs.notifyObservers(null, "startupcache-invalidate");

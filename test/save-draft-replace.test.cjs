@@ -98,6 +98,7 @@ function loadDraftTools(options = {}) {
     },
     descsToMsgAttachments: descs => descs,
     releaseOutgoingAttachments() {},
+    _pinnedAttachFiles: new Set(),
     folderMessageKeys: () => new Set(),
     confirmMessageStored: async () => true,
     UNCONFIRMED_SAVE_ERROR: "unconfirmed",
