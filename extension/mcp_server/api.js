@@ -1937,12 +1937,15 @@ function missingFilterCapabilities(filter, hasCapability, { deletesPermanently =
   if (deletesPermanently && names.includes("delete")) needed.push("mail.deletePermanent");
   // A rule's effect reveals whether its conditions matched, so conditions
   // need the read rights for what they inspect: message metadata, and the
-  // body for body conditions. "Match all" inspects nothing.
+  // body for body conditions. "Match all" inspects nothing. Attributes the
+  // fork does not know (add-on custom conditions, e.g. body regexes) may
+  // read the body, so they need mail.body too (fail closed).
   try {
+    const known = new Set(Object.values(ATTRIB_MAP));
     for (const term of filter.searchTerms) {
       if (term.matchAll) continue;
       needed.push("mail.metadata");
-      if (term.attrib === ATTRIB_MAP.body) needed.push("mail.body");
+      if (term.attrib === ATTRIB_MAP.body || !known.has(term.attrib)) needed.push("mail.body");
     }
   } catch {
     needed.push("mail.metadata", "mail.body");
@@ -4627,7 +4630,21 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
             // END COMPOSE WINDOW DRAFT HELPER
 
-            const COMPOSE_AUTOSAVE_ERROR = "Thunderbird would autosave this review window into a Drafts folder of an account this client may not use (identity's Drafts setting); the compose window was closed";
+            // MsgComposeCommands.js schedules AutoSave with gAutoSaveInterval
+            // and reschedules itself; clearing the pending timer and the
+            // interval stops it for this window only (also if compose startup
+            // finishes later).
+            function disableComposeAutosave(composeWin) {
+              const stop = () => {
+                try { if (composeWin.gAutoSaveTimeout) composeWin.clearTimeout(composeWin.gAutoSaveTimeout); } catch { /* window gone */ }
+                try {
+                  composeWin.gAutoSaveTimeout = null;
+                  composeWin.gAutoSaveInterval = 0;
+                } catch { /* window gone */ }
+              };
+              stop();
+              try { composeWin.addEventListener("compose-startup-done", stop, { once: true }); } catch { /* window gone */ }
+            }
             const COMPOSE_IDENTITY_ERROR = "Thunderbird selected a sender identity of an account this client may not use (for example from the original message's X-Identity-Key or X-Account-Key header); the compose window was closed";
             function composeIdentityAccessible(composeWin) {
               try {
@@ -4716,10 +4733,14 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                           finish({ error: COMPOSE_IDENTITY_ERROR });
                           return;
                         }
-                        if (!identityAutosaveAllowed(composeWin.gCurrentIdentity || composeWin.gMsgCompose.identity)) {
-                          try { composeWin.close(); } catch {}
-                          finish({ error: COMPOSE_AUTOSAVE_ERROR });
-                          return;
+                        // Autosave would save the client-populated window as a
+                        // draft without a user decision. Without compose.draft, or
+                        // when the draft would land outside the client's rights,
+                        // autosave is switched off for this window (the user can
+                        // still save or send it).
+                        if (!clientHasCapability("compose.draft") ||
+                            !identityAutosaveAllowed(composeWin.gCurrentIdentity || composeWin.gMsgCompose.identity)) {
+                          disableComposeAutosave(composeWin);
                         }
 
                         try {
@@ -11834,11 +11855,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             // runFolder: where the rule runs (null: incoming mail, i.e. the
             // Inbox). Periodic rules see its state changes there and the
             // messages it puts into Inbox targets.
-            function rulePeriodicRestriction(filter, runServer, runFolder = null) {
+            // exclude: a stored rule being replaced by this one.
+            function rulePeriodicRestriction(filter, runServer, runFolder = null, { exclude = null } = {}) {
               if (clientIsUnrestricted()) return null;
               const visited = new Set();
               if (!runFolder || isPeriodicFolder(runFolder)) {
-                const here = periodicRulesRestriction(runServer, { visited });
+                const here = periodicRulesRestriction(runServer, { visited, exclude });
                 if (here) return here;
               }
               return ruleTargetRestriction(filter, visited);
@@ -12069,7 +12091,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   if (missing.length) return filterCapabilityError(missing);
                   const senderError = filterSenderRestriction(candidate, server, { includeDeferred: true });
                   if (senderError) return { error: senderError };
-                  const periodicError = rulePeriodicRestriction(candidate, server);
+                  const periodicError = rulePeriodicRestriction(candidate, server, null, { exclude: filter });
                   if (periodicError) return periodicError;
                 }
                 validateFilterForWrite(candidate, {

@@ -365,3 +365,22 @@ Forward rule after the moved range.
   check that Inbox's periodic rules.
 * Native: body-probe rule refused without `mail.body`; draft into a
   Drafts-flagged Inbox refused for a drafts-only client.
+
+## Review round 16 – fixes
+
+* Unknown condition attributes (add-on custom conditions such as body
+  regexes) need `mail.body` in addition to `mail.metadata` (Opus, Sol).
+* Autosave of review windows (Sol): without `compose.draft`, or when the
+  autosaved draft would land outside the client's rights (restricted
+  account, Inbox with periodic rules), autosave is switched off for that
+  window (`gAutoSaveInterval`/`gAutoSaveTimeout` of MsgComposeCommands.js)
+  instead of closing it; the user can still save or send. Full-access
+  clients keep Thunderbird's autosave.
+* Replacing a periodic rule (Sol): the stored rule is excluded from the
+  periodic check of its replacement, so a permitted new content is not
+  refused because of the old one.
+* Native: autosave off for a restricted target and without
+  `compose.draft`, on for full access.
+* One sequential native run failed one subtest of the Trash/periodic block
+  once; the block alone and two further full runs passed (59/59). Kept as an
+  observed timing flake.

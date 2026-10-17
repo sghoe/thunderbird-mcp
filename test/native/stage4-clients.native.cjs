@@ -444,7 +444,6 @@ describe("native follow-up effects stay within the client's accounts (native)", 
     return [...MailServices.folderLookup.getFolderForURL(args.uri).msgDatabase.enumerateMessages()].length;
   `, { uri });
   const setCharPref = (name, value) => tb.marionette.run("Services.prefs.setCharPref(args.name, args.value); return true;", { name, value });
-  const composeWindows = () => tb.marionette.run(`return [...Services.wm.getEnumerator("msgcompose")].length;`);
   const closeComposeWindows = () => tb.marionette.run(`for (const w of [...Services.wm.getEnumerator("msgcompose")]) w.close(); return true;`);
 
   before(async () => {
@@ -455,6 +454,7 @@ describe("native follow-up effects stay within the client's accounts (native)", 
         { name: "alice-local", accounts: ["account1", "account3"] },
         { name: "alice-only", accounts: ["account1"] },
         { name: "no-contacts", addressBooks: false },
+        { name: "review-only", capabilities: ["accounts.read", "mail.metadata", "mail.body", "compose.review"], accounts: ["account1"] },
       ],
     });
     await tb.waitForMessages(`${ALICE}/Inbox`, 1);
@@ -514,17 +514,33 @@ describe("native follow-up effects stay within the client's accounts (native)", 
     }
   });
 
-  it("refuses review windows that would autosave into a restricted Drafts folder", async () => {
+  const autosaveIntervals = () => tb.marionette.run(`return [...Services.wm.getEnumerator("msgcompose")].map(w => w.gAutoSaveInterval);`);
+
+  it("switches autosave off for review windows whose draft would land outside the client's rights", async () => {
     await setCharPref("mail.identity.id1.draft_folder", `${BOB}/Drafts`);
     try {
-      const refused = await tb.call("replyToMessage", { messageId: "orig@sender.test", folderPath: `${ALICE}/Inbox`, body: "reply" }, { client: "alice-local" });
-      assert.match(refused.result?.error || "", /autosave this review window/, JSON.stringify(refused));
-      await h.waitFor(async () => (await composeWindows()) === 0, { label: "window closed" });
+      const restricted = await tb.call("replyToMessage", { messageId: "orig@sender.test", folderPath: `${ALICE}/Inbox`, body: "reply" }, { client: "alice-local" });
+      assert.equal(restricted.result?.success, true, JSON.stringify(restricted));
+      assert.deepEqual(await autosaveIntervals(), [0]);
+      await closeComposeWindows();
+      // Full access keeps Thunderbird's autosave.
       const ok = await tb.call("replyToMessage", { messageId: "orig@sender.test", folderPath: `${ALICE}/Inbox`, body: "reply" });
       assert.equal(ok.result?.success, true, JSON.stringify(ok));
+      const [interval] = await autosaveIntervals();
+      assert.ok(interval > 0, String(interval));
     } finally {
       await closeComposeWindows();
       await setCharPref("mail.identity.id1.draft_folder", `${ALICE}/Drafts`);
+    }
+  });
+
+  it("switches autosave off for clients without compose.draft", async () => {
+    try {
+      const r = await tb.call("replyToMessage", { messageId: "orig@sender.test", folderPath: `${ALICE}/Inbox`, body: "reply" }, { client: "review-only" });
+      assert.equal(r.result?.success, true, JSON.stringify(r));
+      assert.deepEqual(await autosaveIntervals(), [0]);
+    } finally {
+      await closeComposeWindows();
     }
   });
 

@@ -2448,6 +2448,13 @@ describe("stored filter actions need the calling client's capabilities", () => {
       assert.equal(h.api.deleteFilter("account", 1).success, true);
     });
 
+    it("checks a replaced periodic rule by its new content, not the old one", () => {
+      const h = makeFilterHarness({ granted: ["filters.manage", "filters.run", "mail.metadata", "mail.flag"] });
+      h.seed({ name: "Periodic body rule", filterType: h.ci.nsMsgFilterType.Periodic, conditions: [{ attrib: "body", op: "contains", value: "x" }], actions: [{ type: "markRead" }] });
+      const result = h.api.updateFilter("account", 0, undefined, undefined, undefined, [{ attrib: "subject", op: "contains", value: "x" }]);
+      assert.equal(result.success, true, result.error);
+    });
+
     it("lets a client switch off or delete a periodic rule it may not run", () => {
       const h = makeFilterHarness({ allowSend: true, granted: [...readOnlyRun] });
       h.seed({ name: "Periodic forward", filterType: h.ci.nsMsgFilterType.Periodic, actions: [{ type: "forward", value: "target@example.invalid" }] });
@@ -2499,6 +2506,12 @@ describe("stored filter actions need the calling client's capabilities", () => {
     h.seed({ name: "Stored body rule", conditions: [{ attrib: "body", op: "contains", value: "cobalt" }] });
     const applied = h.api.applyFilters("account", h.folder.URI);
     assert.deepEqual(Array.from(applied.skipped, (e) => `${e.name}:${e.reason}`), ["Stored body rule:missing-capability"]);
+    // Unknown (add-on custom) condition attributes count as body access.
+    const custom = makeFilterHarness({ granted: [...granted, "mail.metadata"] });
+    const rule = custom.seed({ name: "Custom condition" });
+    rule.searchTerms[0].attrib = 9999;
+    const customRun = custom.api.applyFilters("account", custom.folder.URI);
+    assert.deepEqual(Array.from(customRun.skipped, (e) => `${e.name}:${e.reason}`), ["Custom condition:missing-capability"]);
     const ok = makeFilterHarness({ granted: [...granted, "mail.metadata", "mail.body"] });
     assert.equal(ok.api.createFilter("account", "Body", true, undefined, [{ attrib: "body", op: "contains", value: "cobalt" }], markRead).success, true);
   });
