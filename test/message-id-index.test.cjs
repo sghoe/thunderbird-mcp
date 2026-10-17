@@ -20,7 +20,9 @@ function load(shared = {}) {
   const timers = [];
   const sandbox = Object.assign(shared, {
     Date: { now: () => clock.now },
-    randomHex: () => "5e".repeat(16),
+    randomHex: (n) => require("node:crypto").randomBytes(n).toString("hex"),
+    // Module-level in api.js: survives server restarts of one add-on load.
+    _messageRefSecret: shared._messageRefSecret ?? null,
     sha256Hex: (text) => require("node:crypto").createHash("sha256").update(text, "latin1").digest("hex"),
     Ci: { nsITimer: { TYPE_ONE_SHOT: 0 } },
     Cc: { "@mozilla.org/timer;1": { createInstance: () => {
@@ -163,6 +165,7 @@ describe("ambiguity candidates follow mail.metadata (Stage 5 review round 6)", (
     const sandbox = {
       Date, Ci: { nsITimer: { TYPE_ONE_SHOT: 0 } }, Cc: {}, clientHasCapability: (cap) => granted.includes(cap),
       randomHex: () => "5e".repeat(16),
+      _messageRefSecret: null,
       sha256Hex: (text) => require("node:crypto").createHash("sha256").update(text, "latin1").digest("hex"),
     };
     vm.createContext(sandbox);
@@ -242,5 +245,20 @@ describe("references and literal Message-IDs (Stage 5 review rounds 7–9)", () 
     const { lookup } = load();
     const odd = { messageId: "msgref:5:boss-quarterly@corp.test", messageKey: 9, date: 2000, subject: "odd" };
     assert.equal(lookup(folder, dbWith([boss, odd]), odd.messageId).hdr.subject, "odd");
+  });
+});
+
+describe("reference secret per add-on load (Stage 5 review round 10)", () => {
+  it("keeps references valid across server restarts of the same add-on load", () => {
+    const shared = {};
+    const first = load(shared);
+    const boss = { messageId: "b@x", messageKey: 5, date: 1000 };
+    const ref = first.refFor(boss);
+    const second = load(shared); // e.g. after changing "Listen on all interfaces"
+    const db = { enumerateMessages: () => [boss], getMsgHdrForMessageID: () => boss, getMsgHdrForKey: (k) => (k === 5 ? boss : null) };
+    assert.equal(second.lookup(folder, db, ref).hdr, boss);
+    // A new add-on load has a new secret: old references are stale.
+    const reloaded = load({});
+    assert.equal(reloaded.lookup(folder, db, ref).staleRef, true);
   });
 });

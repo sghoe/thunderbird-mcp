@@ -2625,6 +2625,19 @@ describe("stored filter actions need the calling client's capabilities", () => {
       const unnamed = noRead.api.filterTargetRestriction({ URI: "imap://account/Projects/Q3" }).error;
       assert.match(unnamed, /a filter rule \(not created through MCP\)/);
       assert.doesNotMatch(unnamed, /User move/, "no rule names without filters.read");
+      // A rule of an account the client may not use is never rewritten, even
+      // if it is registered or the client has filters.foreign.
+      for (const [registered, granted] of [[() => true, own], [() => false, [...own, "filters.foreign"]]]) {
+        const privateRule = { filterName: "Private payroll", filterType: 1, actionCount: 1,
+          getActionAt: () => ({ type: 0x1, targetFolderUri: "imap://account/Projects/Q3" }) };
+        const otherList = { filterCount: 1, getFilterAt: () => privateRule };
+        const other = { key: "private", identities: [], incomingServer: { type: "imap", getFilterList: () => otherList } };
+        const h = makeFilterHarness({ granted, registered, otherAccounts: [other] });
+        privateRule.getActionAt = () => ({ type: h.ci.nsMsgFilterAction.MoveToFolder, targetFolderUri: "imap://account/Projects/Q3" });
+        const error = h.api.filterTargetRestriction({ URI: "imap://account/Projects/Q3" }).error;
+        assert.match(error, /account this client may not use/);
+        assert.doesNotMatch(error, /Private payroll/);
+      }
       const own_ = makeFilterHarness({ granted: own, registered: () => true });
       withMove(own_, "imap://account/Projects/Q3");
       assert.equal(own_.api.filterTargetRestriction({ URI: "imap://account/Projects/Q3" }), null, "only its own rules target it");

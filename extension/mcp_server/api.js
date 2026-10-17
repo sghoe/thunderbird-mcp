@@ -830,7 +830,9 @@ function adoptRetainedAttachmentFiles() {
     }
   } catch { /* nothing to adopt */ }
   return adopted;
-}const _adoptedAttachFiles = adoptRetainedAttachmentFiles();
+}// Secret of the message reference tokens (MESSAGE-ID INDEX), per add-on load.
+let _messageRefSecret = null;
+const _adoptedAttachFiles = adoptRetainedAttachmentFiles();
 const _tempAttachFiles = new Set(_adoptedAttachFiles.files);
 // Files still needed without an open compose window referring to them:
 // pinned while the tool call that created them runs (it may still be
@@ -6318,10 +6320,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	            // instance), because the date is metadata a client may not read.
 	            // References are valid until the add-on or Thunderbird restarts.
 	            const MESSAGE_REF_PREFIX = "msgref:";
-	            let messageRefSecret = null;
 	            function messageRefToken(hdr) {
-	              if (!messageRefSecret) messageRefSecret = randomHex(16);
-	              const text = `${messageRefSecret}\n${hdr.messageKey}\n${Math.trunc(Number(hdr.date) || 0)}\n${hdr.messageId}`;
+	              // One secret per add-on load (not per server start, e.g. after
+	              // changing "Listen on all interfaces").
+	              if (!_messageRefSecret) _messageRefSecret = randomHex(16);
+	              const text = `${_messageRefSecret}\n${hdr.messageKey}\n${Math.trunc(Number(hdr.date) || 0)}\n${hdr.messageId}`;
 	              return sha256Hex(unescape(encodeURIComponent(text))).slice(0, 16);
 	            }
 	            function parseMessageRef(value) {
@@ -6392,7 +6395,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	            // Error for a reference that cannot be used, or null.
 	            function messageRefError(lookup, messageId) {
 	              if (lookup.invalidRef) return { error: `Invalid message reference: ${messageId} (use a candidate reference msgref:<key>:<token>:<Message-ID> from an ambiguity error; references are valid until Thunderbird or the add-on restarts)` };
-	              if (lookup.staleRef) return { error: `Message reference is stale (the message was moved, deleted or the folder was compacted): ${messageId}. Search again for a current reference.` };
+	              if (lookup.staleRef) return { error: `Message reference is stale (the message was moved, deleted or the folder was compacted, or Thunderbird or the add-on restarted): ${messageId}. Search again for a current reference.` };
 	              return null;
 	            }
 	            // END MESSAGE-ID INDEX
@@ -12517,9 +12520,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             // their fingerprints. Without filters.foreign a client may not do that
             // to a folder (or a parent of one) that rules not created through MCP
             // target: it could make such a rule look registered, or change it.
+            // Rules of accounts the client may not use are never rewritten this
+            // way, whoever created them.
             function filterTargetRestriction(folder) {
               try {
-                if (clientHasCapability("filters.foreign")) return null;
+                const foreignAllowed = clientHasCapability("filters.foreign");
                 const move = resolveXpcomConstant("nsMsgFilterAction", "MoveToFolder");
                 const copy = resolveXpcomConstant("nsMsgFilterAction", "CopyToFolder");
                 const uri = folder.URI;
@@ -12539,7 +12544,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                       const target = String(action.targetFolderUri || "");
                       if (target === uri || target.startsWith(`${uri}/`)) targets = true;
                     }
-                    if (targets && !filterIsRegistered(account.key, rule, list)) {
+                    if (targets && !isAccountAllowed(account.key)) {
+                      return { error: "Not permitted for this client: a filter rule of an account this client may not use moves or copies mail into this folder, and this change would rewrite it." };
+                    }
+                    if (targets && !foreignAllowed && !filterIsRegistered(account.key, rule, list)) {
                       // Name the rule only to clients that may see it.
                       let label = "a filter rule";
                       try {

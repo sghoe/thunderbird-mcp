@@ -221,6 +221,12 @@ draft and the refused waiting call.
 | The folder guard named filter rules of accounts the client may not see, and to clients without `filters.read` (Sol, Opus) | the rule is named only with `filters.read` and access to its account |
 | Migration notes did not mention that folder rename/move/delete may now need `filters.foreign` (Opus) | migration row and feature matrix; a test checks that all three handlers consult the guard first |
 | The invalid-reference error still showed the old format (Opus) | corrected |
+## Review round 10 (Sol, Opus)
+
+| Finding | Fix |
+|---|---|
+| The folder guard checked who created an affected rule but not its account: a client could rewrite (through a folder rename/move/delete) rules of accounts it may not use (Sol) | a folder change that would rewrite a rule of an account the client may not use is refused, whoever created the rule and also with `filters.foreign` |
+| The reference secret changed with every server start (e.g. after saving "Listen on all interfaces"), so references expired earlier than documented (Opus) | one secret per add-on load (module level); the stale-reference error names restarts as a cause; a unit test keeps a reference across a server restart and makes it stale after a reload |
 ## Bound approvals – how each approval is tied to the concrete action
 
 | Approval | Bound to | Where |
