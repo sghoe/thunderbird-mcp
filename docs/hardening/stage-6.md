@@ -25,6 +25,10 @@ native feature and security regression.
 * `dist/SHA256SUMS` holds the package hash. Both are committed together
   with the sources they were built from (`.gitattributes` keeps them out of
   line-ending conversion).
+* In a git checkout the working-tree build packs exactly the tracked files
+  under `extension/` (the same set a build from the commit uses) and
+  refuses untracked ones; outside git, editor/OS debris (`.DS_Store`,
+  swap files, …) is skipped.
 * `scripts/build.sh` now calls the same Node build (one package format).
 
 ### Commit ↔ package ↔ hash
@@ -33,7 +37,8 @@ native feature and security regression.
 |---|---|
 | package matches this checkout | `node scripts/build-xpi.cjs --verify` (CI job `version-sync`) |
 | package of a commit is reproducible from that commit | `node scripts/build-xpi.cjs --from <commit>` – rebuilds from the commit's git objects and compares with its committed XPI and `SHA256SUMS` |
-| installed add-on | options page: version and source digest; `sha256sum` of the XPI against `SHA256SUMS` |
+| an XPI file to be installed (e.g. downloaded) | `node scripts/build-xpi.cjs --from <commit> --check <file>` – compares the file with the rebuild of that commit (or `sha256sum` against that commit's `SHA256SUMS`) |
+| installed add-on | options page: version and source digest |
 
 The previous CI job `version-sync` compared `package.json` and
 `manifest.json` literally and would always have failed on the fork's
@@ -78,7 +83,7 @@ respective fix.
 |---|---|---|
 | All 40 tools work with the intended grants | native parity (full-access client), stage-4/5 native tests | – |
 | Tool names, schemas and result shapes compared with the baseline | `test/baseline/`, native parity, tool-contract tests | – |
-| Positive and negative permission tests per tool | `test/policy.test.cjs` (every tool allowed with exactly its required capabilities, refused without any single one), native refusal of all 40 tools for a client without rights | – |
+| Positive and negative permission tests per tool | `test/policy.test.cjs`: an independently written expectation per tool (base capabilities, 40 entries) – the policy must require exactly these, allow the tool with them and refuse it without any single one or with all other capabilities; argument-dependent effects in separate cases; a mutated mapping fails the test. Native: a client without rights sees no tool and is refused for all 40 with schema-valid arguments | – |
 | Both transports enforce the same policy | the stdio bridge only forwards to the HTTP handler, which authenticates and decides every call; the bridge marks inlined local files (`files.attach`) – stage-4.md | – |
 | New tools, new effective arguments and broken settings grant nothing | policy classifies every tool and input property, unknown ones need `unclassified` (never granted); corrupt registries/registers fail closed – stage-3/4/5 | – |
 | Manipulated attachments cause no foreign HTTP/file/UNC access | stage-2.md A (native, negative control) | IMAP/EWS part URLs not tested natively |
@@ -102,3 +107,12 @@ respective fix.
   against real servers), IMAP Drafts confirmation (may report `unknown`).
 * Owner decisions still open (nothing has been published): public name
   and repository, a signed update channel, Thunderbird 140 support.
+
+## Final review round 1 (Sol, Opus)
+
+| Finding | Fix |
+|---|---|
+| The Linux-only packaging test still expected `builtAt` (CI on Ubuntu would fail) (Sol) | asserts the new metadata contract (only `version` and `sourceDigest`); new case: debris outside git is skipped |
+| README said `--from` checks a downloaded XPI; it only checks the committed one (Sol, Opus) | `--check <file>` compares a given XPI with the rebuild; README and this document corrected |
+| The per-tool matrix derived its expectations from the policy under test (Sol) | independent expectation per tool; a mutation (`createFolder` requiring `accounts.read`) now fails the test |
+| Working-tree builds packed untracked and git-ignored files (editor/OS debris) (Opus) | tracked files only in a git checkout, untracked ones refuse the build; debris filter outside git |

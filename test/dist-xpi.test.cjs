@@ -109,6 +109,15 @@ describe("reproducible XPI (Stage 6)", () => {
     assert.equal(build.expectedManifestVersion("0.9.2-hardened.7"), "0.9.2.7");
   });
 
+  it("recognizes editor and OS debris (used outside a git checkout)", () => {
+    for (const name of [".DS_Store", "icons/.DS_Store", "Thumbs.db", "a.js.swp", "a.js~", ".gitkeep", "x.orig"]) {
+      assert.equal(build.DEBRIS.test(name), true, name);
+    }
+    for (const name of ["manifest.json", "mcp_server/api.js", "icons/icon-16.png", "options.html"]) {
+      assert.equal(build.DEBRIS.test(name), false, name);
+    }
+  });
+
   it("ignores a stale generated buildinfo.json in the sources", () => {
     const clean = build.buildXpi(memorySource({ "manifest.json": manifest }));
     const stale = build.buildXpi(memorySource({ "manifest.json": manifest, "buildinfo.json": "{\"builtAt\":\"2020\"}" }));

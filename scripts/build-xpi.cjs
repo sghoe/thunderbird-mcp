@@ -16,6 +16,12 @@
  *   node scripts/build-xpi.cjs --verify     rebuild in memory, compare with dist/
  *   node scripts/build-xpi.cjs --from REV   rebuild from commit REV and compare
  *                                           with the XPI and SHA256SUMS of REV
+ *   ... --check FILE                        also compare FILE (e.g. a downloaded
+ *                                           XPI) with the rebuild
+ *
+ * In a git checkout the working-tree build packs exactly the tracked files
+ * under extension/ (as a build from the commit would) and refuses untracked
+ * ones; outside git, editor/OS debris is skipped.
  */
 "use strict";
 
@@ -101,16 +107,41 @@ function zipStored(files) {
   return Buffer.concat([...parts, ...central, end]);
 }
 
+// Editor and OS files never belong in the package (used without git).
+const DEBRIS = /(^|\/)(\.DS_Store|Thumbs\.db|desktop\.ini|\.git[^/]*)$|\.(swp|swo|orig|rej)$|~$/i;
+
+// Tracked files under extension/ (relative), or null outside a git checkout.
+function trackedExtensionFiles(extDir) {
+  const git = (args) => execFileSync("git", args, { cwd: PROJECT_DIR, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  let tracked;
+  try {
+    const top = git(["rev-parse", "--show-toplevel"]).trim();
+    const here = PROJECT_DIR.replace(/\\/g, "/");
+    if (process.platform === "win32" ? top.toLowerCase() !== here.toLowerCase() : top !== here) return null;
+    tracked = git(["ls-files", "-z", "--", "extension"]);
+  } catch {
+    return null;
+  }
+  const untracked = git(["ls-files", "-o", "--exclude-standard", "-z", "--", "extension"]).split("\0").filter(Boolean);
+  if (untracked.length) {
+    throw new Error(`untracked files under extension/ would not be packaged: ${untracked.join(", ")} (add them to git or remove them)`);
+  }
+  return tracked.split("\0").filter(Boolean)
+    .map((file) => file.slice("extension/".length))
+    .filter((rel) => fs.existsSync(path.join(extDir, ...rel.split("/"))));
+}
+
 // Source readers: { list(): [relative paths under extension/], read(rel), readRoot(name) }
 function workingTreeSource() {
   const extDir = path.join(PROJECT_DIR, "extension");
   const walk = (dir, prefix) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (DEBRIS.test(rel)) return [];
     return entry.isDirectory() ? walk(path.join(dir, entry.name), rel) : [rel];
   });
   return {
     label: "working tree",
-    list: () => walk(extDir, ""),
+    list: () => trackedExtensionFiles(extDir) ?? walk(extDir, ""),
     read: (rel) => fs.readFileSync(path.join(extDir, ...rel.split("/"))),
     readRoot: (name) => fs.readFileSync(path.join(PROJECT_DIR, name)),
   };
@@ -164,6 +195,17 @@ function buildXpi(source) {
 
 const sumsText = (hash) => `${hash}  ${XPI_NAME}\n`;
 
+function checkFile(argv, built) {
+  const index = argv.indexOf("--check");
+  if (index < 0) return true;
+  const file = argv[index + 1];
+  if (!file) throw new Error("--check needs a file");
+  const hash = sha256(fs.readFileSync(file));
+  const ok = hash === built.sha256;
+  console.log(`${ok ? "OK" : "MISMATCH"}: ${file} ${hash}`);
+  return ok;
+}
+
 function main(argv) {
   const fromIndex = argv.indexOf("--from");
   if (fromIndex >= 0) {
@@ -179,10 +221,12 @@ function main(argv) {
     console.log(`committed ${sha256(committed)}`);
     const ok = committed.equals(built.xpi) && (!sums || sums.replace(/\r\n/g, "\n") === sumsText(built.sha256));
     console.log(ok ? "OK: the committed XPI is reproducible from this commit" : "MISMATCH");
-    return ok ? 0 : 1;
+    const fileOk = checkFile(argv, built);
+    return ok && fileOk ? 0 : 1;
   }
 
   const built = buildXpi(workingTreeSource());
+  if (argv.includes("--check")) return checkFile(argv, built) ? 0 : 1;
   if (argv.includes("--verify")) {
     const current = fs.existsSync(OUT_FILE) ? fs.readFileSync(OUT_FILE) : Buffer.alloc(0);
     const sums = fs.existsSync(SUMS_FILE) ? fs.readFileSync(SUMS_FILE, "utf8").replace(/\r\n/g, "\n") : "";
@@ -198,7 +242,7 @@ function main(argv) {
   return 0;
 }
 
-module.exports = { buildXpi, workingTreeSource, gitSource, zipStored, normalizeText, expectedManifestVersion };
+module.exports = { buildXpi, workingTreeSource, gitSource, zipStored, normalizeText, expectedManifestVersion, DEBRIS };
 
 if (require.main === module) {
   try {

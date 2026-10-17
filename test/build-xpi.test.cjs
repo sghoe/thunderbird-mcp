@@ -51,6 +51,18 @@ describe("XPI packaging", { skip: process.platform !== "linux" || !hasZipTools }
     execFileSync("bash", ["scripts/build.sh"], { cwd: root, env: { ...env, TZ: "Asia/Tokyo" }, stdio: "pipe" });
     assert.deepEqual(fs.readFileSync(xpi), first);
     const info = JSON.parse(execFileSync("unzip", ["-p", xpi, "buildinfo.json"], { encoding: "utf8" }));
-    assert.equal(info.builtAt, "2023-11-14T22:13:20Z");
+    // Stage 6: no build time at all; version and a digest of the sources.
+    assert.deepEqual(Object.keys(info).sort(), ["sourceDigest", "version"]);
+    assert.match(info.sourceDigest, /^[0-9a-f]{64}$/);
+  });
+
+  it("skips editor and OS debris outside a git checkout", () => {
+    execFileSync(process.execPath, ["scripts/build-xpi.cjs"], { cwd: root, stdio: "pipe" });
+    const clean = fs.readFileSync(xpi);
+    for (const debris of [".DS_Store", "icons/.DS_Store", "manifest.json.swp", "icons/fixture.txt~", "Thumbs.db"]) {
+      fs.writeFileSync(path.join(root, "extension", debris), "debris");
+    }
+    execFileSync(process.execPath, ["scripts/build-xpi.cjs"], { cwd: root, stdio: "pipe" });
+    assert.deepEqual(fs.readFileSync(xpi), clean);
   });
 });

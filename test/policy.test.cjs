@@ -172,20 +172,55 @@ describe("profiles", () => {
 });
 
 describe("every tool has a positive and a negative permission case (Stage 6 acceptance)", () => {
-  it("covers all 40 tools", () => {
-    assert.equal(P.knownTools().length, 40);
+  // Independently written expectations (not derived from the policy under
+  // test): the capabilities each tool needs without risky arguments.
+  // Argument-dependent effects are covered by "requirements follow the
+  // effective arguments" above.
+  const EXPECTED = {
+    listAccounts: ["accounts.read"], listFolders: ["accounts.read"], getAccountAccess: ["accounts.read"],
+    // Results include message text (previews/bodies).
+    searchMessages: ["mail.body", "mail.metadata"], getRecentMessages: ["mail.body", "mail.metadata"],
+    getMessage: ["mail.body", "mail.metadata"], getMessages: ["mail.body", "mail.metadata"],
+    displayMessage: ["gui.display"],
+    updateMessage: ["mail.metadata"], deleteMessages: ["mail.delete"],
+    createFolder: ["folders.write"], renameFolder: ["folders.write"], moveFolder: ["folders.write"],
+    // Deleting a folder already in Trash is permanent.
+    deleteFolder: ["mail.delete", "mail.deletePermanent"],
+    emptyTrash: ["mail.deletePermanent"], emptyJunk: ["mail.deletePermanent"],
+    // Review windows and dialogs; the user decides there.
+    sendMail: ["compose.review"], saveDraft: ["compose.draft"],
+    replyToMessage: ["compose.review", "mail.body", "mail.metadata"], forwardMessage: ["compose.review", "mail.body", "mail.metadata"],
+    listFilters: ["filters.read"], createFilter: ["filters.manage"], updateFilter: ["filters.manage"],
+    deleteFilter: ["filters.manage"], reorderFilters: ["filters.manage"], applyFilters: ["filters.run"],
+    searchContacts: ["contacts.read"], getContact: ["contacts.read"], createContact: ["contacts.write"],
+    updateContact: ["contacts.read", "contacts.write"], deleteContact: ["contacts.write"],
+    listCalendars: ["calendar.read"], listCategories: ["calendar.read"], listEvents: ["calendar.read"], listTasks: ["calendar.read"],
+    createEvent: ["compose.review"], createTask: ["compose.review"],
+    updateEvent: ["calendar.read", "calendar.write"], deleteEvent: ["calendar.read", "calendar.write"], updateTask: ["calendar.read", "calendar.write"],
+  };
+
+  it("has an expectation for exactly the 40 tools", () => {
+    assert.equal(Object.keys(EXPECTED).length, 40);
+    assert.deepEqual(plain(P.knownTools()).sort(), Object.keys(EXPECTED).sort());
   });
-  it("allows each tool with exactly its required capabilities and refuses it without any one of them", () => {
-    for (const tool of P.knownTools()) {
-      const required = plain(P.requiredCapabilities(tool, {}));
-      assert.ok(required.length > 0, `${tool} needs at least one capability`);
-      assert.equal(required.includes(P.UNCLASSIFIED), false, tool);
-      assert.equal(P.decide(tool, {}, required).allowed, true, `${tool} with ${required}`);
-      for (const cap of required) {
-        const decision = P.decide(tool, {}, required.filter((c) => c !== cap));
+
+  it("requires exactly the expected capabilities of each tool", () => {
+    for (const [tool, expected] of Object.entries(EXPECTED)) {
+      assert.deepEqual(plain(P.requiredCapabilities(tool, {})).sort(), [...expected].sort(), tool);
+    }
+  });
+
+  it("allows each tool with the expected capabilities and refuses it without any one of them", () => {
+    for (const [tool, expected] of Object.entries(EXPECTED)) {
+      assert.equal(P.decide(tool, {}, expected).allowed, true, `${tool} with ${expected}`);
+      for (const cap of expected) {
+        const decision = P.decide(tool, {}, expected.filter((c) => c !== cap));
         assert.equal(decision.allowed, false, `${tool} without ${cap}`);
         assert.deepEqual(plain(decision.missing), [cap], tool);
       }
+      // Every other capability together does not replace the expected ones.
+      const others = Object.keys(P.CAPABILITIES).filter((cap) => !expected.includes(cap));
+      assert.equal(P.decide(tool, {}, others).allowed, false, `${tool} with everything else`);
     }
   });
 });
