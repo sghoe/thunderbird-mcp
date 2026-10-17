@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const { Core } = require("./helpers/core-modules.cjs");
 
 const source = fs.readFileSync(path.resolve(__dirname, "../extension/mcp_server/api.js"), "utf8");
 const MAX_SIGNATURE_BYTES = 1024 * 1024;
@@ -51,6 +52,7 @@ function loadSignatureHelpers(options = {}) {
     },
   };
   const sandbox = {
+    Core,
     TextDecoder,
     Uint8Array,
     Cr: { NS_BASE_STREAM_CLOSED: "NS_BASE_STREAM_CLOSED" },

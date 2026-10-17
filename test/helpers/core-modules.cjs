@@ -16,6 +16,7 @@ const MODULES = {
   policy: "policy",
   clientRegistry: "client-registry",
   filterRegistry: "filter-registry",
+  operationState: "operation-state",
 };
 
 const Core = {};

@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const { Core } = require("./helpers/core-modules.cjs");
 
 const source = fs.readFileSync(path.resolve(__dirname, "../extension/mcp_server/api.js"), "utf8");
 const modes = { Now: 0, Later: 1, SaveAsDraft: 4 };
@@ -37,6 +38,8 @@ function loadSend(options = {}) {
   };
   const hdr = { folder, messageId: "original", author: "author@example.test", subject: "Original", date: 0 };
   const sandbox = {
+    Core,
+    Cr: { NS_ERROR_FAILURE: 0x80004005, NS_ERROR_CONNECTION_REFUSED: 0x804b000d, NS_ERROR_UNKNOWN_HOST: 0x804b001e, NS_ERROR_UNKNOWN_PROXY_HOST: 0x804b002a, NS_ERROR_PROXY_CONNECTION_REFUSED: 0x804b0048 },
     Ci: {
       nsIMsgCompDeliverMode: modes, nsITimer: { TYPE_ONE_SHOT: 0 },
       nsIMsgCompType: { New: 0, Reply: 1, ReplyAll: 2, ForwardInline: 3 },
@@ -286,6 +289,97 @@ describe("reply and forward dispositions follow the SMTP result", () => {
       const h = loadSend({ blocked: true });
       assert.match((await h.start(tool)).error, /blocks skipReview/);
       assert.equal(h.state.calls.length, 0);
+      assert.equal(h.state.dispositions.length, 0);
+    });
+  }
+});
+
+describe("operation states of direct delivery (Stage 5)", () => {
+  const NET_RESET = 0x804b0014;
+  const CONNECTION_REFUSED = 0x804b000d;
+
+  it("reports completed after SMTP success", async () => {
+    const h = loadSend();
+    const result = h.start("direct", modes.Now);
+    h.state.listener.onStartSending();
+    h.state.listener.onStopSending("id", 0);
+    assert.equal((await result).operationState, "completed");
+  });
+
+  for (const [label, started, status, expected] of [
+    ["server rejection after the start", true, failure, "failed"],
+    ["refused connection", true, CONNECTION_REFUSED, "failed"],
+    ["reset before the start", false, NET_RESET, "failed"],
+    ["reset after the start", true, NET_RESET, "unknown"],
+  ]) {
+    it(`reports ${expected} for a ${label}`, async () => {
+      const h = loadSend();
+      const result = h.start("direct", modes.Now);
+      if (started) h.state.listener.onStartSending();
+      h.state.listener.onStopSending("id", status);
+      const value = await result;
+      assert.equal(value.operationState, expected);
+      assert.equal(value.success, undefined);
+      if (expected === "unknown") assert.match(value.error, /may have accepted the message; check Sent before retrying/);
+      else assert.doesNotMatch(value.error, /may have accepted/);
+    });
+  }
+
+  it("reports unknown on timeout and on a rejection after the start", async () => {
+    const timedOut = loadSend();
+    const first = timedOut.start("direct", modes.Now);
+    timedOut.timer.callback.notify();
+    assert.equal((await first).operationState, "unknown");
+
+    const rejected = loadSend();
+    const second = rejected.start("direct", modes.Now);
+    rejected.state.listener.onStartSending();
+    rejected.state.creationFailed(new Error("late"));
+    assert.equal((await second).operationState, "unknown");
+
+    const early = loadSend();
+    const third = early.start("direct", modes.Now);
+    early.state.creationFailed(new Error("early"));
+    assert.equal((await third).operationState, "failed");
+  });
+
+  it("reports failed when nothing was attempted", async () => {
+    for (const listenerCall of ["onSendNotPerformed", "onTransportSecurityError"]) {
+      const h = loadSend();
+      const result = h.start("direct", modes.Now);
+      h.state.listener[listenerCall]("id", failure, {}, "smtp.example.test");
+      assert.equal((await result).operationState, "failed", listenerCall);
+    }
+    const thrown = await loadSend({ createError: new Error("create threw") }).start();
+    assert.equal(thrown.operationState, "failed");
+  });
+
+  for (const [mode, expected] of [[modes.SaveAsDraft, "completed"], [modes.Later, "queued"]]) {
+    for (const completion of ["promise", "copy"]) {
+      it(`reports ${expected} for mode ${mode} via ${completion}`, async () => {
+        const h = loadSend();
+        const result = h.start("direct", mode);
+        if (completion === "promise") h.state.deliveryStarted();
+        else h.state.listener.onStopCopy(0);
+        assert.equal((await result).operationState, expected);
+      });
+    }
+    it(`reports failed for a failed copy in mode ${mode}`, async () => {
+      const h = loadSend();
+      const result = h.start("direct", mode);
+      h.state.listener.onStopCopy(failure);
+      assert.equal((await result).operationState, "failed");
+    });
+  }
+
+  for (const tool of ["reply", "forward"]) {
+    it(`keeps the state through ${tool}`, async () => {
+      const h = loadSend();
+      const result = h.start(tool);
+      await new Promise(resolve => setImmediate(resolve));
+      h.state.listener.onStartSending();
+      h.state.listener.onStopSending("id", NET_RESET);
+      assert.equal((await result).operationState, "unknown");
       assert.equal(h.state.dispositions.length, 0);
     });
   }

@@ -93,3 +93,42 @@ describe("attendee-bearing tasks follow the meeting guard", () => {
     assert.equal(result.success, true, result.error);
   });
 });
+
+describe("operation states of calendar writes (Stage 5)", () => {
+  it("reports submitted after the provider accepted the change", async () => {
+    const rt = loadCalendarRuntime();
+    rt.seedTask({ id: "task-1" });
+    const result = await rt.invoke("updateTask", { taskId: "task-1", calendarId: "calendar-1", title: "Renamed" });
+    assert.equal(result.operationState, "submitted");
+  });
+
+  it("reports unknown when the provider fails after the request", async () => {
+    const rt = loadCalendarRuntime({ blockSkipReview: false });
+    rt.seedEvent({ id: "plain-event" });
+    rt.calendar.modifyItem = async () => { throw new Error("CalDAV request timed out"); };
+    rt.calendar.deleteItem = async () => { throw new Error("CalDAV request timed out"); };
+    const updated = await rt.invoke("updateEvent", { eventId: "plain-event", calendarId: "calendar-1", title: "x" });
+    const deleted = await rt.invoke("deleteEvent", { eventId: "plain-event", calendarId: "calendar-1" });
+    for (const result of [updated, deleted]) {
+      assert.match(result.error, /timed out/);
+      assert.equal(result.operationState, "unknown");
+    }
+  });
+
+  it("reports failed when the call was refused before the provider", async () => {
+    const rt = loadCalendarRuntime({ blockSkipReview: false });
+    rt.seedTask({ id: "task-9" });
+    const result = await rt.invoke("updateEvent", { eventId: "task-9", calendarId: "calendar-1", title: "x" });
+    assert.match(result.error, /not an event/);
+    assert.equal(result.operationState, "failed");
+  });
+
+  it("distinguishes direct creation from a review dialog", async () => {
+    const rt = loadCalendarRuntime({ blockSkipReview: false });
+    const event = { title: "Planning", startDate: "2026-09-28T10:00:00Z", endDate: "2026-09-28T11:00:00Z", calendarId: "calendar-1" };
+    assert.equal((await rt.invoke("createEvent", { ...event, skipReview: true })).operationState, "submitted");
+    assert.equal((await rt.invoke("createEvent", event)).operationState, "opened-for-review");
+    assert.equal((await rt.invoke("createTask", { title: "Todo", calendarId: "calendar-1", skipReview: true })).operationState, "submitted");
+    assert.equal((await rt.invoke("createTask", { title: "Todo", calendarId: "calendar-1" })).operationState, "opened-for-review");
+  });
+});

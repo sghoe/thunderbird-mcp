@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const { Core } = require("./core-modules.cjs");
 
 const source = fs.readFileSync(path.resolve(__dirname, "../../extension/mcp_server/api.js"), "utf8");
 
@@ -19,6 +20,7 @@ function snippet(startMarker, endMarker) {
 // account preference and native Thunderbird services they call.
 function loadFolderTools({ accounts, folders, isAccountAllowed = () => true, copyMessages = () => {}, copyFolder = () => {}, periodicFolderRestriction = () => null }) {
   const runtime = vm.createContext({
+    Core,
     console,
     Ci: { nsMsgFolderFlags: { Trash: 0x100 } },
     isAccountAllowed,

@@ -48,3 +48,46 @@ Stage 2 hotfixes stay in force throughout.
 * Native: a rule-maker client creates two Forward rules, the user changes
   one in Thunderbird, revoking the client in the options page disables the
   unchanged rule and reports the changed one.
+
+## 5c – Honest operation states
+
+* `sendMail`, `replyToMessage`, `forwardMessage`, `saveDraft`,
+  `createEvent`, `updateEvent`, `deleteEvent`, `createTask` and
+  `updateTask` results carry an additive `operationState`
+  (`core/operation-state.sys.mjs`); existing fields and messages stay.
+
+  | State | Meaning |
+  |---|---|
+  | `opened-for-review` | compose window or calendar dialog opened; the user decides there |
+  | `submitted` | the calendar provider accepted the change; its synchronisation and any invitations it generates are not observed |
+  | `queued` | stored in the Outbox (not produced today: the add-on never queues) |
+  | `completed` | the SMTP server confirmed the message, or the draft was stored |
+  | `failed` | not performed; nothing was sent, saved or written |
+  | `unknown` | may or may not have happened – check Sent/Drafts/the calendar before trying again |
+
+* Direct sending: Thunderbird reports the start of the SMTP transaction
+  (`onStartSending`). Errors before it, a server refusal (TB 153 reports
+  every SMTP error reply and authentication failure as `NS_ERROR_FAILURE`;
+  socket errors keep their own code – `SmtpClient.sys.mjs` `_onNsError`
+  vs. `_onError`), a refused connection or an unknown host are `failed`.
+  A reset, interruption, network timeout or abort after the start, the
+  120 s timeout, or a rejected send promise after the start are `unknown`:
+  the server may already have accepted the message. The error then says
+  so. A failed Sent copy after a confirmed delivery does not change
+  `completed` (TB calls `onStopSending` before filing the copy).
+* Review: a compose window that timed out or could only be partly filled
+  is `unknown`; one closed because of a foreign sender identity is
+  `failed`. Calendar: an error from the provider call itself (e.g. a
+  CalDAV timeout) is `unknown`, errors before it are `failed`.
+* Nothing is retried automatically – neither before nor after this change.
+  Protocol-level refusals (invalid arguments, missing capability) remain
+  JSON-RPC errors without a result and never have an effect.
+* Thunderbird still shows its own alert for a failed direct send
+  (upstream behaviour).
+* Native parity treats `operationState` as a documented additive key
+  (`run-parity.cjs` `ADDITIVE_KEYS`): it may be added, never removed.
+* Native: the SMTP sink confirms (→ `completed`), refuses the recipient
+  with 550 (→ `failed`, nothing received) or receives the message and then
+  resets the connection (→ `unknown`; the sink holds the message, no
+  second delivery within 3 s). Review window, saved draft, refused
+  forward, direct calendar write and calendar dialog are checked too.

@@ -27,20 +27,33 @@ function extractUpstreamExtension() {
   return dir;
 }
 
+// Deliberate additive top-level result fields of the fork (see
+// docs/hardening/stage-5.md). They may be added, never removed or changed.
+const ADDITIVE_KEYS = ["operationState"];
+
+function withoutAdditions(shapeA, shapeB) {
+  if (!shapeB || typeof shapeB !== "object" || Array.isArray(shapeB)) return { shape: shapeB, added: [] };
+  const added = ADDITIVE_KEYS.filter((k) => k in shapeB && !(shapeA && typeof shapeA === "object" && k in shapeA));
+  return { shape: Object.fromEntries(Object.entries(shapeB).filter(([k]) => !added.includes(k))), added };
+}
+
 function compare(aFile, bFile) {
   const a = JSON.parse(fs.readFileSync(aFile, "utf8"));
   const b = JSON.parse(fs.readFileSync(bFile, "utf8"));
   const bByLabel = new Map(b.results.map((r) => [r.label, r]));
   const diffs = [];
+  const additions = {};
   for (const ra of a.results) {
     const rb = bByLabel.get(ra.label);
     if (!rb) { diffs.push({ label: ra.label, issue: "missing" }); continue; }
+    const { shape: shapeB, added } = withoutAdditions(ra.shape, rb.shape);
+    for (const key of added) additions[key] = (additions[key] || 0) + 1;
     if (ra.ok !== rb.ok) diffs.push({ label: ra.label, issue: "outcome", a: ra.ok ? "ok" : ra.error, b: rb.ok ? "ok" : rb.error });
-    else if (JSON.stringify(ra.shape) !== JSON.stringify(rb.shape)) diffs.push({ label: ra.label, issue: "shape", a: ra.shape, b: rb.shape });
+    else if (JSON.stringify(ra.shape) !== JSON.stringify(shapeB)) diffs.push({ label: ra.label, issue: "shape", a: ra.shape, b: rb.shape });
   }
   for (const rb of b.results) if (!a.results.some((ra) => ra.label === rb.label)) diffs.push({ label: rb.label, issue: "added" });
   if (a.smtpMessages !== b.smtpMessages) diffs.push({ label: "SMTP deliveries", issue: "count", a: a.smtpMessages, b: b.smtpMessages });
-  return { a: a.target, b: b.target, toolsA: a.tools.length, toolsB: b.tools.length, smtp: [a.smtpMessages, b.smtpMessages], diffs };
+  return { a: a.target, b: b.target, toolsA: a.tools.length, toolsB: b.tools.length, smtp: [a.smtpMessages, b.smtpMessages], additions, diffs };
 }
 
 (async () => {

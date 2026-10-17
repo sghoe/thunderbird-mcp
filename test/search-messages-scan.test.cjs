@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const { Core } = require("./helpers/core-modules.cjs");
 
 const source = fs.readFileSync(path.resolve(__dirname, "../extension/mcp_server/api.js"), "utf8");
 
@@ -124,6 +125,7 @@ function makeHarness({ roots = [makeFolder("INBOX", { count: 3 })], onYield, glo
     }
   }
   const runtime = vm.createContext({
+    Core,
     Date: SearchDate,
     GlodaMsgSearcher,
     Services: {

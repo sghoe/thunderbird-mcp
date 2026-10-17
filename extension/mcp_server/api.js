@@ -2116,6 +2116,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
       policy: loadCoreModule("policy"),
       clientRegistry: loadCoreModule("client-registry"),
       filterRegistry: loadCoreModule("filter-registry"),
+      operationState: loadCoreModule("operation-state"),
     });
     // END CORE MODULE LOADER
 
@@ -4675,9 +4676,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   SaveInFolderDone() {},
                   ComposeProcessDone(aResult) {
                     if (Components.isSuccessCode(aResult)) {
-                      settle({ success: true });
+                      settle({ success: true, operationState: Core.operationState.OPERATION_STATES.COMPLETED });
                     } else {
-                      settle({ error: `Saving reply draft failed (status 0x${(aResult >>> 0).toString(16)})` });
+                      settle({ error: `Saving reply draft failed (status 0x${(aResult >>> 0).toString(16)})`, operationState: Core.operationState.OPERATION_STATES.FAILED });
                     }
                   },
                 };
@@ -4704,7 +4705,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                 timer.initWithCallback({
                   notify() {
-                    settle({ error: "Timed out saving reply draft; the save outcome is uncertain and may still complete. Check Drafts before retrying.", saveOutcome: "uncertain" });
+                    settle({ error: "Timed out saving reply draft; the save outcome is uncertain and may still complete. Check Drafts before retrying.", saveOutcome: "uncertain", operationState: Core.operationState.OPERATION_STATES.UNKNOWN });
                   }
                 }, SAVE_TIMEOUT_MS, Ci.nsITimer.TYPE_ONE_SHOT);
 
@@ -4748,7 +4749,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   compose.RegisterStateListener(stateListener);
                   composeWin.gCloseWindowAfterSave = true;
                   Promise.resolve(composeWin.SaveAsDraft()).catch((e) => {
-                    settle({ error: e.toString() });
+                    // The save may already be under way.
+                    settle({ error: e.toString(), operationState: Core.operationState.OPERATION_STATES.UNKNOWN });
                   });
                 } catch (e) {
                   settle({ error: e.toString() });
@@ -4809,9 +4811,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 };
 
                 const timeout = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
+                const STATES = Core.operationState.OPERATION_STATES;
                 timeout.initWithCallback({
                   notify() {
-                    finish({ error: "Timed out waiting for compose window" });
+                    // The window may still open (or be open but not filled in).
+                    finish({ error: "Timed out waiting for compose window; a compose window may still open. Check open compose windows before retrying.", operationState: STATES.UNKNOWN });
                   }
                 }, OPEN_TIMEOUT_MS, Ci.nsITimer.TYPE_ONE_SHOT);
 
@@ -4857,8 +4861,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                         // to own messages). The window must not prepare mail
                         // from an account this client may not use.
                         if (!composeIdentityAccessible(composeWin)) {
-                          try { composeWin.close(); } catch {}
-                          finish({ error: COMPOSE_IDENTITY_ERROR });
+                          let closed = false;
+                          try { composeWin.close(); closed = true; } catch {}
+                          finish({ error: COMPOSE_IDENTITY_ERROR, operationState: closed ? STATES.FAILED : STATES.UNKNOWN });
                           return;
                         }
                         // Autosave would save the client-populated window as a
@@ -4881,12 +4886,13 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                             try { timeout.cancel(); } catch {}
                             Promise.resolve(afterInsert(composeWin))
                               .then(finish)
-                              .catch((e) => finish({ error: e.toString() }));
+                              .catch((e) => finish({ error: e.toString(), operationState: STATES.UNKNOWN }));
                           } else {
-                            finish({ success: true });
+                            finish({ success: true, operationState: STATES.OPENED_FOR_REVIEW });
                           }
                         } catch (e) {
-                          finish({ error: e.toString() });
+                          // The window is open but may be only partly filled in.
+                          finish({ error: e.toString(), operationState: STATES.UNKNOWN });
                         }
                       },
                     };
@@ -4895,7 +4901,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                     pendingStateCompose = composeWin.gMsgCompose;
                     composeWin.gMsgCompose.RegisterStateListener(stateListener);
                   } catch (e) {
-                    finish({ error: e.toString() });
+                    finish({ error: e.toString(), operationState: STATES.UNKNOWN });
                   }
                 };
 
@@ -4937,7 +4943,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                     msgComposeService.OpenComposeWindowWithParams(null, msgComposeParams);
                   }
                 } catch (e) {
-                  finish({ error: e.toString() });
+                  finish({ error: e.toString(), operationState: STATES.FAILED });
                 }
               });
             }
@@ -4970,6 +4976,17 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
              * NS_ERROR_XPC_NOT_ENOUGH_ARGS, fall back to the legacy 18-arg call.
              */
             // BEGIN DIRECT SEND HELPER
+            // Errors that prove the SMTP server did not accept the message: a
+            // server reply (SmtpClient reports those and authentication failures
+            // as NS_ERROR_FAILURE; socket errors keep their own code) or a
+            // connection that was never established.
+            function isDefinitiveDeliveryFailure(status) {
+              return [
+                Cr.NS_ERROR_FAILURE, Cr.NS_ERROR_CONNECTION_REFUSED, Cr.NS_ERROR_UNKNOWN_HOST,
+                Cr.NS_ERROR_UNKNOWN_PROXY_HOST, Cr.NS_ERROR_PROXY_CONNECTION_REFUSED,
+              ].includes(status);
+            }
+
             function sendMessageDirectly(composeFields, identity, attachDescs, originalMsgURI, compType, deliverMode, bodyType, msgToReplace) {
               if (!identity) {
                 return Promise.resolve({ error: "No identity available for direct send" });
@@ -5026,6 +5043,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               }
               const bodyMimeType = bodyType || "text/html";
               const SEND_TIMEOUT_MS = 120000; // 2 min safety timeout
+              const STATES = Core.operationState.OPERATION_STATES;
+              const savedState = mode === Ci.nsIMsgCompDeliverMode.Later ? STATES.QUEUED : STATES.COMPLETED;
+              // Set once Thunderbird starts the SMTP transaction; from then on an
+              // interrupted delivery may already have been accepted.
+              let deliveryStarted = false;
 
               return new Promise((resolve) => {
                 let settled = false;
@@ -5042,7 +5064,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   notify() {
                     settle({ error: mode === Ci.nsIMsgCompDeliverMode.Now
                       ? "Send timed out after 120s. The outcome is unknown; check Sent and the Outbox before retrying."
-                      : "Save timed out after 120s. The outcome is unknown; check Drafts and the Outbox before retrying." });
+                      : "Save timed out after 120s. The outcome is unknown; check Drafts and the Outbox before retrying.",
+                    operationState: STATES.UNKNOWN });
                   }
                 }, SEND_TIMEOUT_MS, Ci.nsITimer.TYPE_ONE_SHOT);
 
@@ -5090,26 +5113,36 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   const listener = {
                     QueryInterface: ChromeUtils.generateQI(["nsIMsgSendListener", "nsIMsgCopyServiceListener"]),
                     // nsIMsgSendListener -- fires for SMTP send paths
-                    onStartSending() {},
+                    onStartSending() {
+                      deliveryStarted = true;
+                    },
                     onProgress() {},
                     onSendProgress() {},
                     onStatus() {},
                     onStopSending(msgID, status) {
                       timer.cancel();
                       if (Components.isSuccessCode(status)) {
-                        settle({ success: true, message: "Message sent" });
+                        settle({ success: true, message: "Message sent", operationState: STATES.COMPLETED });
                       } else {
-                        settle({ error: `Send failed (status: 0x${status.toString(16)})` });
+                        const operationState = Core.operationState.deliveryFailureState({
+                          started: deliveryStarted, definitive: isDefinitiveDeliveryFailure(status),
+                        });
+                        settle({
+                          error: `Send failed (status: 0x${(status >>> 0).toString(16)})` + (operationState === STATES.UNKNOWN
+                            ? ". The connection ended after sending began, so the server may have accepted the message; check Sent before retrying."
+                            : ""),
+                          operationState,
+                        });
                       }
                     },
                     onGetDraftFolderURI() {},
                     onSendNotPerformed(msgID, status) {
                       timer.cancel();
-                      settle({ error: "Send was not performed" });
+                      settle({ error: "Send was not performed", operationState: STATES.FAILED });
                     },
                     onTransportSecurityError(msgID, status, secInfo, location) {
                       timer.cancel();
-                      settle({ error: `Transport security error${location ? ": " + location : ""}` });
+                      settle({ error: `Transport security error${location ? ": " + location : ""}`, operationState: STATES.FAILED });
                     },
                     // nsIMsgCopyServiceListener -- fires for SaveAsDraft / Sent-folder copy
                     onStartCopy() {},
@@ -5120,9 +5153,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                       if (mode === Ci.nsIMsgCompDeliverMode.Now) return;
                       timer.cancel();
                       if (Components.isSuccessCode(status)) {
-                        settle({ success: true, message: "Saved" });
+                        settle({ success: true, message: "Saved", operationState: savedState });
                       } else {
-                        settle({ error: `Save failed (status: 0x${status.toString(16)})` });
+                        settle({ error: `Save failed (status: 0x${(status >>> 0).toString(16)})`, operationState: STATES.FAILED });
                       }
                     },
                   };
@@ -5177,18 +5210,21 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                       () => {
                         if (mode !== Ci.nsIMsgCompDeliverMode.Now) {
                           timer.cancel();
-                          settle({ success: true });
+                          settle({ success: true, operationState: savedState });
                         }
                       },
                       e => {
                         timer.cancel();
-                        settle({ error: e.toString() });
+                        settle({
+                          error: e.toString(),
+                          operationState: mode === Ci.nsIMsgCompDeliverMode.Now && deliveryStarted ? STATES.UNKNOWN : STATES.FAILED,
+                        });
                       }
                     );
                   }
                 } catch (e) {
                   timer.cancel();
-                  settle({ error: e.toString() });
+                  settle({ error: e.toString(), operationState: STATES.FAILED });
                 }
               });
             }
@@ -6503,6 +6539,15 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             }
 
             // BEGIN CALENDAR TOOLS
+            // A provider error after the write request may still have changed the
+            // calendar (e.g. a CalDAV request that timed out), so its outcome is
+            // unknown; errors before the request had no effect (Stage 5).
+            function calendarWriteError(e, providerWrite) {
+              const result = { error: e.toString() };
+              if (providerWrite.started) result.operationState = Core.operationState.OPERATION_STATES.UNKNOWN;
+              return result;
+            }
+
             const ATTENDEE_REVIEW_ERROR = 'The "Block skipReview" setting in Thunderbird MCP Options makes events with attendees other than the calendar user read-only through MCP and blocks adding attendees. Updates and deletions can send invitations or cancellations without review. Disable that setting to allow these writes.';
             const MAX_EVENT_ATTENDEES = 100;
             const MAX_EVENT_OCCURRENCES = 501;
@@ -6684,6 +6729,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             }
 
             async function createEvent(title, startDate, endDate, location, description, calendarId, allDay, skipReview, status, showAs, categories, onlineMeeting, recurrence, attendees) {
+              const providerWrite = { started: false };
               if (!cal || !CalEvent) {
                 return { error: "Calendar module not available" };
               }
@@ -6823,8 +6869,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 ensureOrganizer(event, targetCalendar);
 
                 if (skipReview) {
+                  providerWrite.started = true;
                   await targetCalendar.addItem(event);
-                  return { success: true, message: `Event "${title}" added to calendar "${targetCalendar.name}"` };
+                  return { success: true, operationState: Core.operationState.OPERATION_STATES.SUBMITTED, message: `Event "${title}" added to calendar "${targetCalendar.name}"` };
                 }
 
                 const args = {
@@ -6844,9 +6891,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   args
                 );
 
-                return { success: true, message: `Event dialog opened for "${title}" on calendar "${targetCalendar.name}"` };
+                return { success: true, operationState: Core.operationState.OPERATION_STATES.OPENED_FOR_REVIEW, message: `Event dialog opened for "${title}" on calendar "${targetCalendar.name}"` };
               } catch (e) {
-                return { error: e.toString() };
+                return calendarWriteError(e, providerWrite);
               }
             }
 
@@ -7075,6 +7122,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             }
 
             async function updateTask(taskId, calendarId, title, dueDate, description, completed, percentComplete, priority) {
+              const providerWrite = { started: false };
               if (!cal) return { error: "Calendar not available" };
               try {
                 if (!taskId) return { error: "taskId is required" };
@@ -7186,14 +7234,15 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                 if (changes.length === 0) return { error: "No changes specified" };
 
+                providerWrite.started = true;
                 await calendar.modifyItem(newItem, oldItem);
-                const result = { success: true, updated: changes, task: formatTask(newItem, calendar) };
+                const result = { success: true, operationState: Core.operationState.OPERATION_STATES.SUBMITTED, updated: changes, task: formatTask(newItem, calendar) };
                 if (newItem.recurrenceInfo) {
                   result.warning = "This is a recurring task -- changes apply to the entire series.";
                 }
                 return result;
               } catch (e) {
-                return { error: e.toString() };
+                return calendarWriteError(e, providerWrite);
               }
             }
 
@@ -7576,6 +7625,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             }
 
             async function updateEvent(eventId, calendarId, title, startDate, endDate, location, description, status, showAs, categories, onlineMeeting, recurrence, recurrenceId, attendees) {
+              const providerWrite = { started: false };
               if (!cal) return { error: "Calendar not available" };
               try {
                 if (attendees != null) {
@@ -7634,8 +7684,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   // target the whole series and overwrite every occurrence on
                   // the next sync.
                   if (attendees != null) ensureOrganizer(modOcc, calendar);
+                  providerWrite.started = true;
                   await calendar.modifyItem(modOcc, occurrence);
-                  return { success: true, updated: r.changes, mode: "occurrence", recurrenceId };
+                  return { success: true, operationState: Core.operationState.OPERATION_STATES.SUBMITTED, updated: r.changes, mode: "occurrence", recurrenceId };
                 }
 
                 // ---- Master / series path (default) ----
@@ -7663,8 +7714,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 }
 
                 if (attendees != null) ensureOrganizer(newItem, calendar);
+                providerWrite.started = true;
                 await calendar.modifyItem(newItem, oldItem);
-                const result = { success: true, updated: changes };
+                const result = { success: true, operationState: Core.operationState.OPERATION_STATES.SUBMITTED, updated: changes };
                 // Read the post-update state: after clearing the recurrence
                 // (recurrence: "" / null) the event is no longer a series and
                 // the warning would state the opposite of what happened.
@@ -7673,11 +7725,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 }
                 return result;
               } catch (e) {
-                return { error: e.toString() };
+                return calendarWriteError(e, providerWrite);
               }
             }
 
             async function deleteEvent(eventId, calendarId, recurrenceId) {
+              const providerWrite = { started: false };
               if (!cal) return { error: "Calendar not available" };
               try {
                 if (!eventId) return { error: "eventId is required" };
@@ -7715,20 +7768,22 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   assertEventWriteAllowed(item, calendar, occurrence);
                   const newItem = item.clone();
                   newItem.recurrenceInfo.removeOccurrenceAt(rid.recDt);
+                  providerWrite.started = true;
                   await calendar.modifyItem(newItem, item);
-                  return { success: true, deleted: eventId, recurrenceId, mode: "occurrence" };
+                  return { success: true, operationState: Core.operationState.OPERATION_STATES.SUBMITTED, deleted: eventId, recurrenceId, mode: "occurrence" };
                 }
 
                 assertEventWriteAllowed(item, calendar);
                 const isRecurring = !!item.recurrenceInfo;
+                providerWrite.started = true;
                 await calendar.deleteItem(item);
-                const result = { success: true, deleted: eventId };
+                const result = { success: true, operationState: Core.operationState.OPERATION_STATES.SUBMITTED, deleted: eventId };
                 if (isRecurring) {
                   result.warning = "This was a recurring event -- the entire series was deleted.";
                 }
                 return result;
               } catch (e) {
-                return { error: e.toString() };
+                return calendarWriteError(e, providerWrite);
               }
             }
 
@@ -7767,6 +7822,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             }
 
             async function createTask(title, dueDate, calendarId, description, priority, categories, skipReview) {
+              const providerWrite = { started: false };
               if (!cal || !CalTodo) return { error: "Calendar module not available" };
               if (skipReview && isSkipReviewBlocked()) {
                 return { error: "User preference blocks skipReview. Retry with skipReview: false (or omitted) to open the review dialog instead." };
@@ -7822,8 +7878,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                     if (!targetCalendar) return { error: "No writable task-capable calendar found" };
                     todo.calendar = targetCalendar;
                   }
+                  providerWrite.started = true;
                   await targetCalendar.addItem(todo);
-                  return { success: true, message: `Task "${title}" created in calendar "${targetCalendar.name}"` };
+                  return { success: true, operationState: Core.operationState.OPERATION_STATES.SUBMITTED, message: `Task "${title}" created in calendar "${targetCalendar.name}"` };
                 }
 
                 const win = Services.wm.getMostRecentWindow("mail:3pane");
@@ -7834,9 +7891,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 // pre-filled and the user can review or cancel without side effects.
                 win.createTodoWithDialog(targetCalendar, dueDt, null, todo);
 
-                return { success: true, message: `Task dialog opened for "${title}"` };
+                return { success: true, operationState: Core.operationState.OPERATION_STATES.OPENED_FOR_REVIEW, message: `Task dialog opened for "${title}"` };
               } catch (e) {
-                return { error: e.toString() };
+                return calendarWriteError(e, providerWrite);
               }
             }
 
@@ -10317,7 +10374,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 msgComposeService.OpenComposeWindowWithParams(null, msgComposeParams);
 
                 let msg = "Compose window opened";
-                return { success: true, message: msg };
+                return { success: true, message: msg, operationState: Core.operationState.OPERATION_STATES.OPENED_FOR_REVIEW };
               } catch (e) {
                 return { error: e.toString() };
               }
@@ -12702,7 +12759,13 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             }
 
             // BEGIN TOOL DISPATCH
+            // Tools that send, save drafts or write calendar items report an
+            // operationState; errors raised before any effect are "failed".
             async function callTool(name, args) {
+              return Core.operationState.finalizeOperationState(name, await callToolUnfinalized(name, args));
+            }
+
+            async function callToolUnfinalized(name, args) {
               const group = buildTools().find(tool => tool.name === name)?.group;
               if ((group === "calendar" || group === "contacts") && !clientScopeAllows(group)) {
                 const label = group === "calendar" ? "calendars" : "address books";

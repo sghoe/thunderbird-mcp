@@ -80,9 +80,13 @@ async function pairClients(clients, extensionDir = EXTENSION_DIR) {
 
 // ── Local SMTP sink ──────────────────────────────────────────────────────
 
+// mode: "accept" (default); "reject-rcpt" answers RCPT with 550 (a definitive
+// refusal); "reset-after-data" stores the message but resets the connection
+// instead of confirming it (the server accepted it, the client cannot know).
 function startSmtpSink() {
   const messages = [];
   const sockets = new Set();
+  const control = { mode: "accept" };
   const server = net.createServer((socket) => {
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket));
@@ -104,6 +108,10 @@ function startSmtpSink() {
           inData = false;
           messages.push({ ...current, receivedAt: Date.now() });
           current = { from: "", to: [], data: "" };
+          if (control.mode === "reset-after-data") {
+            socket.resetAndDestroy();
+            return;
+          }
           reply("250 OK queued");
           continue;
         }
@@ -115,6 +123,7 @@ function startSmtpSink() {
         if (verb === "EHLO") { reply("250-sink.test"); reply("250 8BITMIME"); }
         else if (verb === "HELO") reply("250 sink.test");
         else if (verb === "MAIL") { current.from = line; reply("250 OK"); }
+        else if (verb === "RCPT" && control.mode === "reject-rcpt") reply("550 5.1.1 No such user");
         else if (verb === "RCPT") { current.to.push(line); reply("250 OK"); }
         else if (verb === "DATA") { inData = true; reply("354 End data with <CR><LF>.<CR><LF>"); }
         else if (verb === "QUIT") { reply("221 Bye"); socket.end(); }
@@ -128,6 +137,8 @@ function startSmtpSink() {
       resolve({
         port: server.address().port,
         messages,
+        get mode() { return control.mode; },
+        set mode(value) { control.mode = value; },
         close: () => new Promise((r) => { for (const s of sockets) s.destroy(); server.close(() => r()); }),
       });
     });

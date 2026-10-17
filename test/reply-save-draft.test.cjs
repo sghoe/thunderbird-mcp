@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const { Core } = require("./helpers/core-modules.cjs");
 
 const source = fs.readFileSync(path.resolve(__dirname, "../extension/mcp_server/api.js"), "utf8");
 // Use the production marker+VM pattern from privacy-messages.test.cjs.
@@ -34,6 +35,7 @@ function loadReply(options = {}) {
     getFlag(flag) { calls.flags.push(flag); return true; },
   };
   const sandbox = {
+    Core,
     draftFolderPeriodicRestriction: () => null,
     TextDecoder,
     Uint8Array,
@@ -157,6 +159,7 @@ describe("replyToMessage saveAsDraft", () => {
     const result = await reply({ replyAll: true, to: "recipient@example.com", cc: "cc@example.com", attachments: [attachment] });
     assert.equal(result.success, true);
     assert.equal(result.message, "Reply saved as draft");
+    assert.equal(result.operationState, "completed");
     assert.equal(calls.sends, 0);
     assert.equal(calls.saves, 1);
     const args = calls.opens[0];
@@ -274,6 +277,9 @@ describe("replyToMessage saveAsDraft", () => {
       assert.equal(calls.windows[0].unregistered, mode === "unsupported" ? undefined : true);
       assert.equal(calls.windows[0].gCloseWindowAfterSave, false);
       assert.equal(calls.windows[0].DisplaySaveFolderDlg, calls.windows[0].originalDialog);
+      // Errors raised before the save get "failed" from callTool.
+      const expectedState = { failure: "failed", reject: "unknown", timeout: "unknown" }[mode];
+      assert.equal(result.operationState, expectedState);
       if (mode === "timeout") {
         assert.equal(result.saveOutcome, "uncertain");
         assert.match(result.error, /uncertain.*may still complete/);

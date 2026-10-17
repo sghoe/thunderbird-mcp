@@ -137,3 +137,93 @@ describe("filter register and revocation (native)", { skip: !h.thunderbirdBinary
     assert.deepEqual(byName, { "Kept forward": false, "User-changed forward": true });
   });
 });
+
+// Honest operation states: what the result says matches what the SMTP sink
+// and Thunderbird actually observed; nothing is retried.
+describe("operation states (native)", { skip: !h.thunderbirdBinary() && "THUNDERBIRD_BIN not set" }, () => {
+  let tb;
+  before(async () => {
+    tb = await h.startThunderbird({ mailboxes: { alice: { Inbox: f.simple({ id: "orig@x.test", subject: "Original", text: "x" }) } } });
+    await tb.waitForMessages(INBOX, 1);
+  });
+  after(async () => { await tb?.stop(); });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  // Thunderbird reports failed sends in its own alert; Marionette dismisses
+  // an open alert on the next command and reports it, so retry once.
+  const closeWindows = async () => {
+    try { return await closeWindowsOnce(); } catch (e) {
+      if (!/unexpected alert open/i.test(e.message)) throw e;
+      return closeWindowsOnce();
+    }
+  };
+  const closeWindowsOnce = () => tb.marionette.run(`
+    let closed = 0;
+    for (const type of ["msgcompose", "Calendar:EventDialog", "Calendar:EventSummaryDialog"]) {
+      for (const win of Services.wm.getEnumerator(type)) { win.close(); closed++; }
+    }
+    for (const win of Services.wm.getEnumerator(null)) {
+      if (win.document?.documentElement?.id === "commonDialogWindow") { win.close(); closed++; }
+    }
+    return closed;
+  `);
+
+  it("reports completed when the server confirmed delivery", async () => {
+    tb.smtp.mode = "accept";
+    const before = tb.smtp.messages.length;
+    const r = await tb.call("sendMail", { to: "ok@sink.test", subject: "state ok", body: "b", skipReview: true });
+    assert.equal(r.result.operationState, "completed", JSON.stringify(r.result));
+    assert.equal(tb.smtp.messages.length, before + 1);
+  });
+
+  it("reports failed when the server refused the recipient", async () => {
+    tb.smtp.mode = "reject-rcpt";
+    const before = tb.smtp.messages.length;
+    const r = await tb.call("sendMail", { to: "nobody@sink.test", subject: "state refused", body: "b", skipReview: true });
+    tb.smtp.mode = "accept";
+    assert.equal(r.result.operationState, "failed", JSON.stringify(r.result));
+    assert.doesNotMatch(r.result.error, /may have accepted/);
+    assert.equal(tb.smtp.messages.length, before);
+    await closeWindows();
+  });
+
+  it("reports unknown when the connection broke after the message was handed over, and never resends", async () => {
+    tb.smtp.mode = "reset-after-data";
+    const before = tb.smtp.messages.length;
+    const r = await tb.call("sendMail", { to: "maybe@sink.test", subject: "state reset", body: "b", skipReview: true });
+    assert.equal(r.result.operationState, "unknown", JSON.stringify(r.result));
+    assert.match(r.result.error, /check Sent before retrying/);
+    assert.equal(tb.smtp.messages.length, before + 1, "the server did receive it");
+    tb.smtp.mode = "accept";
+    await settle(3000);
+    assert.equal(tb.smtp.messages.length, before + 1, "no automatic resend");
+    await closeWindows();
+  });
+
+  it("reports opened-for-review for the compose window and completed for a saved draft", async () => {
+    const before = tb.smtp.messages.length;
+    const review = await tb.call("sendMail", { to: "review@sink.test", subject: "state review", body: "b" });
+    assert.equal(review.result.operationState, "opened-for-review", JSON.stringify(review.result));
+    const draft = await tb.call("saveDraft", { to: "draft@sink.test", subject: "state draft", body: "b" });
+    assert.equal(draft.result.operationState, "completed", JSON.stringify(draft.result));
+    assert.ok(await closeWindows() >= 1);
+    assert.equal(tb.smtp.messages.length, before);
+  });
+
+  it("reports failed for a refusal before any effect", async () => {
+    const r = await tb.call("forwardMessage", { messageId: "missing@x.test", folderPath: INBOX, to: "x@sink.test", skipReview: true });
+    assert.ok(r.result.error, JSON.stringify(r.result));
+    assert.equal(r.result.operationState, "failed");
+    const other = await tb.call("getMessage", { messageId: "missing@x.test", folderPath: INBOX });
+    assert.equal(other.result.operationState, undefined, "only sending, draft and calendar tools carry a state");
+  });
+
+  it("reports submitted for a direct calendar write and opened-for-review for the dialog", async () => {
+    const event = { title: "State event", startDate: "2030-01-02T10:00:00Z", endDate: "2030-01-02T11:00:00Z", calendarId: "testcal" };
+    const direct = await tb.call("createEvent", { ...event, skipReview: true });
+    assert.equal(direct.result.operationState, "submitted", JSON.stringify(direct.result));
+    const dialog = await tb.call("createEvent", event);
+    assert.equal(dialog.result.operationState, "opened-for-review", JSON.stringify(dialog.result));
+    await settle(500);
+    await closeWindows();
+  });
+});
