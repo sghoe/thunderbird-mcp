@@ -325,6 +325,8 @@ function makeFilterHarness({
   registerFails = false,
   // Identical rules of which only some are registered.
   mixedGroup = false,
+  // An identical rule not created through MCP exists for the new effect.
+  foreignTwin = false,
   defaultAccount = null,
   // Further accounts (e.g. POP accounts deferring into this one).
   otherAccounts = [],
@@ -407,6 +409,8 @@ function makeFilterHarness({
       filterIsRegistered: (accountKey, filter) => registered(filter),
     liveFilterMatches: () => 1,
     filterGroupMixed: () => mixedGroup,
+    filterHasForeignTwin: () => foreignTwin,
+    FOREIGN_TWIN_ERROR: "Not permitted: an identical rule that was not created through MCP already exists",
     MIXED_GROUP_ERROR: "Not permitted: identical rules exist, of which only some were created through MCP",
     filterRegistryRestriction: (...args) => {
       registryCalls.push(["check", ...args]);
@@ -2594,6 +2598,16 @@ describe("stored filter actions need the calling client's capabilities", () => {
       assert.equal(h.registryCalls.filter(call => call[0] !== "check").length, before);
     });
 
+    it("refuses creating or changing a rule into a twin of a rule not created through MCP", () => {
+      const h = makeFilterHarness({ granted: [...own, "filters.foreign"], foreignTwin: true });
+      const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
+      assert.match(h.api.createFilter("account", "Copy", true, undefined, conditions, [{ type: "markRead" }]).error, /identical rule that was not created through MCP/);
+      assert.equal(h.filterList.filters.length, 0);
+      h.seed({ name: "Mine" });
+      assert.match(h.api.updateFilter("account", 0, "Changed (mock fingerprint follows the name)").error, /identical rule that was not created through MCP/);
+      assert.equal(h.filterList.filters[0].filterName, "Mine");
+    });
+
     it("leaves the register untouched for a rename or a disable", () => {
       const sameFingerprint = makeFilterHarness({ granted: [...own, "filters.foreign"], mixedGroup: true });
       // Production fingerprints ignore the name and the enabled state.
@@ -2619,6 +2633,7 @@ describe("stored filter actions need the calling client's capabilities", () => {
       assert.match(foreign.api.filterTargetRestriction({ URI: "imap://account/Projects/Q3" }).error, /User move.*requires filters\.foreign/);
       assert.match(foreign.api.filterTargetRestriction({ URI: "imap://account/Projects" }).error, /filters\.foreign/, "a parent folder too");
       assert.equal(foreign.api.filterTargetRestriction({ URI: "imap://account/Projects/Q30" }), null, "not a prefix match by name");
+      assert.match(foreign.api.filterTargetRestriction({ URI: "imap://account/projects/q3" }).error, /filters\.foreign/, "case-insensitive, like Thunderbird's local rewrite");
       assert.equal(foreign.api.filterTargetRestriction({ URI: "imap://account/Other" }), null);
       const noRead = makeFilterHarness({ granted: own.filter(cap => cap !== "filters.read"), registered: () => false });
       withMove(noRead, "imap://account/Projects/Q3");
@@ -2637,6 +2652,7 @@ describe("stored filter actions need the calling client's capabilities", () => {
         const error = h.api.filterTargetRestriction({ URI: "imap://account/Projects/Q3" }).error;
         assert.match(error, /account this client may not use/);
         assert.doesNotMatch(error, /Private payroll/);
+        assert.match(h.api.filterTargetRestriction({ URI: "IMAP://account/PROJECTS/q3" }).error, /account this client may not use/);
       }
       const own_ = makeFilterHarness({ granted: own, registered: () => true });
       withMove(own_, "imap://account/Projects/Q3");

@@ -164,7 +164,7 @@ function loadAdapter({ initial, unreadable = false } = {}) {
     constant("PREF_FILTER_REGISTRY"),
     block("CLIENT REGISTRY ADAPTER"),
     block("FILTER REGISTRY ADAPTER"),
-    "this.registry = { filterFingerprint, registerFilterChange, revokeRegisteredFilters, readFilterRegistry, writeFilterRegistry, filterIsRegistered, filterGroupMixed };",
+    "this.registry = { filterFingerprint, registerFilterChange, revokeRegisteredFilters, readFilterRegistry, writeFilterRegistry, filterIsRegistered, filterGroupMixed, filterHasForeignTwin };",
     "this.authenticateClient = authenticateClient;",
     "this.api = {",
     block("CLIENT MANAGEMENT API"),
@@ -326,6 +326,16 @@ describe("client authentication and management", () => {
     env.sandbox.registry.registerFilterChange(b.id, "account1", second);
     assert.equal(env.sandbox.registry.filterGroupMixed("account1", fp, 2), true, "two clients: which rule is whose is unknown");
     assert.equal(env.sandbox.registry.filterGroupMixed("account1", "0".repeat(64), 1), false, "not registered at all");
+  });
+  it("detects a twin of a rule not created through MCP", async () => {
+    const { client } = await env.sandbox.api.createClient(settings);
+    const mine = env.makeRule("Mine", [{ type: 2, value: "x@example.invalid" }]);
+    env.sandbox.registry.registerFilterChange(client.id, "account1", mine);
+    const fp = env.sandbox.registry.filterFingerprint(mine);
+    assert.equal(env.sandbox.registry.filterHasForeignTwin("account1", fp, 0), false, "no live rule with this effect");
+    assert.equal(env.sandbox.registry.filterHasForeignTwin("account1", fp, 1), false, "the only one is registered");
+    assert.equal(env.sandbox.registry.filterHasForeignTwin("account1", fp, 2), true, "one of them is the user's");
+    assert.equal(env.sandbox.registry.filterHasForeignTwin("account1", "0".repeat(64), 1), true, "an unregistered rule");
   });
   it("never stores a register that would read as corrupt", () => {
     const before = env.prefs.get("extensions.thunderbird-mcp-hardened.filterRegistry");

@@ -3228,6 +3228,21 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
         return true;
       }
     }
+    // A rule identical to one not created through MCP could later take over
+    // that rule's identity (if either is edited in Thunderbird), so MCP never
+    // creates such a twin. liveMatches: live rules with this effect, without
+    // the rule being created or changed.
+    function filterHasForeignTwin(accountKey, fingerprint, liveMatches) {
+      if (liveMatches === 0) return false;
+      try {
+        const registry = readFilterRegistry();
+        if (registry.corrupt) return true;
+        return Core.filterRegistry.entryCount(registry.entries, accountKey, fingerprint) < liveMatches;
+      } catch {
+        return true;
+      }
+    }
+    const FOREIGN_TWIN_ERROR = "Not permitted: an identical rule that was not created through MCP already exists in this account; the register could not tell the two apart. Make the new rule differ (e.g. in a condition or action), or change the existing rule in Thunderbird.";
     const MIXED_GROUP_ERROR = "Not permitted: identical rules exist that were not all created through MCP by one client, so the register could not tell which one changed. Change or delete it in Thunderbird, or make the rules differ first.";
 
     // Checked before a rule is created or its effect changed: the change is
@@ -12527,7 +12542,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 const foreignAllowed = clientHasCapability("filters.foreign");
                 const move = resolveXpcomConstant("nsMsgFilterAction", "MoveToFolder");
                 const copy = resolveXpcomConstant("nsMsgFilterAction", "CopyToFolder");
-                const uri = folder.URI;
+                // Thunderbird matches local targets case-insensitively when it
+                // rewrites them; matching too much here only refuses more.
+                const uri = String(folder.URI).toLowerCase();
                 for (const account of MailServices.accounts.accounts) {
                   let list = null;
                   try {
@@ -12541,7 +12558,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                     for (let a = 0; a < rule.actionCount; a++) {
                       const action = rule.getActionAt(a);
                       if (action.type !== move && action.type !== copy) continue;
-                      const target = String(action.targetFolderUri || "");
+                      const target = String(action.targetFolderUri || "").toLowerCase();
                       if (target === uri || target.startsWith(`${uri}/`)) targets = true;
                     }
                     if (targets && !isAccountAllowed(account.key)) {
@@ -12677,6 +12694,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   const deferred = deferredListRestriction(server) || periodicRulesRestriction(server);
                   if (deferred) return deferred;
                 }
+                const newFingerprint = filterFingerprint(filter);
+                if (filterHasForeignTwin(account.key, newFingerprint, liveFilterMatches(filterList, newFingerprint))) {
+                  return { error: FOREIGN_TWIN_ERROR };
+                }
                 const registryError = filterRegistryRestriction(currentClientId(), account.key, { name: filter.filterName });
                 if (registryError) return registryError;
                 filterList.insertFilterAt(idx, filter);
@@ -12803,6 +12824,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 const effectChanged = filterFingerprint(candidate) !== oldFingerprint || (candidate.enabled && !filter.enabled);
                 if (effectChanged) {
                   if (filterGroupMixed(account.key, oldFingerprint, oldLiveMatches)) return { error: MIXED_GROUP_ERROR };
+                  const newFingerprint = filterFingerprint(candidate);
+                  if (newFingerprint !== oldFingerprint &&
+                      filterHasForeignTwin(account.key, newFingerprint, liveFilterMatches(filterList, newFingerprint))) {
+                    return { error: FOREIGN_TWIN_ERROR };
+                  }
                   const registryError = filterRegistryRestriction(currentClientId(), account.key, { name: candidate.filterName, oldFingerprint, oldLiveMatches });
                   if (registryError) return registryError;
                 }

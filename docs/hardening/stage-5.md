@@ -39,6 +39,12 @@ Stage 2 hotfixes stay in force throughout.
   the disabled rule (e.g. the rules file is locked on Windows), the rule
   stays disabled for the running session and is reported as a conflict. Rules without sending
   actions stay as they are.
+* Identical rules (same fingerprint) cannot be told apart. MCP never
+  creates a rule identical to one not created through MCP, and refuses
+  changes to groups of identical rules that are not all registered for
+  one client. Residual: if the user copies a rule created through MCP
+  exactly in Thunderbird and then edits one of the two, the register may
+  attribute the untouched one to the client.
 * Rules not created or changed through MCP belong to the user: changing,
   reordering or deleting them needs the new capability `filters.foreign`
   (part of the `automation` profile; clients paired earlier with an
@@ -227,6 +233,12 @@ draft and the refused waiting call.
 |---|---|
 | The folder guard checked who created an affected rule but not its account: a client could rewrite (through a folder rename/move/delete) rules of accounts it may not use (Sol) | a folder change that would rewrite a rule of an account the client may not use is refused, whoever created the rule and also with `filters.foreign` |
 | The reference secret changed with every server start (e.g. after saving "Listen on all interfaces"), so references expired earlier than documented (Opus) | one secret per add-on load (module level); the stale-reference error names restarts as a cause; a unit test keeps a reference across a server restart and makes it stale after a reload |
+## Review round 11 (Sol, Opus)
+
+| Finding | Fix |
+|---|---|
+| A client could create an identical copy of a user rule; once the user edited the copy in Thunderbird, the untouched original counted as registered (revocation disabled it and lost the changed copy without a conflict) (Sol) | creating a rule, or changing one into an effect, identical to an existing rule not created through MCP is refused; residual (user-made exact copies) documented in 5b |
+| The folder guard compared targets case-sensitively; Thunderbird rewrites local targets case-insensitively on rename (Opus, from comm-central source) | case-insensitive comparison (matching too much only refuses more) |
 ## Bound approvals – how each approval is tied to the concrete action
 
 | Approval | Bound to | Where |
