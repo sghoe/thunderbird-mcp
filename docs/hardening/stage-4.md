@@ -393,3 +393,22 @@ such as `List-Id`, copy-only attributes, header properties). These now
 count as known metadata attributes; add-on custom conditions and unmapped
 values still need `mail.body`. Regression test for a metadata-only client
 with a custom-header rule.
+
+## Result
+
+Round 18: Sol 6.1 and Opus 5.5 (reasoning high) both report no
+substantive findings. Stage 4 is review-clean.
+
+Verification at the final commit (Windows 11, Thunderbird 153.5.0esr):
+
+* Unit: all tests pass except the 2 pre-existing Windows-only Flatpak
+  tests; lint 0 errors.
+* Native: `npm run test:native` 59/59 (sequential).
+* Native parity: 64 calls / 40 tools identical to upstream v0.9.2 for a
+  full-access client.
+
+Not natively testable in the harness (no IMAP/POP/EWS/CalDAV servers):
+IMAP delete models, deferred POP delivery, Exchange delete model,
+server-side calendar scheduling and periodic delivery timing. These paths
+are covered by unit tests against Thunderbird's source behaviour and, for
+several of them, by the reviewers' own native reproductions.
