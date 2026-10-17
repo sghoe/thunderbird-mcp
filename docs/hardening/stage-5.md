@@ -125,3 +125,17 @@ Stage 2 hotfixes stay in force throughout.
   copies), `direct-send-outcome` (release per outcome); native:
   review window + replaced file → reviewed content sent; private copy
   removed after a completed direct send.
+
+## Bound approvals – how each approval is tied to the concrete action
+
+| Approval | Bound to | Where |
+|---|---|---|
+| Review sending (default) | the native compose window: the user sees and sends exactly the recipients (incl. CC/BCC), sender, text and attachments shown there; attachments are private copies made at call time | Stage 2, 5d |
+| Unattended sending (`compose.send`, Block `skipReview` off) | a deliberate per-client grant; every call is checked against the fully resolved action: sender identity and account, Sent-copy target, Post-outgoing filters, address collection, Periodic rules, attachment paths and content; nothing between check and delivery is controlled by the client | Stage 4, 5d |
+| Automatic sending filter rules (`filters.autosend`) | the rule's effect fingerprint; a changed rule is no longer "registered", revoking the client disables unchanged rules and reports changed ones | 5b |
+| Calendar scheduling (`calendar.schedule`) | the triggering change (attendees, meetings, assigned tasks) is checked on every write | Stage 4 |
+
+No second confirmation dialog is added: review mode already has the
+native window, and unattended mode is by definition without one. A
+client's statement or mail text is never accepted as consent; changes to
+a client's grants happen only in the options page.
