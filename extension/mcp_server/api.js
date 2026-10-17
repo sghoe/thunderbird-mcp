@@ -800,33 +800,37 @@ function getExtVersion() {
 // onShutdown). Only files of the private outgoing directory are adopted.
 const PREF_RETAINED_ATTACHMENTS = "extensions.thunderbird-mcp-hardened.retainedAttachments";
 const RETAINED_ATTACHMENT_NAME = /^\d+_\d+_[A-Za-z0-9._-]+$/;
-// Hand-over format: { files: [...], pinned: [...] } with file names inside
-// the private outgoing directory and indexes of the pinned ones; at most
-// MAX_RETAINED_ATTACHMENTS short names (< 100 characters each) keep it far
-// below Gecko's 1 MiB limit for string preferences.
-const MAX_RETAINED_ATTACHMENTS = 5000;
+// Hand-over: chunks <PREF_RETAINED_ATTACHMENTS>.0, .1, ... of
+// { files: [names in the private outgoing directory], pinned: [indexes] };
+// RETAINED_ATTACHMENT_CHUNK short names (< 100 characters) keep each chunk
+// far below Gecko's 1 MiB limit for string preferences.
+const RETAINED_ATTACHMENT_CHUNK = 2000;
+function retainedAttachmentPref(index) {
+  return `${PREF_RETAINED_ATTACHMENTS}.${index}`;
+}
 function adoptRetainedAttachmentFiles() {
   const adopted = { files: [], pinned: [] };
   try {
-    const text = Services.prefs.getStringPref(PREF_RETAINED_ATTACHMENTS, "");
-    Services.prefs.clearUserPref(PREF_RETAINED_ATTACHMENTS);
-    const data = text ? JSON.parse(text) : null;
-    if (!data || !Array.isArray(data.files)) return adopted;
-    const pinned = new Set(Array.isArray(data.pinned) ? data.pinned.filter(Number.isSafeInteger) : []);
     const dir = Services.dirsvc.get("TmpD", Ci.nsIFile);
     dir.append("thunderbird-mcp-hardened");
     dir.append("outgoing");
-    data.files.forEach((entry, index) => {
-      if (typeof entry !== "string" || !RETAINED_ATTACHMENT_NAME.test(entry)) return;
-      const file = dir.clone();
-      file.append(entry);
-      adopted.files.push(file.path);
-      if (pinned.has(index)) adopted.pinned.push(file.path);
-    });
+    for (let index = 0; Services.prefs.getPrefType(retainedAttachmentPref(index)) !== Ci.nsIPrefBranch.PREF_INVALID; index++) {
+      let data = null;
+      try { data = JSON.parse(Services.prefs.getStringPref(retainedAttachmentPref(index), "")); } catch { /* unreadable chunk */ }
+      Services.prefs.clearUserPref(retainedAttachmentPref(index));
+      if (!data || !Array.isArray(data.files)) continue;
+      const pinned = new Set(Array.isArray(data.pinned) ? data.pinned.filter(Number.isSafeInteger) : []);
+      data.files.forEach((entry, position) => {
+        if (typeof entry !== "string" || !RETAINED_ATTACHMENT_NAME.test(entry)) return;
+        const file = dir.clone();
+        file.append(entry);
+        adopted.files.push(file.path);
+        if (pinned.has(position)) adopted.pinned.push(file.path);
+      });
+    }
   } catch { /* nothing to adopt */ }
   return adopted;
-}
-const _adoptedAttachFiles = adoptRetainedAttachmentFiles();
+}const _adoptedAttachFiles = adoptRetainedAttachmentFiles();
 const _tempAttachFiles = new Set(_adoptedAttachFiles.files);
 // Files still needed without an open compose window referring to them:
 // pinned while the tool call that created them runs (it may still be
@@ -6303,14 +6307,23 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	              return `${MESSAGE_REF_PREFIX}${hdr.messageKey}:${hdr.messageId}`;
 	            }
 	            // Candidates for an ambiguous Message-ID: reference, date and author only
-	            // (no subjects, which may be protected for encrypted messages).
+	            // (no subjects, which may be protected for encrypted messages); date and
+	            // author only for clients that may read metadata (e.g. not for a
+	            // client that may only delete).
 	            function ambiguousMessageError(db, messageIds) {
 	              const candidates = [];
 	              const wanted = new Set(messageIds);
+	              let withMetadata = false;
+	              try { withMetadata = clientHasCapability("mail.metadata"); } catch { /* fail closed */ }
 	              try {
 	                for (const hdr of db.enumerateMessages()) {
 	                  if (!wanted.has(hdr.messageId)) continue;
-	                  candidates.push({ messageId: messageRefFor(hdr), date: new Date(hdr.date / 1000).toISOString(), author: hdr.mime2DecodedAuthor || hdr.author || "" });
+	                  const candidate = { messageId: messageRefFor(hdr) };
+	                  if (withMetadata) {
+	                    candidate.date = new Date(hdr.date / 1000).toISOString();
+	                    candidate.author = hdr.mime2DecodedAuthor || hdr.author || "";
+	                  }
+	                  candidates.push(candidate);
 	                  if (candidates.length >= 20) break;
 	                }
 	              } catch { /* candidates are a convenience */ }
@@ -14017,18 +14030,13 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
       }
     }
     const retainedAttachments = [];
-    const retainedPinned = [];
-    // Pinned files first: beyond MAX_RETAINED_ATTACHMENTS files are removed.
-    const ordered = [..._tempAttachFiles].sort((a, b) => Number(_pinnedAttachFiles.has(b)) - Number(_pinnedAttachFiles.has(a)));
-    for (const tmpPath of ordered) {
+    for (const tmpPath of _tempAttachFiles) {
       try {
         const f = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
         f.initWithPath(tmpPath);
-        if (!isAppShutdown && retainedAttachments.length < MAX_RETAINED_ATTACHMENTS &&
-            (attachmentsInUse === null || _pinnedAttachFiles.has(tmpPath) ||
-             attachmentsInUse.has(Services.io.newFileURI(f).spec))) {
-          if (_pinnedAttachFiles.has(tmpPath)) retainedPinned.push(retainedAttachments.length);
-          retainedAttachments.push(f.leafName);
+        if (!isAppShutdown && (attachmentsInUse === null || _pinnedAttachFiles.has(tmpPath) ||
+            attachmentsInUse.has(Services.io.newFileURI(f).spec))) {
+          retainedAttachments.push({ name: f.leafName, pinned: _pinnedAttachFiles.has(tmpPath) });
           continue;
         }
         if (f.exists()) f.remove(false);
@@ -14037,11 +14045,21 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
     _tempAttachFiles.clear();
     _pinnedAttachFiles.clear();
     _uncertainAttachFiles.clear();
+    // Hand over in bounded chunks; stale chunks of an earlier hand-over go.
+    let chunk = 0;
+    for (let start = 0; start < retainedAttachments.length; start += RETAINED_ATTACHMENT_CHUNK, chunk++) {
+      const part = retainedAttachments.slice(start, start + RETAINED_ATTACHMENT_CHUNK);
+      try {
+        Services.prefs.setStringPref(retainedAttachmentPref(chunk), JSON.stringify({
+          files: part.map(entry => entry.name),
+          pinned: part.flatMap((entry, index) => (entry.pinned ? [index] : [])),
+        }));
+      } catch { /* best effort */ }
+    }
     try {
-      if (retainedAttachments.length) {
-        Services.prefs.setStringPref(PREF_RETAINED_ATTACHMENTS, JSON.stringify({ files: retainedAttachments, pinned: retainedPinned }));
+      while (Services.prefs.getPrefType(retainedAttachmentPref(chunk)) !== Ci.nsIPrefBranch.PREF_INVALID) {
+        Services.prefs.clearUserPref(retainedAttachmentPref(chunk++));
       }
-      else Services.prefs.clearUserPref(PREF_RETAINED_ATTACHMENTS);
     } catch { /* best effort */ }
     // END SHUTDOWN ATTACHMENT CLEANUP
     if (isAppShutdown) return;

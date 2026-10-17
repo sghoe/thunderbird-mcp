@@ -115,7 +115,7 @@ Stage 2 hotfixes stay in force throughout.
   or updating the add-on keeps the files that open compose windows still
   attach (all of them if a window is still loading or its compose state
   cannot be inspected) and hands them to the next instance through the
-  preference `extensions.thunderbird-mcp-hardened.retainedAttachments`
+  preferences `extensions.thunderbird-mcp-hardened.retainedAttachments.<n>` (bounded chunks)
   (the re-enabled add-on gets a fresh script scope); the next instance
   adopts only files of the private outgoing directory; files of open
   windows are checked again at its own add-on shutdown, files of
@@ -189,8 +189,14 @@ draft and the refused waiting call.
 | Finding | Fix |
 |---|---|
 | Round 4 pinned every private file until application shutdown, so review-window files of the whole session survived disabling or uninstalling the add-on (Opus) | `callTool` collects the files a call creates (all four tools create them in the synchronous part of the call) and unpins them when the call ends; only files of a direct send/save with outcome `unknown` stay pinned. Review-window files are then protected only by the open-window check. Unit tests use the real `callTool` and tracking |
-| The hand-over list could exceed Gecko's 1 MiB preference limit; the write failed after tracking was cleared (Sol) | the hand-over stores file names only (the directory is implicit) and the pinned ones as indexes, at most 5,000 files with pinned ones first; files beyond that are removed. Worst case < 1 MiB (unit test) |
+| The hand-over list could exceed Gecko's 1 MiB preference limit; the write failed after tracking was cleared (Sol) | the hand-over stores file names only (the directory is implicit) and the pinned ones as indexes (round 6: in chunks, without a cap) |
 | Private names embedded the full original name and could exceed NTFS's 255-character limit (Sol) | short names `<time>_<counter>_<stem ≤ 40>.<ext ≤ 16>`; the original name stays in the attachment descriptor |
+## Review round 6 (Opus: no substantive findings; Sol)
+
+| Finding | Fix |
+|---|---|
+| The candidates of an ambiguous Message-ID listed date and author even for clients without `mail.metadata` (e.g. a client that may only delete) (Sol) | date and author only with `mail.metadata`; otherwise only the references (unit test with the real block) |
+| The 5,000-file hand-over cap deleted files that were pinned or attached in open windows (Sol) | no cap: the hand-over is written in chunks of 2,000 names (each far below 1 MiB, unit test), stale chunks are cleared; files in use are never deleted |
 ## Bound approvals – how each approval is tied to the concrete action
 
 | Approval | Bound to | Where |

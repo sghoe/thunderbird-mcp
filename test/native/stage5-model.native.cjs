@@ -350,7 +350,7 @@ describe("content-bound path attachments (native)", { skip: !h.thunderbirdBinary
     const outgoing = path.join(tb.tmpDir, "thunderbird-mcp-hardened", "outgoing");
     const kept = fs.readdirSync(outgoing).filter((n) => n.endsWith("_handoff.txt"));
     assert.equal(kept.length, 1, "kept for the open window");
-    const pref = await tb.marionette.run(`return Services.prefs.getStringPref("extensions.thunderbird-mcp-hardened.retainedAttachments", "");`);
+    const pref = await tb.marionette.run(`return Services.prefs.getStringPref("extensions.thunderbird-mcp-hardened.retainedAttachments.0", "");`);
     assert.equal(pref, "", "the new instance took the hand-over");
     // Quit Thunderbird (no prompts); the adopting instance must remove the file.
     try { await tb.marionette.run(`Services.startup.quit(Ci.nsIAppStartup.eForceQuit); return true;`); } catch { /* connection ends */ }

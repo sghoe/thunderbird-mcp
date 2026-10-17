@@ -30,12 +30,14 @@ function composeWindow({ bucket = [], fields = [], ready = true, loading = false
   };
 }
 
-function run(isAppShutdown, { windows = [], pinned = [], files = [A, B, C], max = 10000 } = {}) {
+function run(isAppShutdown, { windows = [], pinned = [], files = [A, B, C], chunk = 2000, stale = 0 } = {}) {
   const removed = [];
   const prefs = new Map();
+  for (let i = 0; i < stale; i++) prefs.set(`retained.${i}`, "{}");
   const sandbox = {
     PREF_RETAINED_ATTACHMENTS: "retained",
-    MAX_RETAINED_ATTACHMENTS: max,
+    RETAINED_ATTACHMENT_CHUNK: chunk,
+    retainedAttachmentPref: (index) => `retained.${index}`,
     _tempAttachFiles: new Set(files),
     _pinnedAttachFiles: new Set(pinned),
     _uncertainAttachFiles: new Set(pinned),
@@ -44,17 +46,23 @@ function run(isAppShutdown, { windows = [], pinned = [], files = [A, B, C], max 
       exists: () => true,
       remove() { removed.push(this.path); },
     }) } },
-    Ci: { nsIFile: {} },
+    Ci: { nsIFile: {}, nsIPrefBranch: { PREF_INVALID: 0, PREF_STRING: 32 } },
     Services: {
       ww: { getWindowEnumerator: () => windows },
       io: { newFileURI: file => ({ spec: `file://${file.path}` }) },
-      prefs: { setStringPref: (k, v) => prefs.set(k, v), clearUserPref: k => prefs.delete(k) },
+      prefs: {
+        getPrefType: k => (prefs.has(k) ? 32 : 0),
+        setStringPref: (k, v) => prefs.set(k, v),
+        clearUserPref: k => prefs.delete(k),
+      },
     },
   };
   vm.createContext(sandbox);
   vm.runInContext(`(function (isAppShutdown) {\n${block}\n})(${isAppShutdown});`, sandbox);
-  const handover = prefs.has("retained") ? JSON.parse(prefs.get("retained")) : { files: [], pinned: [] };
-  return { removed, retained: handover.files, retainedPinned: handover.pinned, sandbox };
+  const chunks = [...prefs.keys()].sort((a, b) => Number(a.split(".")[1]) - Number(b.split(".")[1])).map(k => JSON.parse(prefs.get(k)));
+  const retained = chunks.flatMap(c => c.files);
+  const retainedPinned = chunks.flatMap(c => c.pinned.map(i => c.files[i]));
+  return { removed, retained, retainedPinned, chunks, prefs, sandbox };
 }
 
 describe("attachment files at add-on shutdown (Stage 5)", () => {
@@ -63,7 +71,7 @@ describe("attachment files at add-on shutdown (Stage 5)", () => {
       windows: [composeWindow({ bucket: [`file://${A}`] })],
       pinned: [B],
     });
-    assert.deepEqual(retainedPinned.map(i => retained[i]), ["1_2_pinned.txt"], "only the pinned file stays pinned in the next instance");
+    assert.deepEqual(retainedPinned, ["1_2_pinned.txt"], "only the pinned file stays pinned in the next instance");
     assert.deepEqual(removed, [C]);
     assert.deepEqual([...retained].sort(), ["1_1_window.txt", "1_2_pinned.txt"]);
     assert.equal(sandbox._tempAttachFiles.size, 0);
@@ -86,19 +94,23 @@ describe("attachment files at add-on shutdown (Stage 5)", () => {
     });
   }
 
-  it("hands over pinned files first, keeps the hand-over bounded and removes the rest", () => {
-    const files = Array.from({ length: 30 }, (_, i) => `/tmp/thunderbird-mcp-hardened/outgoing/1700000000000_${i}_attachment.pdf`);
-    // A loading window: every file would be kept, but only up to the limit.
-    const { removed, retained, retainedPinned } = run(false, { files, pinned: [files[29]], max: 10, windows: [composeWindow({ loading: true })] });
-    assert.equal(retained.length, 10);
-    assert.deepEqual(retainedPinned.map(i => retained[i]), ["1700000000000_29_attachment.pdf"], "pinned first");
-    assert.equal(removed.length, 20);
+  it("hands over any number of files in bounded chunks and deletes none that are in use", () => {
+    const files = Array.from({ length: 25 }, (_, i) => `/tmp/thunderbird-mcp-hardened/outgoing/1700000000000_${i}_attachment.pdf`);
+    const { removed, retained, retainedPinned, chunks, prefs } = run(false, {
+      files, pinned: [files[24]], chunk: 10, stale: 5,
+      windows: [composeWindow({ bucket: files.slice(0, 24).map(p => `file://${p}`) })],
+    });
+    assert.deepEqual(removed, []);
+    assert.equal(retained.length, 25);
+    assert.deepEqual(chunks.map(c => c.files.length), [10, 10, 5]);
+    assert.deepEqual(retainedPinned, ["1700000000000_24_attachment.pdf"]);
+    assert.equal(prefs.has("retained.3") || prefs.has("retained.4"), false, "stale chunks removed");
   });
 
-  it("stays far below Gecko's 1 MiB preference limit at the maximum", () => {
-    const max = Number(/const MAX_RETAINED_ATTACHMENTS = (\d+);/.exec(source)[1]);
+  it("keeps each chunk far below Gecko's 1 MiB preference limit", () => {
+    const chunk = Number(/const RETAINED_ATTACHMENT_CHUNK = (\d+);/.exec(source)[1]);
     // Longest names privateAttachmentName produces: 13-digit time, long counter, 40-char stem, 16-char extension.
-    const names = Array.from({ length: max }, (_, i) => `1700000000000_${100000 + i}_${"a".repeat(40)}.${"b".repeat(16)}`);
+    const names = Array.from({ length: chunk }, (_, i) => `1700000000000_${100000 + i}_${"a".repeat(40)}.${"b".repeat(16)}`);
     const bytes = Buffer.byteLength(JSON.stringify({ files: names, pinned: names.map((_, i) => i) }), "utf8");
     assert.ok(bytes < 1024 * 1024, `${bytes} bytes`);
   });
@@ -112,19 +124,33 @@ describe("attachment files at add-on shutdown (Stage 5)", () => {
 
 describe("attachment hand-over to the next instance (Stage 5)", () => {
   const adoptStart = source.indexOf("const PREF_RETAINED_ATTACHMENTS");
+  // Chunks as written by the shutdown block.
+  const chunked = (list, pinned, size = 2000) => {
+    const prefs = new Map();
+    for (let i = 0; i * size < list.length; i++) {
+      const files = list.slice(i * size, (i + 1) * size);
+      prefs.set(`extensions.thunderbird-mcp-hardened.retainedAttachments.${i}`,
+        JSON.stringify({ files, pinned: files.flatMap((name, index) => (pinned.includes(name) ? [index] : [])) }));
+    }
+    return prefs;
+  };
   const adoptEnd = source.indexOf("const _adoptedAttachFiles", adoptStart);
   assert.ok(adoptStart >= 0 && adoptEnd > adoptStart, "adoption code not found");
-  function adopt(list, pinned = []) {
-    const prefs = new Map([["extensions.thunderbird-mcp-hardened.retainedAttachments", JSON.stringify({ files: list, pinned: pinned.map(name => list.indexOf(name)) })]]);
+  function adopt(list, pinned = [], size = 2000) {
+    const prefs = chunked(list, pinned, size);
     const sandbox = {
       Services: {
-        prefs: { getStringPref: (k, d) => (prefs.has(k) ? prefs.get(k) : d), clearUserPref: k => prefs.delete(k) },
+        prefs: {
+          getPrefType: k => (prefs.has(k) ? 32 : 0),
+          getStringPref: (k, d) => (prefs.has(k) ? prefs.get(k) : d),
+          clearUserPref: k => prefs.delete(k),
+        },
         dirsvc: { get: () => {
           const dir = { path: "/tmp", append(n) { this.path += `/${n}`; }, clone() { return { ...this, append: dir.append }; } };
           return dir;
         } },
       },
-      Ci: { nsIFile: {} },
+      Ci: { nsIFile: {}, nsIPrefBranch: { PREF_INVALID: 0 } },
       Cc: { "@mozilla.org/file/local;1": { createInstance: () => ({
         initWithPath(p) { this.path = p; this.leafName = p.split("/").pop(); this.parent = { path: p.slice(0, p.lastIndexOf("/")) }; },
       }) } },
@@ -135,9 +161,10 @@ describe("attachment hand-over to the next instance (Stage 5)", () => {
   }
 
   it("adopts every valid retained file, also beyond 1,000", () => {
-    const list = Array.from({ length: 1500 }, (_, i) => `1_${i}_f.txt`);
-    const { adopted, prefs } = adopt(list);
-    assert.equal(adopted.files.length, 1500);
+    const list = Array.from({ length: 4500 }, (_, i) => `1_${i}_f.txt`);
+    const { adopted, prefs } = adopt(list, [list[4499]]);
+    assert.equal(adopted.files.length, 4500);
+    assert.deepEqual([...adopted.pinned], ["/tmp/thunderbird-mcp-hardened/outgoing/1_4499_f.txt"], "pinned index within its chunk");
     assert.equal(prefs.size, 0, "the hand-over is consumed");
   });
 

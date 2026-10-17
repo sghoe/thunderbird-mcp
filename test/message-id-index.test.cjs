@@ -155,3 +155,24 @@ describe("Message-ID index", () => {
     assert.equal(dbs[9].listeners.size, 1);
   });
 });
+
+describe("ambiguity candidates follow mail.metadata (Stage 5 review round 6)", () => {
+  function candidatesFor(granted) {
+    const sandbox = { Date, Ci: { nsITimer: { TYPE_ONE_SHOT: 0 } }, Cc: {}, clientHasCapability: (cap) => granted.includes(cap) };
+    vm.createContext(sandbox);
+    const make = vm.runInContext(`(() => { ${snippet}\nreturn ambiguousMessageError; })()`, sandbox);
+    const db = { enumerateMessages: () => [
+      { messageId: "d@x", messageKey: 1, date: 1e15, author: "Boss <boss@corp.test>" },
+      { messageId: "d@x", messageKey: 2, date: 2e15, author: "Mallory <m@attacker.test>" },
+    ] };
+    return JSON.parse(JSON.stringify(make(db, ["d@x"]).candidates));
+  }
+  it("lists date and author for clients that may read metadata", () => {
+    const candidates = candidatesFor(["mail.metadata"]);
+    assert.deepEqual(candidates.map((c) => c.author), ["Boss <boss@corp.test>", "Mallory <m@attacker.test>"]);
+    assert.ok(candidates.every((c) => c.date && /^msgref:\d+:d@x$/.test(c.messageId)));
+  });
+  it("lists only references for a client that may only delete", () => {
+    assert.deepEqual(candidatesFor(["mail.delete"]), [{ messageId: "msgref:1:d@x" }, { messageId: "msgref:2:d@x" }]);
+  });
+});
