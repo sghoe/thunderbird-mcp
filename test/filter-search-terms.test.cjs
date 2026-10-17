@@ -323,6 +323,8 @@ function makeFilterHarness({
   registryError = null,
   // The register write fails after the rule was saved.
   registerFails = false,
+  // Identical rules of which only some are registered.
+  mixedGroup = false,
   defaultAccount = null,
   // Further accounts (e.g. POP accounts deferring into this one).
   otherAccounts = [],
@@ -404,6 +406,8 @@ function makeFilterHarness({
       addressCollectionRestriction: (recipients) => collection(recipients),
       filterIsRegistered: (accountKey, filter) => registered(filter),
     liveFilterMatches: () => 1,
+    filterGroupMixed: () => mixedGroup,
+    MIXED_GROUP_ERROR: "Not permitted: identical rules exist, of which only some were created through MCP",
     filterRegistryRestriction: (...args) => {
       registryCalls.push(["check", ...args]);
       return registryError ? { error: registryError } : null;
@@ -2575,6 +2579,30 @@ describe("stored filter actions need the calling client's capabilities", () => {
       assert.equal(h.filterList.filters[0].filterName, "Existing");
       const disabled = h.api.updateFilter("account", 0, undefined, false);
       assert.equal(disabled.success, true, disabled.error);
+    });
+
+    it("refuses changing, switching on or deleting one of identical rules of which only some are registered", () => {
+      const h = makeFilterHarness({ granted: [...own, "filters.foreign"], mixedGroup: true });
+      h.seed({ name: "Twin", enabled: false });
+      const before = h.registryCalls.length;
+      assert.match(h.api.updateFilter("account", 0, undefined, true).error, /only some were created through MCP/);
+      // The mock fingerprint follows the name; production follows the conditions.
+      assert.match(h.api.updateFilter("account", 0, "Twin changed", undefined, undefined, [{ attrib: "subject", op: "contains", value: "y" }]).error, /only some/);
+      assert.match(h.api.deleteFilter("account", 0).error, /only some/);
+      assert.equal(h.filterList.filters.length, 1);
+      assert.equal(h.filterList.filters[0].enabled, false);
+      assert.equal(h.registryCalls.filter(call => call[0] !== "check").length, before);
+    });
+
+    it("leaves the register untouched for a rename or a disable", () => {
+      const sameFingerprint = makeFilterHarness({ granted: [...own, "filters.foreign"], mixedGroup: true });
+      // Production fingerprints ignore the name and the enabled state.
+      sameFingerprint.seed({ name: "Twin" });
+      const calls = sameFingerprint.registryCalls;
+      const original = calls.length;
+      const disabled = sameFingerprint.api.updateFilter("account", 0, undefined, false);
+      assert.equal(disabled.success, true, disabled.error);
+      assert.equal(calls.slice(original).some(call => call[0] === "register"), false);
     });
 
     it("treats switching a rule on as a change that must be registered", () => {

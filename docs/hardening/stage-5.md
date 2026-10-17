@@ -197,6 +197,12 @@ draft and the refused waiting call.
 |---|---|
 | The candidates of an ambiguous Message-ID listed date and author even for clients without `mail.metadata` (e.g. a client that may only delete) (Sol) | date and author only with `mail.metadata`; otherwise only the references (unit test with the real block) |
 | The 5,000-file hand-over cap deleted files that were pinned or attached in open windows (Sol) | no cap: the hand-over is written in chunks of 2,000 names (each far below 1 MiB, unit test), stale chunks are cleared; files in use are never deleted |
+## Review round 7 (Sol, Opus)
+
+| Finding | Fix |
+|---|---|
+| Renaming one of identical rules, of which only one was registered, added an entry and made the user's identical rule "registered" (revocation disabled both) (Sol) | renaming and disabling leave the register untouched; changing the effect of, switching on or deleting a rule of a group of identical rules of which only some are registered is refused (the register cannot tell which one is meant); the user can do it in Thunderbird |
+| A sender can choose a Message-ID that looks like a reference (`msgref:5:<other ID>`); it was resolved by key to another message (Opus) | if the input matches both a message's literal Message-ID and a valid reference, it is refused as ambiguous; otherwise the one matching reading is used (unit tests with the real block) |
 ## Bound approvals – how each approval is tied to the concrete action
 
 | Approval | Bound to | Where |

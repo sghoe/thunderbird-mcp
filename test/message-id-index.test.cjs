@@ -176,3 +176,36 @@ describe("ambiguity candidates follow mail.metadata (Stage 5 review round 6)", (
     assert.deepEqual(candidatesFor(["mail.delete"]), [{ messageId: "msgref:1:d@x" }, { messageId: "msgref:2:d@x" }]);
   });
 });
+
+describe("Message-IDs that look like references (Stage 5 review round 7)", () => {
+  function dbWith(headers) {
+    return {
+      headers,
+      enumerateMessages() { return this.headers.slice(); },
+      getMsgHdrForMessageID(id) { return this.headers.find((h) => h.messageId === id) || null; },
+      getMsgHdrForKey(key) { return this.headers.find((h) => h.messageKey === key) || null; },
+    };
+  }
+  const boss = { messageId: "boss-quarterly@corp.test", messageKey: 5, subject: "Q3 numbers" };
+  const spam = { messageId: "msgref:5:boss-quarterly@corp.test", messageKey: 9, subject: "spam" };
+
+  it("never resolves a real Message-ID that looks like a reference to another message", () => {
+    const { lookup } = load();
+    const result = lookup(folder, dbWith([boss, spam]), "msgref:5:boss-quarterly@corp.test");
+    assert.equal(result.hdr, undefined);
+    assert.equal(result.ambiguous, true, "both readings match: refused");
+  });
+
+  it("uses the literal Message-ID when no reference matches", () => {
+    const { lookup } = load();
+    const result = lookup(folder, dbWith([{ ...boss, messageKey: 7 }, spam]), "msgref:5:boss-quarterly@corp.test");
+    assert.equal(result.hdr.subject, "spam");
+  });
+
+  it("still resolves genuine references and reports stale ones", () => {
+    const { lookup } = load();
+    assert.equal(lookup(folder, dbWith([boss]), "msgref:5:boss-quarterly@corp.test").hdr.subject, "Q3 numbers");
+    assert.equal(lookup(folder, dbWith([boss]), "msgref:6:boss-quarterly@corp.test").staleRef, true);
+    assert.equal(lookup(folder, dbWith([boss]), "msgref:x:boss-quarterly@corp.test").invalidRef, true);
+  });
+});

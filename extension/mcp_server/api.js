@@ -3210,6 +3210,21 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
       }
     }
 
+    // Identical rules of which only some are registered cannot be told
+    // apart: changing, switching on or deleting one of them could hand the
+    // registration to the wrong one (an untouched user rule), so it is refused.
+    function filterGroupMixed(accountKey, fingerprint, liveMatches) {
+      try {
+        const registry = readFilterRegistry();
+        if (registry.corrupt) return false;
+        const entries = Core.filterRegistry.entryCount(registry.entries, accountKey, fingerprint);
+        return entries > 0 && liveMatches > entries;
+      } catch {
+        return true;
+      }
+    }
+    const MIXED_GROUP_ERROR = "Not permitted: identical rules exist, of which only some were created through MCP, so the register could not tell which one changed. Change or delete it in Thunderbird, or make the rules differ first.";
+
     // Checked before a rule is created or its effect changed: the change is
     // refused if it could not be registered (and later revoked).
     function filterRegistryRestriction(clientId, accountKey, { name = "", oldFingerprint = null, oldLiveMatches = 0 } = {}) {
@@ -6334,15 +6349,22 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	            }
 	            // { hdr } for a unique match or a valid reference, { ambiguous: true },
 	            // { invalidRef: true }, { staleRef: true }, or {} if absent.
+	            // A sender chooses its own Message-ID and can make it look like a
+	            // reference ("msgref:5:<someone else's ID>"). If the input matches both
+	            // a message's literal Message-ID and a valid reference, it is
+	            // ambiguous; otherwise the one interpretation that matches is used.
 	            function lookupUniqueMessage(folder, db, messageId) {
 	              const ref = parseMessageRef(messageId);
-	              if (ref) {
-	                if (ref.invalid) return { invalidRef: true };
-	                let byKey;
-	                try { byKey = db.getMsgHdrForKey(ref.key); } catch { byKey = null; }
-	                return byKey && byKey.messageId === ref.messageId ? { hdr: byKey } : { staleRef: true };
-	              }
 	              const count = getMessageIdCounts(folder, db).get(messageId) || 0;
+	              if (ref) {
+	                let byKey = null;
+	                if (!ref.invalid) {
+	                  try { byKey = db.getMsgHdrForKey(ref.key); } catch { byKey = null; }
+	                  if (byKey && byKey.messageId !== ref.messageId) byKey = null;
+	                }
+	                if (byKey) return count > 0 ? { ambiguous: true } : { hdr: byKey };
+	                if (count === 0) return ref.invalid ? { invalidRef: true } : { staleRef: true };
+	              }
 	              if (count > 1) return { ambiguous: true };
 	              if (count === 0) return {};
 	              let hdr;
@@ -12709,6 +12731,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 // are always possible.
                 const effectChanged = filterFingerprint(candidate) !== oldFingerprint || (candidate.enabled && !filter.enabled);
                 if (effectChanged) {
+                  if (filterGroupMixed(account.key, oldFingerprint, oldLiveMatches)) return { error: MIXED_GROUP_ERROR };
                   const registryError = filterRegistryRestriction(currentClientId(), account.key, { name: candidate.filterName, oldFingerprint, oldLiveMatches });
                   if (registryError) return registryError;
                 }
@@ -12719,7 +12742,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   filterList.setFilterAt(filterIndex, filter);
                   throw e;
                 }
-                if (!registerFilterChange(currentClientId(), account.key, candidate, { oldFingerprint, oldLiveMatches }) && effectChanged) {
+                // Renaming or disabling leaves the register as it is.
+                if (effectChanged && !registerFilterChange(currentClientId(), account.key, candidate, { oldFingerprint, oldLiveMatches })) {
                   filterList.setFilterAt(filterIndex, filter);
                   filterList.saveToDefaultFile();
                   return { error: "The change could not be recorded in the register of filter rules created through MCP, so it was not applied." };
@@ -12756,6 +12780,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 if (reach) return reach;
                 const fingerprint = filterFingerprint(filter);
                 const liveMatchesBefore = liveFilterMatches(filterList, fingerprint);
+                if (filterGroupMixed(account.key, fingerprint, liveMatchesBefore)) return { error: MIXED_GROUP_ERROR };
                 filterList.removeFilterAt(filterIndex);
                 try {
                   filterList.saveToDefaultFile();
