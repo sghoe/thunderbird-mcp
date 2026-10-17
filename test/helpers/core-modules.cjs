@@ -17,6 +17,7 @@ const MODULES = {
   clientRegistry: "client-registry",
   filterRegistry: "filter-registry",
   operationState: "operation-state",
+  diagnosticLog: "diagnostic-log",
 };
 
 const Core = {};

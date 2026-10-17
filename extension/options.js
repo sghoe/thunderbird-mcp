@@ -760,3 +760,58 @@ saveListenAllBtn.addEventListener("click", async () => {
 // END OPTIONS LISTEN ALL SAVE
 
 loadListenAllPref();
+
+// Diagnostic log (optional, off by default).
+const diagnosticLogCheckbox = document.getElementById("diagnosticLog");
+const diagnosticLogPath = document.getElementById("diagnosticLogPath");
+const diagnosticLogStatus = document.getElementById("diagnosticLogStatus");
+const diagnosticLogView = document.getElementById("diagnosticLogView");
+
+function setDiagnosticStatus(text, isError = false) {
+  diagnosticLogStatus.textContent = text;
+  diagnosticLogStatus.className = isError ? "save-status error" : "save-status";
+}
+
+async function loadDiagnosticLog(showLines = false) {
+  try {
+    const info = await browser.mcpServer.getDiagnosticLog();
+    diagnosticLogCheckbox.checked = !!info.enabled;
+    diagnosticLogPath.textContent = info.path ? `${info.path} (${Math.round((info.size || 0) / 1024)} KB)` : "--";
+    if (showLines) {
+      diagnosticLogView.textContent = info.lines.length ? info.lines.join("\n") : "(empty)";
+      diagnosticLogView.hidden = false;
+    }
+    if (info.error) setDiagnosticStatus("Error reading log: " + info.error, true);
+  } catch (e) {
+    setDiagnosticStatus("Error loading diagnostic log: " + e.message, true);
+  }
+}
+
+diagnosticLogCheckbox.addEventListener("change", async () => {
+  diagnosticLogCheckbox.disabled = true;
+  try {
+    const result = await browser.mcpServer.setDiagnosticLog(diagnosticLogCheckbox.checked);
+    if (result.error) setDiagnosticStatus(result.error, true);
+    else setDiagnosticStatus(result.enabled ? "Logging on." : "Logging off.");
+  } catch (e) {
+    setDiagnosticStatus("Error: " + e.message, true);
+  } finally {
+    diagnosticLogCheckbox.disabled = false;
+    await loadDiagnosticLog(!diagnosticLogView.hidden);
+  }
+});
+
+document.getElementById("showDiagnosticLogBtn").addEventListener("click", () => loadDiagnosticLog(true));
+
+document.getElementById("clearDiagnosticLogBtn").addEventListener("click", async () => {
+  try {
+    const result = await browser.mcpServer.clearDiagnosticLog();
+    if (result.error) setDiagnosticStatus(result.error, true);
+    else setDiagnosticStatus("Deleted.");
+  } catch (e) {
+    setDiagnosticStatus("Error: " + e.message, true);
+  }
+  await loadDiagnosticLog(!diagnosticLogView.hidden);
+});
+
+loadDiagnosticLog();

@@ -1194,6 +1194,8 @@ const PREF_CLIENTS = "extensions.thunderbird-mcp-hardened.clients";
 const PREF_FILTER_REGISTRY = "extensions.thunderbird-mcp-hardened.filterRegistry";
 const PREF_GET_MESSAGES_LIMIT = "extensions.thunderbird-mcp-hardened.getMessagesLimit";
 const PREF_LISTEN_ALL = "extensions.thunderbird-mcp-hardened.listenAll";
+// Optional diagnostic log (off by default; options page).
+const PREF_DIAGNOSTIC_LOG = "extensions.thunderbird-mcp-hardened.diagnosticLog";
 const PREF_ALLOW_ENCRYPTED_MESSAGES = "extensions.thunderbird-mcp-hardened.allowEncryptedMessages";
 const PREF_ALLOW_ALL_CALENDARS = "extensions.thunderbird-mcp-hardened.allowAllCalendars";
 const PREF_ALLOW_ALL_ADDRESS_BOOKS = "extensions.thunderbird-mcp-hardened.allowAllAddressBooks";
@@ -2165,6 +2167,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
       clientRegistry: loadCoreModule("client-registry"),
       filterRegistry: loadCoreModule("filter-registry"),
       operationState: loadCoreModule("operation-state"),
+      diagnosticLog: loadCoreModule("diagnostic-log"),
     });
     // END CORE MODULE LOADER
 
@@ -3346,6 +3349,75 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
       writeFilterRegistry(registry.entries.filter(entry => !clientIds.includes(entry.clientId)));
       return result;
     }    // END FILTER REGISTRY ADAPTER
+
+    // BEGIN DIAGNOSTIC LOG ADAPTER
+    // Optional, off by default. One JSON line per entry in
+    // <profile>/thunderbird-mcp-hardened/diagnostic.log (owner-only), rotated
+    // to diagnostic.log.1 at 1 MiB. Entries are built and redacted by
+    // core/diagnostic-log.sys.mjs: no content, recipients, paths or tokens.
+    function diagnosticLogEnabled() {
+      try {
+        return Services.prefs.getBoolPref(PREF_DIAGNOSTIC_LOG, false);
+      } catch {
+        return false;
+      }
+    }
+
+    function diagnosticLogFile(name = "diagnostic.log") {
+      const file = Services.dirsvc.get("ProfD", Ci.nsIFile);
+      file.append("thunderbird-mcp-hardened");
+      file.append(name);
+      return file;
+    }
+
+    function writeDiagnostic(fields) {
+      if (!diagnosticLogEnabled()) return;
+      try {
+        const line = `${Core.diagnosticLog.formatEntry(Date.now(), fields)}\n`;
+        const file = diagnosticLogFile();
+        if (!file.parent.exists()) file.parent.create(Ci.nsIFile.DIRECTORY_TYPE, 0o700);
+        if (file.exists() && file.fileSize > Core.diagnosticLog.MAX_FILE_BYTES) {
+          const previous = diagnosticLogFile("diagnostic.log.1");
+          if (previous.exists()) previous.remove(false);
+          file.moveTo(null, "diagnostic.log.1");
+        }
+        const target = diagnosticLogFile();
+        const output = Cc["@mozilla.org/network/file-output-stream;1"].createInstance(Ci.nsIFileOutputStream);
+        output.init(target, 0x02 | 0x08 | 0x10, 0o600, 0); // write, create, append
+        try {
+          const bytes = unescape(encodeURIComponent(line));
+          output.write(bytes, bytes.length);
+        } finally {
+          output.close();
+        }
+      } catch (e) {
+        console.warn("thunderbird-mcp: could not write the diagnostic log:", e);
+      }
+    }
+
+    function readDiagnosticTail(maxLines = 200) {
+      const file = diagnosticLogFile();
+      if (!file.exists()) return [];
+      const input = Cc["@mozilla.org/network/file-input-stream;1"].createInstance(Ci.nsIFileInputStream);
+      input.init(file, 0x01, 0, 0);
+      const stream = Cc["@mozilla.org/scriptableinputstream;1"].createInstance(Ci.nsIScriptableInputStream);
+      stream.init(input);
+      let text;
+      try {
+        text = stream.read(stream.available());
+      } finally {
+        stream.close();
+      }
+      return decodeURIComponent(escape(text)).split("\n").filter(Boolean).slice(-maxLines);
+    }
+
+    function clearDiagnosticLog() {
+      for (const name of ["diagnostic.log", "diagnostic.log.1"]) {
+        const file = diagnosticLogFile(name);
+        if (file.exists()) file.remove(false);
+      }
+    }
+    // END DIAGNOSTIC LOG ADAPTER
     function readConnectionInfo() {
       const tmpDir = Services.dirsvc.get("TmpD", Ci.nsIFile);
       tmpDir.append("thunderbird-mcp-hardened");
@@ -13389,6 +13461,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               // or malformed tokens and a corrupt registry are refused alike.
               const client = authenticateClient(reqToken);
               if (!client) {
+                writeDiagnostic({ event: "request", outcome: "refused", status: 403, detail: "auth" });
                 res.setStatusLine("1.1", 403, "Forbidden");
                 res.setHeader("Content-Type", "application/json; charset=utf-8", false);
                 res.write(JSON.stringify({
@@ -13401,6 +13474,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               }
 
               if (req.method !== "POST") {
+                writeDiagnostic({ event: "request", client: client.name, outcome: "refused", status: 405 });
                 res.setStatusLine("1.1", 405, "Method Not Allowed");
                 res.setHeader("Allow", "POST", false);
                 res.setHeader("Content-Type", "application/json; charset=utf-8", false);
@@ -13421,6 +13495,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 // Header missing — will be 0
               }
               if (contentLength > MAX_REQUEST_BODY) {
+                writeDiagnostic({ event: "request", client: client.name, outcome: "refused", status: 413 });
                 res.setStatusLine("1.1", 413, "Payload Too Large");
                 res.setHeader("Content-Type", "application/json; charset=utf-8", false);
                 res.write(JSON.stringify({
@@ -13436,6 +13511,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               try {
                 message = JSON.parse(readRequestBody(req));
               } catch {
+                writeDiagnostic({ event: "request", client: client.name, outcome: "refused", detail: "parse-error" });
                 res.setStatusLine("1.1", 200, "OK");
                 res.setHeader("Content-Type", "application/json; charset=utf-8", false);
                 res.write(JSON.stringify({
@@ -13541,10 +13617,19 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                         }
                         const decision = Core.policy.decide(params.name, toolArgs, client.capabilities, { inlinedLocalFiles });
                         if (!decision.allowed) {
-                          throw new Error(`Not permitted for client "${client.name}": requires ${decision.missing.join(", ")}. Grant it in the Thunderbird MCP options.`);
+                          writeDiagnostic({ event: "tool", tool: params.name, client: client.name, outcome: "refused", missing: decision.missing });
+                          const refusal = new Error(`Not permitted for client "${client.name}": requires ${decision.missing.join(", ")}. Grant it in the Thunderbird MCP options.`);
+                          refusal.diagnosticLogged = true;
+                          throw refusal;
                         }
+                        const started = Date.now();
+                        const toolResult = await runAsClient(client, () => callTool(params.name, toolArgs));
+                        writeDiagnostic({
+                          event: "tool", tool: params.name, client: client.name,
+                          ...Core.diagnosticLog.summarizeToolResult(toolResult), ms: Date.now() - started,
+                        });
                         result = {
-                          content: buildToolResultContent(await runAsClient(client, () => callTool(params.name, toolArgs)))
+                          content: buildToolResultContent(toolResult)
                         };
                       }
                       break;
@@ -13564,6 +13649,13 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   res.setHeader("Content-Type", "application/json; charset=utf-8", false);
                   res.write(JSON.stringify({ jsonrpc: "2.0", id: id ?? null, result }));
                 } catch (e) {
+                  if (!e?.diagnosticLogged) {
+                    writeDiagnostic({
+                      event: "error", client: client.name, detail: typeof method === "string" ? method : "<invalid>",
+                      ...(method === "tools/call" && typeof params?.name === "string" ? { tool: params.name } : {}),
+                      error: e,
+                    });
+                  }
                   res.setStatusLine("1.1", 200, "OK");
                   res.setHeader("Content-Type", "application/json; charset=utf-8", false);
                   res.write(JSON.stringify({
@@ -13575,6 +13667,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 res.finish();
               })().catch((e) => {
                 console.error("thunderbird-mcp: unhandled dispatch error:", e);
+                writeDiagnostic({ event: "error", detail: "dispatch", error: e });
                 try { res.finish(); } catch {}
               });
             });
@@ -13625,9 +13718,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             }
             // Publish running state only after startup has fully succeeded.
             globalThis.__tbMcpHardenedServer = server;
+            writeDiagnostic({ event: "server", outcome: "started", status: boundPort, detail: listenAll ? "listen-all" : "loopback" });
             return { success: true, port: boundPort };
           } catch (e) {
             console.error("Failed to start MCP server:", e);
+            writeDiagnostic({ event: "server", outcome: "failed", error: e });
             // A startup cancelled by shutdown never bound or published anything;
             // the timer and discovery file may already belong to a newer instance.
             if (!e?.cancelledByShutdown) {
@@ -14016,6 +14111,40 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
           return { success: true };
         },
         // END PRIVACY OPTIONS API
+
+        // BEGIN DIAGNOSTIC LOG OPTIONS API
+        getDiagnosticLog: async function() {
+          let path = null;
+          let size = 0;
+          let lines = [];
+          try {
+            const file = diagnosticLogFile();
+            path = file.path;
+            if (file.exists()) size = file.fileSize;
+            lines = readDiagnosticTail(200);
+          } catch (e) {
+            return { enabled: diagnosticLogEnabled(), path, size, lines, error: String(e) };
+          }
+          return { enabled: diagnosticLogEnabled(), path, size, lines };
+        },
+
+        setDiagnosticLog: async function(enabled) {
+          if (typeof enabled !== "boolean") return { error: "enabled must be a boolean" };
+          if (!enabled) writeDiagnostic({ event: "server", outcome: "log-disabled" });
+          Services.prefs.setBoolPref(PREF_DIAGNOSTIC_LOG, enabled);
+          if (enabled) writeDiagnostic({ event: "server", outcome: "log-enabled" });
+          return { success: true, enabled };
+        },
+
+        clearDiagnosticLog: async function() {
+          try {
+            clearDiagnosticLog();
+            return { success: true };
+          } catch (e) {
+            return { error: String(e) };
+          }
+        },
+        // END DIAGNOSTIC LOG OPTIONS API
 
         getListenAll: async function() {
           let listenAll = false;

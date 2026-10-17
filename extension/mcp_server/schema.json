@@ -182,6 +182,33 @@
         "parameters": []
       },
       {
+        "name": "getDiagnosticLog",
+        "type": "function",
+        "async": true,
+        "description": "Get the diagnostic log state, file path, size and its last entries",
+        "parameters": []
+      },
+      {
+        "name": "setDiagnosticLog",
+        "type": "function",
+        "async": true,
+        "description": "Turn the optional diagnostic log on or off",
+        "parameters": [
+          {
+            "name": "enabled",
+            "type": "boolean",
+            "description": "When true, operations, outcomes and redacted errors are written to the diagnostic log in the profile"
+          }
+        ]
+      },
+      {
+        "name": "clearDiagnosticLog",
+        "type": "function",
+        "async": true,
+        "description": "Delete the diagnostic log files",
+        "parameters": []
+      },
+      {
         "name": "getListenAll",
         "type": "function",
         "async": true,

@@ -121,6 +121,30 @@ green. The native harness now sends `Connection: close`: an idle
 keep-alive socket hitting the server restart during the add-on reload
 test made Node's HTTP client fail once (test process only; the add-on
 was not involved).
+## Diagnostic log (added after acceptance)
+
+* Optional, off by default (`extensions.thunderbird-mcp-hardened.diagnosticLog`,
+  switch in the options page, which also shows the last 200 entries and
+  deletes the log). File: `<profile>/thunderbird-mcp-hardened/diagnostic.log`,
+  owner-only, rotated at 1 MiB to `diagnostic.log.1`; the directory is
+  refused as an attachment source like every `thunderbird-mcp-hardened`
+  directory.
+* Entries (`core/diagnostic-log.sys.mjs`): time, event (`server`,
+  `request`, `tool`, `error`), tool, client name, outcome
+  (`ok`/`error`/`refused`), `operationState`, duration, HTTP status,
+  missing capabilities of a refusal, redacted error text (≤ 300
+  characters). Only whitelisted fields are written. Redaction removes
+  URIs, `msgref:` references, addresses and Message-IDs, Windows/UNC/POSIX
+  paths and quoted names (subjects, titles, filter and folder names).
+  Request bodies, results, tokens and presented credentials are never
+  passed to the log.
+* Tests: `test/diagnostic-log.test.cjs` (redaction, field whitelist,
+  results without content); native `test/native/diagnostic-log.native.cjs`
+  on Thunderbird 158.0 and 153.5.0esr – successful, failing and refused
+  calls and a direct send are logged without the synthetic addresses,
+  subjects, bodies, Message-IDs, host or tokens; a 403 is logged without
+  the presented token; with the default setting no file exists; the
+  options page switches it on, shows and deletes it.
 ## Final review round 1 (Sol, Opus)
 
 | Finding | Fix |

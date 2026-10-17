@@ -69,6 +69,7 @@ function loadServerLifecycle(overrides = {}) {
 
   const connectionPath = "/mock-tmp/thunderbird-mcp-hardened/connection.json";
   const sandbox = {
+    writeDiagnostic: (fields) => { state.diagnostics = [...(state.diagnostics || []), fields]; },
     MCP_DEFAULT_PORT: 8765,
     MCP_MAX_PORT_ATTEMPTS: 10,
     CONNECTION_FILE_REFRESH_MS: 30000,
