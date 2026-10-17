@@ -27,7 +27,7 @@ v0.9.2 (enforced by `test/tool-contract.test.cjs` and the native parity run).
 | `updateTask` only changes tasks; `updateEvent`/`deleteEvent` only events; unknown item kinds are refused | an event ID passed to `updateTask` (or a task ID to the event tools) now fails | use the matching tool |
 | Tasks with attendees other than the calendar user follow Block `skipReview` like meetings | such tasks are read-only via MCP while the block is on | disable the block deliberately if needed |
 | `saveDraft` authorizes the identity's real Drafts destination before every save (exists, accessible, Drafts flag) | new drafts are refused when the identity saves into a restricted account, a missing folder or a folder without the Drafts flag; previously only replacements were checked | configure the identity's Drafts folder in an allowed account |
-| An ambiguous Message-ID (several messages in the folder) is refused by all message tools | previously an arbitrary match was read/changed/deleted | none yet; Stage 5 adds unique references |
+| An ambiguous Message-ID (several messages in the folder) is refused by all message tools | previously an arbitrary match was read/changed/deleted | pass one of the `candidates` references from the error (Stage 5) |
 
 ## Stage 4 – paired clients and positive permissions
 
@@ -48,3 +48,9 @@ v0.9.2 (enforced by `test/tool-contract.test.cjs` and the native parity run).
 | Direct sends and sending filter rules require the identity's Sent folder to be in an accessible account; deletions on Exchange (EWS/Graph) and unknown server types need `mail.deletePermanent` | restricted clients are refused when a copy or deletion would leave their scope | adjust the identity's Sent folder or grant the capability/account |
 | Direct sends also require every Sent-folder fallback and the Post-outgoing filters of the Sent copy's account to stay within the client's rights; review windows are closed when autosave would write into a restricted Drafts folder | restricted clients are refused in such configurations | fix the identity's folder settings, adjust the filter, or grant the account |
 | Sends (direct and by Forward/Reply rules) by clients without `contacts.write` and address-book access are refused when Thunderbird's address collection would add or change contacts (default: on); sending rules also check the Post-outgoing filters their sends trigger | a restricted sending client may need the contacts grant | grant `contacts.write` and address books, or turn off `mail.collect_email_address_outgoing` |
+
+## Stage 5 – resource and action model
+
+| Change | Effect for users | Migration |
+|---|---|---|
+| Ambiguous Message-ID errors list `candidates` with `msgref:<key>:<Message-ID>` references; every `messageId` input accepts them | an ambiguous call can be repeated with the chosen reference | none (additive) |

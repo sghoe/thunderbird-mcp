@@ -5794,8 +5794,50 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	              }
 	              return counts;
 	            }
-	            // { hdr } for a unique match, { ambiguous: true }, or {} if absent.
+	            // Unique references for messages that share a Message-ID:
+	            // "msgref:<messageKey>:<Message-ID>". The key is resolved in the given
+	            // folder and the Message-ID is checked again, so a reference made stale by
+	            // a move or compaction fails instead of selecting another message.
+	            const MESSAGE_REF_PREFIX = "msgref:";
+	            function parseMessageRef(value) {
+	              if (typeof value !== "string" || !value.startsWith(MESSAGE_REF_PREFIX)) return null;
+	              const rest = value.slice(MESSAGE_REF_PREFIX.length);
+	              const separator = rest.indexOf(":");
+	              const key = separator > 0 ? Number(rest.slice(0, separator)) : NaN;
+	              const messageId = separator > 0 ? rest.slice(separator + 1) : "";
+	              if (!/^\d+$/.test(rest.slice(0, Math.max(separator, 0))) || !Number.isSafeInteger(key) || !messageId) return { invalid: true };
+	              return { key, messageId };
+	            }
+	            function messageRefFor(hdr) {
+	              return `${MESSAGE_REF_PREFIX}${hdr.messageKey}:${hdr.messageId}`;
+	            }
+	            // Candidates for an ambiguous Message-ID: reference, date and author only
+	            // (no subjects, which may be protected for encrypted messages).
+	            function ambiguousMessageError(db, messageIds) {
+	              const candidates = [];
+	              const wanted = new Set(messageIds);
+	              try {
+	                for (const hdr of db.enumerateMessages()) {
+	                  if (!wanted.has(hdr.messageId)) continue;
+	                  candidates.push({ messageId: messageRefFor(hdr), date: new Date(hdr.date / 1000).toISOString(), author: hdr.mime2DecodedAuthor || hdr.author || "" });
+	                  if (candidates.length >= 20) break;
+	                }
+	              } catch { /* candidates are a convenience */ }
+	              return {
+	                error: `Message-ID is ambiguous: several messages in this folder share it; refusing to choose one: ${messageIds.join(", ")}. Pass one of the candidate references as messageId.`,
+	                candidates,
+	              };
+	            }
+	            // { hdr } for a unique match or a valid reference, { ambiguous: true },
+	            // { invalidRef: true }, { staleRef: true }, or {} if absent.
 	            function lookupUniqueMessage(folder, db, messageId) {
+	              const ref = parseMessageRef(messageId);
+	              if (ref) {
+	                if (ref.invalid) return { invalidRef: true };
+	                let byKey;
+	                try { byKey = db.getMsgHdrForKey(ref.key); } catch { byKey = null; }
+	                return byKey && byKey.messageId === ref.messageId ? { hdr: byKey } : { staleRef: true };
+	              }
 	              const count = getMessageIdCounts(folder, db).get(messageId) || 0;
 	              if (count > 1) return { ambiguous: true };
 	              if (count === 0) return {};
@@ -5807,6 +5849,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	              }
 	              return hdr ? { hdr } : {};
 	            }
+	            // Error for a reference that cannot be used, or null.
+	            function messageRefError(lookup, messageId) {
+	              if (lookup.invalidRef) return { error: `Invalid message reference: ${messageId} (expected msgref:<key>:<Message-ID>)` };
+	              if (lookup.staleRef) return { error: `Message reference is stale (the message was moved, deleted or the folder was compacted): ${messageId}. Search again for a current reference.` };
+	              return null;
+	            }
 	            // END MESSAGE-ID INDEX
 
 	            function findMessage(messageId, folderPath) {
@@ -5815,9 +5863,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
 	              const { folder, db } = opened;
 	              const lookup = lookupUniqueMessage(folder, db, messageId);
-	              if (lookup.ambiguous) {
-	                return { error: `Message-ID is ambiguous: several messages in this folder share it; refusing to choose one: ${messageId}` };
-	              }
+	              const refError = messageRefError(lookup, messageId);
+	              if (refError) return refError;
+	              if (lookup.ambiguous) return ambiguousMessageError(db, [messageId]);
 	              if (!lookup.hdr) {
 	                return { error: `Message not found: ${messageId}` };
 	              }
@@ -9032,7 +9080,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	                try {
 	                  const found = findMessage(messageId, folderPath);
 	                  if (found.error) {
-	                    resolve({ error: found.error });
+	                    resolve({ error: found.error, ...(found.candidates ? { candidates: found.candidates } : {}) });
 	                    return;
 	                  }
 	                  const { msgHdr } = found;
@@ -10231,7 +10279,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                     return { error: "replaceMessageId requires replaceFolderPath (the folder URI from searchMessages)" };
                   }
                   const found = findMessage(replaceMessageId, replaceFolderPath);
-                  if (found.error) return { error: found.error };
+                  if (found.error) return { error: found.error, ...(found.candidates ? { candidates: found.candidates } : {}) };
                   // The send API deletes via the header's own folder, which must
                   // be the same accessible folder checked by findMessage.
                   const sourceFolder = found.msgHdr?.folder;
@@ -10347,7 +10395,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	                  }
 	                  const found = findMessage(messageId, folderPath);
 	                  if (found.error) {
-	                    resolve({ error: found.error });
+	                    resolve({ error: found.error, ...(found.candidates ? { candidates: found.candidates } : {}) });
 	                    return;
 	                  }
 	                  const { msgHdr, folder } = found;
@@ -10543,7 +10591,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   }
                   const found = findMessage(messageId, folderPath);
                   if (found.error) {
-                    resolve({ error: found.error });
+                    resolve({ error: found.error, ...(found.candidates ? { candidates: found.candidates } : {}) });
                     return;
                   }
                   const { msgHdr, folder } = found;
@@ -10944,10 +10992,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                     lookups.set(msgId, lookupUniqueMessage(folder, db, msgId));
                   }
                 }
-                const ambiguous = [...lookups].filter(([, lookup]) => lookup.ambiguous).map(([id]) => id);
-                if (ambiguous.length) {
-                  return { error: `Message-ID is ambiguous: several messages in this folder share it; refusing to choose one: ${ambiguous.join(", ")}` };
+                for (const [id, lookup] of lookups) {
+                  const refError = messageRefError(lookup, id);
+                  if (refError) return refError;
                 }
+                const ambiguous = [...lookups].filter(([, lookup]) => lookup.ambiguous).map(([id]) => id);
+                if (ambiguous.length) return ambiguousMessageError(db, ambiguous);
                 for (const msgId of messageIds) {
                   const hdr = typeof msgId === "string" && msgId ? lookups.get(msgId)?.hdr : null;
                   if (hdr) {
@@ -11097,10 +11147,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                     lookups.set(msgId, lookupUniqueMessage(folder, db, msgId));
                   }
                 }
-                const ambiguous = [...lookups].filter(([, lookup]) => lookup.ambiguous).map(([id]) => id);
-                if (ambiguous.length) {
-                  return { error: `Message-ID is ambiguous: several messages in this folder share it; refusing to choose one: ${ambiguous.join(", ")}` };
+                for (const [id, lookup] of lookups) {
+                  const refError = messageRefError(lookup, id);
+                  if (refError) return refError;
                 }
+                const ambiguous = [...lookups].filter(([, lookup]) => lookup.ambiguous).map(([id]) => id);
+                if (ambiguous.length) return ambiguousMessageError(db, ambiguous);
                 for (const msgId of messageIds) {
                   const hdr = typeof msgId === "string" && msgId ? lookups.get(msgId)?.hdr : null;
                   if (hdr) {
