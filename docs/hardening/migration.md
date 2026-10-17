@@ -53,8 +53,9 @@ v0.9.2 (enforced by `test/tool-contract.test.cjs` and the native parity run).
 
 | Change | Effect for users | Migration |
 |---|---|---|
-| Ambiguous Message-ID errors list `candidates` with `msgref:<key>:<date>:<Message-ID>` references; every `messageId` input accepts them | an ambiguous call can be repeated with the chosen reference | none (additive) |
+| Ambiguous Message-ID errors list `candidates` with `msgref:<key>:<token>:<Message-ID>` references (valid until Thunderbird or the add-on restarts); every `messageId` input accepts them | an ambiguous call can be repeated with the chosen reference | none (additive) |
 | Rules created/changed through MCP are registered; revoking a client disables its unchanged registered Forward/Reply rules and reports changed ones | revocation can stop automatic forwarding set up by that client | review the conflicts shown in the options page |
 | Changing, reordering or deleting rules not created through MCP needs `filters.foreign` | clients paired before Stage 5 with an explicit capability list cannot change the user's own rules | grant `filters.foreign` where wanted |
 | Sending, draft and calendar-write results carry `operationState` (`opened-for-review`, `submitted`, `queued`, `completed`, `failed`, `unknown`) | additive; some error texts gain a hint when the outcome is unknown | treat `unknown` as "check before retrying", never as "failed" |
 | Path attachments are copied when the call is made; the review window and the sent mail use that copy | changing the file after the call no longer changes the mail; a file that changes while it is read is refused | attach the final version of the file |
+| Renaming, moving or deleting a folder that a filter rule not created through MCP moves or copies into (or a parent of such a folder) needs `filters.foreign` | Thunderbird rewrites those rules' targets; clients paired before Stage 5 lack the capability, and rules created through MCP before Stage 5 are not registered, so such folders are refused for them | grant `filters.foreign` where wanted |

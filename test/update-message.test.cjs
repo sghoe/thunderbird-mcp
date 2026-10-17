@@ -6,7 +6,7 @@ const { loadFolderTools } = require("./helpers/folder-tools.cjs");
 
 const OUTBOX_FLAG = 0x800; // nsMsgFolderFlags.Queue
 
-function makeHarness({ crossAccount = false, denied = [], copyError = false } = {}) {
+function makeHarness({ crossAccount = false, denied = [], copyError = false, filterTargetRestriction } = {}) {
   const mutations = [];
   const copies = [];
   const folderMoves = [];
@@ -43,6 +43,7 @@ function makeHarness({ crossAccount = false, denied = [], copyError = false } = 
       copies.push(args);
     },
     copyFolder(...args) { folderMoves.push(args); },
+    ...(filterTargetRestriction ? { filterTargetRestriction } : {}),
     periodicFolderRestriction: (target) => (periodicBlocked.includes(target?.server) ? { error: "periodic filter refused" } : null),
   });
   async function update(args) {
@@ -297,5 +298,24 @@ describe("folders never take the Outbox role by name", () => {
     assert.equal(created, 2);
     assert.equal(renamed, 1);
     assert.equal(h.folderMoves.length, 1);
+  });
+});
+
+describe("folder changes that would rewrite user filter rules (Stage 5 review round 9)", () => {
+  it("rename, move and delete ask the filter-target check first and stop when it refuses", () => {
+    const checked = [];
+    const h = makeHarness({ filterTargetRestriction(folder) { checked.push(folder.URI); return { error: "Not permitted for this client: a filter rule (not created through MCP) moves or copies mail into this folder" }; } });
+    let renamed = 0;
+    let deleted = 0;
+    h.target.parent = h.folder;
+    h.target.rename = () => { renamed++; };
+    h.target.deleteSelf = () => { deleted++; };
+    assert.match(h.runtime.renameFolder(h.target.URI, "New name").error, /filter rule/);
+    assert.match(h.runtime.moveFolder(h.target.URI, h.trash.URI).error, /filter rule/);
+    assert.match(h.runtime.deleteFolder(h.target.URI).error, /filter rule/);
+    assert.deepEqual(checked, [h.target.URI, h.target.URI, h.target.URI]);
+    assert.equal(renamed, 0);
+    assert.equal(deleted, 0);
+    assert.equal(h.folderMoves.length, 0);
   });
 });

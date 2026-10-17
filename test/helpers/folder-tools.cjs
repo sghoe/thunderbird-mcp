@@ -18,11 +18,12 @@ function snippet(startMarker, endMarker) {
 
 // Load real folder access, handlers, dispatch and sanitization; mock only the
 // account preference and native Thunderbird services they call.
-function loadFolderTools({ accounts, folders, isAccountAllowed = () => true, copyMessages = () => {}, copyFolder = () => {}, periodicFolderRestriction = () => null }) {
+function loadFolderTools({ accounts, folders, isAccountAllowed = () => true, copyMessages = () => {}, copyFolder = () => {}, periodicFolderRestriction = () => null, filterTargetRestriction = () => null }) {
   const runtime = vm.createContext({
     Core,
     trackCallAttachmentFiles: () => ({ stopCollecting() {}, release() {} }),
-    filterTargetRestriction: () => null,
+    // Folder changes that would rewrite targets of user filter rules (Stage 5).
+    filterTargetRestriction,
     console,
     Ci: { nsMsgFolderFlags: { Trash: 0x100 } },
     isAccountAllowed,
@@ -46,6 +47,7 @@ function loadFolderTools({ accounts, folders, isAccountAllowed = () => true, cop
     snippet("function openFolder(", "function findMessage("),
     snippet("// BEGIN UPDATE MESSAGE TOOL", "// END UPDATE MESSAGE TOOL"),
     snippet("function createFolder(", "function deleteFolder("),
+    snippet("function deleteFolder(", "function findSpecialFolder("),
     snippet("function moveFolder(", "// BEGIN FILTER TOOL HANDLERS"),
     snippet("// BEGIN MCP TEXT SANITIZATION", "// END MCP TEXT SANITIZATION"),
     snippet("// BEGIN TOOL DISPATCH", "// END TOOL DISPATCH"),

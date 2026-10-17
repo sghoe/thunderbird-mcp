@@ -51,9 +51,9 @@ scenario labels in the parity run.
 | Tool | Relevant arguments | Effect | Native |
 |---|---|---|---|
 | `createFolder` | `parentFolderPath`, `name` | folder write | ✔ |
-| `renameFolder` | `folderPath`, `newName` | folder write | ✔ |
-| `moveFolder` | `folderPath`, `newParentPath` (same account) | folder write | ✔ |
-| `deleteFolder` | `folderPath` | delete (Trash; **permanent** if already in Trash) | ✔ |
+| `renameFolder` | `folderPath`, `newName` | folder write; also rewrites Move/Copy targets of filter rules (Stage 5: needs `filters.foreign` if a rule not created through MCP targets the folder or a subfolder) | ✔ |
+| `moveFolder` | `folderPath`, `newParentPath` (same account) | folder write; rewrites filter targets like `renameFolder` | ✔ |
+| `deleteFolder` | `folderPath` | delete (Trash; **permanent** if already in Trash); rewrites filter targets like `renameFolder` | ✔ |
 | `emptyTrash` | `accountId` | **permanent delete** | ✔ |
 | `emptyJunk` | `accountId` | **permanent delete** | ✔ |
 

@@ -9,7 +9,7 @@ Stage 2 hotfixes stay in force throughout.
 
 * An RFC Message-ID stays the normal input. If several messages in the
   folder share it, the call is refused (as since Stage 2) and the error
-  now lists `candidates`: one `msgref:<messageKey>:<date>:<Message-ID>` reference
+  now lists `candidates`: one `msgref:<messageKey>:<token>:<Message-ID>` reference
   per message, with date and author (no subjects – they can be protected
   for encrypted messages). Up to 20 candidates.
 * Every tool that takes a `messageId` accepts such a reference. It is
@@ -212,6 +212,15 @@ draft and the refused waiting call.
 | Fingerprints contain Move/Copy target URIs, which Thunderbird rewrites in all rules when a folder is renamed, moved or deleted; two renames could make an untouched user rule look registered, one rename could take a client's own rule out of the disable step (Opus) | renaming, moving or deleting a folder (or a parent of one) that a rule not created through MCP targets needs `filters.foreign`; a client's own registered rules may still be affected – their fingerprint then no longer matches and revocation reports them as conflicts (5b wording corrected) |
 | Identical rules of two clients: deleting one took the caller's registration away, regardless of whose rule was deleted, so revocation of the other client missed its rule silently (Sol) | groups of identical rules whose entries belong to more than one client count as ambiguous too: changing, switching on or deleting one of them is refused |
 | A reference bound only key and Message-ID; Thunderbird can reuse a message key (provisional keys of IMAP offline copies) for another message with the same Message-ID (Sol) | references are `msgref:<key>:<date>:<Message-ID>`; a reused key with another date is stale. Residual: a message with the same key, Message-ID and date is treated as the same message |
+## Review round 9 (Sol, Opus)
+
+| Finding | Fix |
+|---|---|
+| A stale reference fell back to a message whose literal Message-ID equals the reference string (Sol) | a well-formed reference is never read as a literal Message-ID: if a message has it as its literal ID, the call is refused as ambiguous with candidate references; otherwise it resolves only to the referenced message or is stale. Only input that is not a well-formed reference is a literal Message-ID |
+| The round-8 reference exposed the message date to clients without `mail.metadata` (Sol, Opus) | references are `msgref:<key>:<token>:<Message-ID>`; the token is SHA-256 over a secret of the server instance, key, date and Message-ID (16 hex characters). References are valid until Thunderbird or the add-on restarts |
+| The folder guard named filter rules of accounts the client may not see, and to clients without `filters.read` (Sol, Opus) | the rule is named only with `filters.read` and access to its account |
+| Migration notes did not mention that folder rename/move/delete may now need `filters.foreign` (Opus) | migration row and feature matrix; a test checks that all three handlers consult the guard first |
+| The invalid-reference error still showed the old format (Opus) | corrected |
 ## Bound approvals – how each approval is tied to the concrete action
 
 | Approval | Bound to | Where |

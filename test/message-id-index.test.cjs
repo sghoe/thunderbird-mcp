@@ -20,6 +20,8 @@ function load(shared = {}) {
   const timers = [];
   const sandbox = Object.assign(shared, {
     Date: { now: () => clock.now },
+    randomHex: () => "5e".repeat(16),
+    sha256Hex: (text) => require("node:crypto").createHash("sha256").update(text, "latin1").digest("hex"),
     Ci: { nsITimer: { TYPE_ONE_SHOT: 0 } },
     Cc: { "@mozilla.org/timer;1": { createInstance: () => {
       const timer = { cancelled: false, initWithCallback(cb) { this.cb = cb; }, cancel() { this.cancelled = true; } };
@@ -29,8 +31,8 @@ function load(shared = {}) {
   });
   if (!vm.isContext(sandbox)) vm.createContext(sandbox);
   // A fresh function scope per instance, like each server start().
-  const instance = vm.runInContext(`(() => { ${snippet}\nreturn { lookupUniqueMessage, _messageIdIndexes }; })()`, sandbox);
-  return { lookup: instance.lookupUniqueMessage, clock, indexes: instance._messageIdIndexes, timers, sandbox };
+  const instance = vm.runInContext(`(() => { ${snippet}\nreturn { lookupUniqueMessage, _messageIdIndexes, messageRefFor }; })()`, sandbox);
+  return { lookup: instance.lookupUniqueMessage, refFor: instance.messageRefFor, clock, indexes: instance._messageIdIndexes, timers, sandbox };
 }
 
 // Mimics nsIMsgDatabase: headers, change listeners, Message-ID lookup.
@@ -158,7 +160,11 @@ describe("Message-ID index", () => {
 
 describe("ambiguity candidates follow mail.metadata (Stage 5 review round 6)", () => {
   function candidatesFor(granted) {
-    const sandbox = { Date, Ci: { nsITimer: { TYPE_ONE_SHOT: 0 } }, Cc: {}, clientHasCapability: (cap) => granted.includes(cap) };
+    const sandbox = {
+      Date, Ci: { nsITimer: { TYPE_ONE_SHOT: 0 } }, Cc: {}, clientHasCapability: (cap) => granted.includes(cap),
+      randomHex: () => "5e".repeat(16),
+      sha256Hex: (text) => require("node:crypto").createHash("sha256").update(text, "latin1").digest("hex"),
+    };
     vm.createContext(sandbox);
     const make = vm.runInContext(`(() => { ${snippet}\nreturn ambiguousMessageError; })()`, sandbox);
     const db = { enumerateMessages: () => [
@@ -170,14 +176,19 @@ describe("ambiguity candidates follow mail.metadata (Stage 5 review round 6)", (
   it("lists date and author for clients that may read metadata", () => {
     const candidates = candidatesFor(["mail.metadata"]);
     assert.deepEqual(candidates.map((c) => c.author), ["Boss <boss@corp.test>", "Mallory <m@attacker.test>"]);
-    assert.ok(candidates.every((c) => c.date && /^msgref:\d+:\d+:d@x$/.test(c.messageId)));
+    assert.ok(candidates.every((c) => c.date && /^msgref:\d+:[0-9a-f]{16}:d@x$/.test(c.messageId)));
   });
-  it("lists only references for a client that may only delete", () => {
-    assert.deepEqual(candidatesFor(["mail.delete"]), [{ messageId: "msgref:1:1000000000000000:d@x" }, { messageId: "msgref:2:2000000000000000:d@x" }]);
+  it("lists only references for a client that may only delete, without the date inside them", () => {
+    const candidates = candidatesFor(["mail.delete"]);
+    assert.deepEqual(candidates.map((c) => Object.keys(c)), [["messageId"], ["messageId"]]);
+    for (const c of candidates) {
+      assert.match(c.messageId, /^msgref:[12]:[0-9a-f]{16}:d@x$/);
+      assert.doesNotMatch(c.messageId, /1000000000000000|2000000000000000/);
+    }
   });
 });
 
-describe("Message-IDs that look like references (Stage 5 review round 7)", () => {
+describe("references and literal Message-IDs (Stage 5 review rounds 7–9)", () => {
   function dbWith(headers) {
     return {
       headers,
@@ -187,47 +198,49 @@ describe("Message-IDs that look like references (Stage 5 review round 7)", () =>
     };
   }
   const boss = { messageId: "boss-quarterly@corp.test", messageKey: 5, date: 1000, subject: "Q3 numbers" };
-  const spam = { messageId: "msgref:5:1000:boss-quarterly@corp.test", messageKey: 9, date: 2000, subject: "spam" };
 
-  it("never resolves a real Message-ID that looks like a reference to another message", () => {
-    const { lookup } = load();
-    const result = lookup(folder, dbWith([boss, spam]), "msgref:5:1000:boss-quarterly@corp.test");
-    assert.equal(result.hdr, undefined);
-    assert.equal(result.ambiguous, true, "both readings match: refused");
+  it("resolves a genuine reference and refuses changed tokens, keys and malformed input", () => {
+    const { lookup, refFor } = load();
+    const ref = refFor(boss);
+    assert.equal(lookup(folder, dbWith([boss]), ref).hdr.subject, "Q3 numbers");
+    assert.equal(lookup(folder, dbWith([boss]), ref.replace(":5:", ":6:")).staleRef, true);
+    const token = ref.split(":")[2];
+    const otherToken = token.replace(/^./, (c) => (c === "0" ? "1" : "0"));
+    assert.equal(lookup(folder, dbWith([boss]), ref.replace(token, otherToken)).staleRef, true);
+    assert.equal(lookup(folder, dbWith([boss]), "msgref:x:0123456789abcdef:boss-quarterly@corp.test").invalidRef, true);
+    assert.equal(lookup(folder, dbWith([boss]), "msgref:5:boss-quarterly@corp.test").invalidRef, true, "old form");
   });
 
-  it("uses the literal Message-ID when no reference matches", () => {
-    const { lookup } = load();
-    const result = lookup(folder, dbWith([{ ...boss, messageKey: 7 }, spam]), "msgref:5:1000:boss-quarterly@corp.test");
-    assert.equal(result.hdr.subject, "spam");
+  it("does not disclose the message date in the reference", () => {
+    const { refFor } = load();
+    assert.doesNotMatch(refFor({ ...boss, date: 1234567890123456 }), /1234567890123456/);
   });
 
-  it("still resolves genuine references and reports stale ones", () => {
-    const { lookup } = load();
-    assert.equal(lookup(folder, dbWith([boss]), "msgref:5:1000:boss-quarterly@corp.test").hdr.subject, "Q3 numbers");
-    assert.equal(lookup(folder, dbWith([boss]), "msgref:6:1000:boss-quarterly@corp.test").staleRef, true);
-    assert.equal(lookup(folder, dbWith([boss]), "msgref:x:1000:boss-quarterly@corp.test").invalidRef, true);
-  });
-});
-
-describe("references bind the message date (Stage 5 review round 8)", () => {
   it("refuses a reference whose key was reused for another message with the same Message-ID", () => {
-    const { lookup } = load();
+    const { lookup, refFor } = load();
+    const ref = refFor({ messageId: "dup@example.test", messageKey: 4294967168, date: 1000 });
     const reused = { messageId: "dup@example.test", messageKey: 4294967168, date: 2000, subject: "replacement" };
-    const db = {
-      headers: [reused],
-      enumerateMessages() { return this.headers.slice(); },
-      getMsgHdrForMessageID(id) { return this.headers.find((h) => h.messageId === id) || null; },
-      getMsgHdrForKey(key) { return this.headers.find((h) => h.messageKey === key) || null; },
-    };
-    // The reference was issued for the original provisional header (date 1000).
-    assert.equal(lookup(folder, db, "msgref:4294967168:1000:dup@example.test").staleRef, true);
-    assert.equal(lookup(folder, db, "msgref:4294967168:2000:dup@example.test").hdr.subject, "replacement");
+    assert.equal(lookup(folder, dbWith([reused]), ref).staleRef, true);
   });
 
-  it("refuses the old two-part form as malformed", () => {
+  it("never resolves a literal Message-ID that has the form of a valid reference to the referenced message", () => {
+    const { lookup, refFor } = load();
+    const spam = { messageId: refFor(boss), messageKey: 9, date: 2000, subject: "spam" };
+    assert.equal(lookup(folder, dbWith([boss, spam]), spam.messageId).ambiguous, true);
+  });
+
+  it("does not fall back to a literal Message-ID when a reference is stale", () => {
+    const { lookup, refFor } = load();
+    const ref = refFor({ messageId: "legit@example.test", messageKey: 5, date: 1000 });
+    const replacement = { messageId: ref, messageKey: 9, date: 3000, subject: "other" };
+    const result = lookup(folder, dbWith([replacement]), ref);
+    assert.equal(result.hdr, undefined);
+    assert.equal(result.ambiguous, true, "refused with candidates instead of choosing the literal match");
+  });
+
+  it("treats input that is not a well-formed reference as a literal Message-ID", () => {
     const { lookup } = load();
-    const db = { headers: [], enumerateMessages: () => [], getMsgHdrForMessageID: () => null, getMsgHdrForKey: () => null };
-    assert.equal(lookup(folder, db, "msgref:5:boss@x").invalidRef, true);
+    const odd = { messageId: "msgref:5:boss-quarterly@corp.test", messageKey: 9, date: 2000, subject: "odd" };
+    assert.equal(lookup(folder, dbWith([boss, odd]), odd.messageId).hdr.subject, "odd");
   });
 });

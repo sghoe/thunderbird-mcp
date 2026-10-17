@@ -6307,24 +6307,32 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	              }
 	              return counts;
 	            }
-	            // Unique references for messages that share a Message-ID:
-	            // "msgref:<messageKey>:<Message-ID>". The key is resolved in the given
-	            // folder and the Message-ID is checked again, so a reference made stale by
-	            // a move or compaction fails instead of selecting another message.
-	            // msgref:<key>:<date>:<Message-ID>. The date (nsIMsgDBHdr.date) is
-	            // part of the reference because Thunderbird can reuse a message key
-	            // (e.g. provisional keys of IMAP offline copies) for another message
-	            // with the same Message-ID.
+	            // Unique references for messages that share a Message-ID. The key is
+	            // resolved in the given folder and Message-ID and token are checked
+	            // again, so a reference made stale by a move or compaction fails
+	            // instead of selecting another message.
+	            // msgref:<key>:<token>:<Message-ID>. Thunderbird can reuse a message
+	            // key (e.g. provisional keys of IMAP offline copies) for another
+	            // message with the same Message-ID, so the token also binds the
+	            // message date – opaquely (SHA-256 with a secret of this server
+	            // instance), because the date is metadata a client may not read.
+	            // References are valid until the add-on or Thunderbird restarts.
 	            const MESSAGE_REF_PREFIX = "msgref:";
+	            let messageRefSecret = null;
+	            function messageRefToken(hdr) {
+	              if (!messageRefSecret) messageRefSecret = randomHex(16);
+	              const text = `${messageRefSecret}\n${hdr.messageKey}\n${Math.trunc(Number(hdr.date) || 0)}\n${hdr.messageId}`;
+	              return sha256Hex(unescape(encodeURIComponent(text))).slice(0, 16);
+	            }
 	            function parseMessageRef(value) {
 	              if (typeof value !== "string" || !value.startsWith(MESSAGE_REF_PREFIX)) return null;
-	              const match = /^(\d+):(\d+):([\s\S]+)$/.exec(value.slice(MESSAGE_REF_PREFIX.length));
+	              const match = /^(\d+):([0-9a-f]{16}):([\s\S]+)$/.exec(value.slice(MESSAGE_REF_PREFIX.length));
 	              const key = match ? Number(match[1]) : NaN;
-	              if (!match || !Number.isSafeInteger(key) || !Number.isSafeInteger(Number(match[2]))) return { invalid: true };
-	              return { key, date: match[2], messageId: match[3] };
+	              if (!match || !Number.isSafeInteger(key)) return { invalid: true };
+	              return { key, token: match[2], messageId: match[3] };
 	            }
 	            function messageRefFor(hdr) {
-	              return `${MESSAGE_REF_PREFIX}${hdr.messageKey}:${Math.trunc(Number(hdr.date) || 0)}:${hdr.messageId}`;
+	              return `${MESSAGE_REF_PREFIX}${hdr.messageKey}:${messageRefToken(hdr)}:${hdr.messageId}`;
 	            }
 	            // Candidates for an ambiguous Message-ID: reference, date and author only
 	            // (no subjects, which may be protected for encrypted messages); date and
@@ -6348,28 +6356,29 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	                }
 	              } catch { /* candidates are a convenience */ }
 	              return {
-	                error: `Message-ID is ambiguous: several messages in this folder share it; refusing to choose one: ${messageIds.join(", ")}. Pass one of the candidate references as messageId.`,
+	                error: `Message-ID is ambiguous: several messages in this folder share it, or it also has the form of a message reference; refusing to choose one: ${messageIds.join(", ")}. Pass one of the candidate references as messageId.`,
 	                candidates,
 	              };
 	            }
 	            // { hdr } for a unique match or a valid reference, { ambiguous: true },
 	            // { invalidRef: true }, { staleRef: true }, or {} if absent.
 	            // A sender chooses its own Message-ID and can make it look like a
-	            // reference ("msgref:5:<someone else's ID>"). If the input matches both
-	            // a message's literal Message-ID and a valid reference, it is
-	            // ambiguous; otherwise the one interpretation that matches is used.
+	            // reference. A well-formed reference is never read as a literal
+	            // Message-ID: if a message also has it as its literal Message-ID, the
+	            // input is ambiguous (refused with candidate references); otherwise it
+	            // resolves only to the referenced message or is stale. Only input
+	            // that is not a well-formed reference is a literal Message-ID.
 	            function lookupUniqueMessage(folder, db, messageId) {
 	              const ref = parseMessageRef(messageId);
 	              const count = getMessageIdCounts(folder, db).get(messageId) || 0;
-	              if (ref) {
-	                let byKey = null;
-	                if (!ref.invalid) {
-	                  try { byKey = db.getMsgHdrForKey(ref.key); } catch { byKey = null; }
-	                  if (byKey && (byKey.messageId !== ref.messageId || String(Math.trunc(Number(byKey.date) || 0)) !== ref.date)) byKey = null;
-	                }
-	                if (byKey) return count > 0 ? { ambiguous: true } : { hdr: byKey };
-	                if (count === 0) return ref.invalid ? { invalidRef: true } : { staleRef: true };
+	              if (ref && !ref.invalid) {
+	                if (count > 0) return { ambiguous: true };
+	                let byKey;
+	                try { byKey = db.getMsgHdrForKey(ref.key); } catch { byKey = null; }
+	                return byKey && byKey.messageId === ref.messageId && messageRefToken(byKey) === ref.token
+	                  ? { hdr: byKey } : { staleRef: true };
 	              }
+	              if (ref && count === 0) return { invalidRef: true };
 	              if (count > 1) return { ambiguous: true };
 	              if (count === 0) return {};
 	              let hdr;
@@ -6382,7 +6391,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	            }
 	            // Error for a reference that cannot be used, or null.
 	            function messageRefError(lookup, messageId) {
-	              if (lookup.invalidRef) return { error: `Invalid message reference: ${messageId} (expected msgref:<key>:<Message-ID>)` };
+	              if (lookup.invalidRef) return { error: `Invalid message reference: ${messageId} (use a candidate reference msgref:<key>:<token>:<Message-ID> from an ambiguity error; references are valid until Thunderbird or the add-on restarts)` };
 	              if (lookup.staleRef) return { error: `Message reference is stale (the message was moved, deleted or the folder was compacted): ${messageId}. Search again for a current reference.` };
 	              return null;
 	            }
@@ -12531,7 +12540,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                       if (target === uri || target.startsWith(`${uri}/`)) targets = true;
                     }
                     if (targets && !filterIsRegistered(account.key, rule, list)) {
-                      return { error: `Not permitted for this client: the filter "${rule.filterName}" (not created through MCP) moves or copies mail into this folder, and this change would rewrite it; that requires filters.foreign. Grant it in the Thunderbird MCP options.` };
+                      // Name the rule only to clients that may see it.
+                      let label = "a filter rule";
+                      try {
+                        if (clientHasCapability("filters.read") && isAccountAllowed(account.key)) label = `the filter "${rule.filterName}"`;
+                      } catch { /* keep it unnamed */ }
+                      return { error: `Not permitted for this client: ${label} (not created through MCP) moves or copies mail into this folder, and this change would rewrite it; that requires filters.foreign. Grant it in the Thunderbird MCP options.` };
                     }
                   }
                 }

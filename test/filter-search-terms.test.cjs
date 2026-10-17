@@ -2620,6 +2620,11 @@ describe("stored filter actions need the calling client's capabilities", () => {
       assert.match(foreign.api.filterTargetRestriction({ URI: "imap://account/Projects" }).error, /filters\.foreign/, "a parent folder too");
       assert.equal(foreign.api.filterTargetRestriction({ URI: "imap://account/Projects/Q30" }), null, "not a prefix match by name");
       assert.equal(foreign.api.filterTargetRestriction({ URI: "imap://account/Other" }), null);
+      const noRead = makeFilterHarness({ granted: own.filter(cap => cap !== "filters.read"), registered: () => false });
+      withMove(noRead, "imap://account/Projects/Q3");
+      const unnamed = noRead.api.filterTargetRestriction({ URI: "imap://account/Projects/Q3" }).error;
+      assert.match(unnamed, /a filter rule \(not created through MCP\)/);
+      assert.doesNotMatch(unnamed, /User move/, "no rule names without filters.read");
       const own_ = makeFilterHarness({ granted: own, registered: () => true });
       withMove(own_, "imap://account/Projects/Q3");
       assert.equal(own_.api.filterTargetRestriction({ URI: "imap://account/Projects/Q3" }), null, "only its own rules target it");
