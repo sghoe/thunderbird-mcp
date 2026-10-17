@@ -12824,11 +12824,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 const effectChanged = filterFingerprint(candidate) !== oldFingerprint || (candidate.enabled && !filter.enabled);
                 if (effectChanged) {
                   if (filterGroupMixed(account.key, oldFingerprint, oldLiveMatches)) return { error: MIXED_GROUP_ERROR };
+                  // Identical rules other than this one (also when it is only
+                  // switched on and keeps its effect).
                   const newFingerprint = filterFingerprint(candidate);
-                  if (newFingerprint !== oldFingerprint &&
-                      filterHasForeignTwin(account.key, newFingerprint, liveFilterMatches(filterList, newFingerprint))) {
-                    return { error: FOREIGN_TWIN_ERROR };
-                  }
+                  const twins = newFingerprint === oldFingerprint ? oldLiveMatches - 1 : liveFilterMatches(filterList, newFingerprint);
+                  if (filterHasForeignTwin(account.key, newFingerprint, twins)) return { error: FOREIGN_TWIN_ERROR };
                   const registryError = filterRegistryRestriction(currentClientId(), account.key, { name: candidate.filterName, oldFingerprint, oldLiveMatches });
                   if (registryError) return registryError;
                 }

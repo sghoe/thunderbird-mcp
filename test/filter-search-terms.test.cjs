@@ -327,6 +327,8 @@ function makeFilterHarness({
   mixedGroup = false,
   // An identical rule not created through MCP exists for the new effect.
   foreignTwin = false,
+  // Live rules with the fingerprint in question (liveFilterMatches).
+  liveMatches = 1,
   defaultAccount = null,
   // Further accounts (e.g. POP accounts deferring into this one).
   otherAccounts = [],
@@ -407,9 +409,12 @@ function makeFilterHarness({
       identitySentCopyAllowed: (identity) => sentCopyAllowed(identity),
       addressCollectionRestriction: (recipients) => collection(recipients),
       filterIsRegistered: (accountKey, filter) => registered(filter),
-    liveFilterMatches: () => 1,
+    liveFilterMatches: () => liveMatches,
     filterGroupMixed: () => mixedGroup,
-    filterHasForeignTwin: () => foreignTwin,
+    filterHasForeignTwin: (accountKey, fingerprint, twins) => {
+      registryCalls.push(["twinCheck", fingerprint, twins]);
+      return typeof foreignTwin === "function" ? foreignTwin(twins) : foreignTwin;
+    },
     FOREIGN_TWIN_ERROR: "Not permitted: an identical rule that was not created through MCP already exists",
     MIXED_GROUP_ERROR: "Not permitted: identical rules exist, of which only some were created through MCP",
     filterRegistryRestriction: (...args) => {
@@ -2606,6 +2611,18 @@ describe("stored filter actions need the calling client's capabilities", () => {
       h.seed({ name: "Mine" });
       assert.match(h.api.updateFilter("account", 0, "Changed (mock fingerprint follows the name)").error, /identical rule that was not created through MCP/);
       assert.equal(h.filterList.filters[0].filterName, "Mine");
+    });
+
+    it("checks for foreign twins when a rule is only switched on, without counting the rule itself", () => {
+      // Two identical user rules, one disabled; the register knows neither.
+      const h = makeFilterHarness({ granted: [...own, "filters.foreign"], liveMatches: 2, foreignTwin: (twins) => twins > 0 });
+      h.seed({ name: "Twin", enabled: false });
+      assert.match(h.api.updateFilter("account", 0, undefined, true).error, /identical rule that was not created through MCP/);
+      assert.equal(h.filterList.filters[0].enabled, false);
+      assert.deepEqual([...h.registryCalls.find(call => call[0] === "twinCheck")].slice(2), [1], "the other rule only");
+      const alone = makeFilterHarness({ granted: [...own, "filters.foreign"], liveMatches: 1, foreignTwin: (twins) => twins > 0 });
+      alone.seed({ name: "Single", enabled: false });
+      assert.equal(alone.api.updateFilter("account", 0, undefined, true).success, true);
     });
 
     it("leaves the register untouched for a rename or a disable", () => {

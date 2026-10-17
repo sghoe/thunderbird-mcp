@@ -239,6 +239,11 @@ draft and the refused waiting call.
 |---|---|
 | A client could create an identical copy of a user rule; once the user edited the copy in Thunderbird, the untouched original counted as registered (revocation disabled it and lost the changed copy without a conflict) (Sol) | creating a rule, or changing one into an effect, identical to an existing rule not created through MCP is refused; residual (user-made exact copies) documented in 5b |
 | The folder guard compared targets case-sensitively; Thunderbird rewrites local targets case-insensitively on rename (Opus, from comm-central source) | case-insensitive comparison (matching too much only refuses more) |
+## Review round 12 (Sol, Opus – same finding)
+
+| Finding | Fix |
+|---|---|
+| Switching on one of several identical rules not created through MCP registered it (fingerprint unchanged, so the twin check was skipped); after the user edited or deleted one of them, revocation could disable the untouched one (Sol, Opus) | the twin check also runs when a rule is switched on, counting the identical rules other than the rule itself; refused if any of them is not registered |
 ## Bound approvals – how each approval is tied to the concrete action
 
 | Approval | Bound to | Where |
