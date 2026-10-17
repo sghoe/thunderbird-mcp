@@ -32,6 +32,8 @@
     "test": "node --test test/*.cjs",
     "test:native:parity": "node test/native/run-parity.cjs",
     "test:native": "node --test --test-concurrency=1 test/native/*.native.cjs",
+    "build": "node scripts/build-xpi.cjs",
+    "verify:xpi": "node scripts/build-xpi.cjs --verify",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix"
   },

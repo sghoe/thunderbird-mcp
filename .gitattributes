@@ -1,0 +1,3 @@
+# Release artefacts: never touched by line-ending conversion (Stage 6).
+dist/*.xpi binary
+dist/SHA256SUMS text eol=lf

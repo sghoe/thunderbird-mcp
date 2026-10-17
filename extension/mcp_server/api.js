@@ -13687,7 +13687,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             const text = sis.read(sis.available());
             sis.close();
             const bi = JSON.parse(text);
-            buildVersion = bi.version || bi.commit || null;
+            // Reproducible builds carry the package version and a digest of
+            // the sources (scripts/build-xpi.cjs), no build time.
+            buildVersion = bi.sourceDigest ? `${bi.version} (sources ${String(bi.sourceDigest).slice(0, 12)})` : (bi.version || bi.commit || null);
             buildDate = bi.builtAt || null;
           } catch (e) {
             // buildinfo.json may legitimately be absent in dev builds; surface anything else.

@@ -53,12 +53,9 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22.x'
-      - name: Assert package.json and manifest versions match
-        run: |
-          PKG="$(node -p "require('./package.json').version")"
-          MAN="$(node -p "require('./extension/manifest.json').version")"
-          if [ "$PKG" != "$MAN" ]; then
-            echo "::error::package.json version ($PKG) does not match extension/manifest.json version ($MAN). They must stay in lockstep."
-            exit 1
-          fi
-          echo "Versions in sync: $PKG"
+      # The fork maps package "X.Y.Z-hardened.N" to manifest "X.Y.Z.N"; the
+      # build checks that mapping and that dist/thunderbird-mcp.xpi and
+      # dist/SHA256SUMS are byte-for-byte the reproducible build of this
+      # checkout (scripts/build-xpi.cjs).
+      - name: Verify versions and the reproducible XPI
+        run: node scripts/build-xpi.cjs --verify

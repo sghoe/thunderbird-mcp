@@ -4,7 +4,7 @@ Keep changes focused and follow the surrounding code. Search for existing helper
 
 ## Build
 
-Use Node.js 22 or newer for development. On Linux/macOS, run `bash scripts/build.sh` (requires `zip`). Alternatively, including on Windows, run `node scripts/build-xpi.cjs`. Both produce `dist/thunderbird-mcp.xpi`. Install it from Thunderbird's Add-ons manager and restart Thunderbird to load the changes.
+Use Node.js 22 or newer for development. Run `node scripts/build-xpi.cjs` (or `bash scripts/build.sh`, which calls it) to produce the reproducible `dist/thunderbird-mcp.xpi` and `dist/SHA256SUMS`; commit both with the sources they were built from. `node scripts/build-xpi.cjs --verify` checks that they match the working tree (CI runs it). The build never modifies files under `extension/`; keep `extension/manifest.json` at the numeric form of the `package.json` version (`X.Y.Z-hardened.N` → `X.Y.Z.N`). Install the XPI from Thunderbird's Add-ons manager and restart Thunderbird to load the changes.
 
 ## Test and lint
 

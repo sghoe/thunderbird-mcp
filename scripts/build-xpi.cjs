@@ -1,164 +1,210 @@
 #!/usr/bin/env node
 /**
- * Build the Thunderbird MCP extension XPI (cross-platform, no external deps).
+ * Reproducible build of the Thunderbird MCP extension XPI (no external deps).
+ *
+ * The XPI bytes depend only on the source contents:
+ * - text files are packed with LF line endings (as stored in git), so a
+ *   Windows checkout (CRLF) and a Linux checkout give the same package;
+ * - entries are sorted, all timestamps fixed (1980-01-01), no extra fields;
+ * - entries are stored uncompressed: deflate output is not guaranteed to be
+ *   identical across zlib versions/CPUs;
+ * - buildinfo.json holds the package version and a SHA-256 digest of the
+ *   sources, no time or machine data.
+ *
+ * Usage:
+ *   node scripts/build-xpi.cjs              build from the working tree into dist/
+ *   node scripts/build-xpi.cjs --verify     rebuild in memory, compare with dist/
+ *   node scripts/build-xpi.cjs --from REV   rebuild from commit REV and compare
+ *                                           with the XPI and SHA256SUMS of REV
  */
-const fs = require('fs');
-const path = require('path');
-const zlib = require('zlib');
+"use strict";
 
-const PROJECT_DIR = path.resolve(__dirname, '..');
-const EXT_DIR = path.join(PROJECT_DIR, 'extension');
-const DIST_DIR = path.join(PROJECT_DIR, 'dist');
-const OUT_FILE = path.join(DIST_DIR, 'thunderbird-mcp.xpi');
-const PACKAGE_FILE = path.join(PROJECT_DIR, 'package.json');
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const { execFileSync } = require("child_process");
+
+const PROJECT_DIR = path.resolve(__dirname, "..");
+const DIST_DIR = path.join(PROJECT_DIR, "dist");
+const XPI_NAME = "thunderbird-mcp.xpi";
+const OUT_FILE = path.join(DIST_DIR, XPI_NAME);
+const SUMS_FILE = path.join(DIST_DIR, "SHA256SUMS");
+const TEXT_EXTENSIONS = new Set([".js", ".mjs", ".cjs", ".json", ".html", ".css", ".md", ".txt", ".svg", ""]);
+// Generated into the package; a stale copy in extension/ is ignored.
+const GENERATED = new Set(["buildinfo.json"]);
+
+const sha256 = (data) => crypto.createHash("sha256").update(data).digest("hex");
 
 function crc32(buf) {
   let crc = 0xFFFFFFFF;
   for (let i = 0; i < buf.length; i++) {
     crc ^= buf[i];
-    for (let j = 0; j < 8; j++) {
-      crc = (crc >>> 1) ^ (crc & 1 ? 0xEDB88320 : 0);
-    }
+    for (let j = 0; j < 8; j++) crc = (crc >>> 1) ^ (crc & 1 ? 0xEDB88320 : 0);
   }
   return (crc ^ 0xFFFFFFFF) >>> 0;
 }
 
-class ZipWriter {
-  constructor() { this.files = []; this.offset = 0; this.buf = []; }
+function normalizeText(name, data) {
+  if (!TEXT_EXTENSIONS.has(path.extname(name).toLowerCase())) return data;
+  return Buffer.from(data.toString("latin1").replace(/\r\n/g, "\n"), "latin1");
+}
 
-  addFile(name, data) {
-    // Always use forward slashes in zip entries
-    name = name.split(path.sep).join('/');
-    const nameBuf = Buffer.from(name, 'utf8');
+// files: [{ name, data }] -> ZIP buffer (stored entries, sorted, fixed time).
+function zipStored(files) {
+  const DOS_TIME = 0;
+  const DOS_DATE = (0 << 9) | (1 << 5) | 1; // 1980-01-01
+  const sorted = [...files].sort((a, b) => Buffer.compare(Buffer.from(a.name), Buffer.from(b.name)));
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  for (const { name, data } of sorted) {
+    const nameBuf = Buffer.from(name, "utf8");
     const crc = crc32(data);
-    const compressed = zlib.deflateRawSync(data);
-
-    const lh = Buffer.alloc(30 + nameBuf.length);
-    lh.writeUInt32LE(0x04034b50, 0);
-    lh.writeUInt16LE(20, 4);
-    lh.writeUInt16LE(0, 6);
-    lh.writeUInt16LE(8, 8);
-    lh.writeUInt16LE(0, 10);
-    lh.writeUInt16LE(0, 12);
-    lh.writeUInt32LE(crc, 14);
-    lh.writeUInt32LE(compressed.length, 18);
-    lh.writeUInt32LE(data.length, 22);
-    lh.writeUInt16LE(nameBuf.length, 26);
-    lh.writeUInt16LE(0, 28);
-    nameBuf.copy(lh, 30);
-
-    this.files.push({ name: nameBuf, crc, compressedSize: compressed.length, uncompressedSize: data.length, offset: this.offset });
-    this.buf.push(lh, compressed);
-    this.offset += lh.length + compressed.length;
+    const local = Buffer.alloc(30 + nameBuf.length);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(10, 4); // version needed
+    local.writeUInt16LE(0x0800, 6); // UTF-8 names
+    local.writeUInt16LE(0, 8); // stored
+    local.writeUInt16LE(DOS_TIME, 10);
+    local.writeUInt16LE(DOS_DATE, 12);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(nameBuf.length, 26);
+    local.writeUInt16LE(0, 28);
+    nameBuf.copy(local, 30);
+    const entry = Buffer.alloc(46 + nameBuf.length);
+    entry.writeUInt32LE(0x02014b50, 0);
+    entry.writeUInt16LE(10, 4); // made by (MS-DOS, 1.0)
+    entry.writeUInt16LE(10, 6);
+    entry.writeUInt16LE(0x0800, 8);
+    entry.writeUInt16LE(0, 10);
+    entry.writeUInt16LE(DOS_TIME, 12);
+    entry.writeUInt16LE(DOS_DATE, 14);
+    entry.writeUInt32LE(crc, 16);
+    entry.writeUInt32LE(data.length, 20);
+    entry.writeUInt32LE(data.length, 24);
+    entry.writeUInt16LE(nameBuf.length, 28);
+    entry.writeUInt32LE(offset, 42);
+    nameBuf.copy(entry, 46);
+    parts.push(local, data);
+    central.push(entry);
+    offset += local.length + data.length;
   }
-
-  toBuffer() {
-    const cd = [];
-    let cdSize = 0;
-    for (const f of this.files) {
-      const e = Buffer.alloc(46 + f.name.length);
-      e.writeUInt32LE(0x02014b50, 0);
-      e.writeUInt16LE(20, 4);
-      e.writeUInt16LE(20, 6);
-      e.writeUInt16LE(0, 8);
-      e.writeUInt16LE(8, 10);
-      e.writeUInt16LE(0, 12);
-      e.writeUInt16LE(0, 14);
-      e.writeUInt32LE(f.crc, 16);
-      e.writeUInt32LE(f.compressedSize, 20);
-      e.writeUInt32LE(f.uncompressedSize, 24);
-      e.writeUInt16LE(f.name.length, 28);
-      e.writeUInt16LE(0, 30);
-      e.writeUInt16LE(0, 32);
-      e.writeUInt16LE(0, 34);
-      e.writeUInt16LE(0, 36);
-      e.writeUInt32LE(0, 38);
-      e.writeUInt32LE(f.offset, 42);
-      f.name.copy(e, 46);
-      cd.push(e);
-      cdSize += e.length;
-    }
-
-    const eocd = Buffer.alloc(22);
-    eocd.writeUInt32LE(0x06054b50, 0);
-    eocd.writeUInt16LE(0, 4);
-    eocd.writeUInt16LE(0, 6);
-    eocd.writeUInt16LE(this.files.length, 8);
-    eocd.writeUInt16LE(this.files.length, 10);
-    eocd.writeUInt32LE(cdSize, 12);
-    eocd.writeUInt32LE(this.offset, 16);
-    eocd.writeUInt16LE(0, 20);
-
-    return Buffer.concat([...this.buf, ...cd, eocd]);
-  }
+  const centralSize = central.reduce((sum, e) => sum + e.length, 0);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(sorted.length, 8);
+  end.writeUInt16LE(sorted.length, 10);
+  end.writeUInt32LE(centralSize, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...parts, ...central, end]);
 }
 
-function addDir(zip, dir, prefix) {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    const zipPath = prefix ? prefix + '/' + entry.name : entry.name;
-    if (entry.isDirectory()) {
-      addDir(zip, full, zipPath);
-    } else {
-      zip.addFile(zipPath, fs.readFileSync(full));
-    }
-  }
+// Source readers: { list(): [relative paths under extension/], read(rel), readRoot(name) }
+function workingTreeSource() {
+  const extDir = path.join(PROJECT_DIR, "extension");
+  const walk = (dir, prefix) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    return entry.isDirectory() ? walk(path.join(dir, entry.name), rel) : [rel];
+  });
+  return {
+    label: "working tree",
+    list: () => walk(extDir, ""),
+    read: (rel) => fs.readFileSync(path.join(extDir, ...rel.split("/"))),
+    readRoot: (name) => fs.readFileSync(path.join(PROJECT_DIR, name)),
+  };
 }
 
-function readPackageVersion() {
-  try {
-    const pkg = JSON.parse(fs.readFileSync(PACKAGE_FILE, 'utf8'));
-    if (typeof pkg.version !== 'string' || !pkg.version) {
-      throw new Error('package.json does not contain a string "version" field');
-    }
-    return pkg.version;
-  } catch (err) {
-    console.error(`Error: could not read package.json version: ${err.message}`);
-    process.exit(1);
-  }
+function gitSource(rev) {
+  const git = (args, options = {}) => execFileSync("git", args, { cwd: PROJECT_DIR, maxBuffer: 64 * 1024 * 1024, ...options });
+  const commit = git(["rev-parse", "--verify", `${rev}^{commit}`], { encoding: "utf8" }).trim();
+  return {
+    label: `commit ${commit}`,
+    commit,
+    list: () => git(["ls-tree", "-r", "--name-only", "-z", commit, "extension/"], { encoding: "utf8" })
+      .split("\0").filter(Boolean).map((file) => file.slice("extension/".length)),
+    read: (rel) => git(["cat-file", "blob", `${commit}:extension/${rel}`]),
+    readRoot: (name) => git(["cat-file", "blob", `${commit}:${name}`]),
+  };
 }
 
-// Stamp buildinfo.json with git describe version and timestamp
-const { execSync } = require('child_process');
-const BUILDINFO_FILE = path.join(EXT_DIR, 'buildinfo.json');
-const MANIFEST_FILE = path.join(EXT_DIR, 'manifest.json');
-const packageVersion = readPackageVersion();
-try {
-  // Produces e.g. "v1.2.0-3-g1461f1a" (tag + commits past tag + hash)
-  let buildVersion;
-  try {
-    buildVersion = execSync('git describe --tags --always', { cwd: PROJECT_DIR, encoding: 'utf8' }).trim();
-  } catch {
-    // No tags exist -- fall back to short hash
-    buildVersion = execSync('git rev-parse --short HEAD', { cwd: PROJECT_DIR, encoding: 'utf8' }).trim();
-  }
-  // Append +dirty if there are uncommitted changes
-  try {
-    execSync('git diff --quiet && git diff --cached --quiet', { cwd: PROJECT_DIR });
-  } catch {
-    buildVersion += '+dirty';
-  }
-  const buildInfo = JSON.stringify({ version: buildVersion, builtAt: new Date().toISOString() });
-  fs.writeFileSync(BUILDINFO_FILE, buildInfo);
-} catch {
-  console.warn('Warning: could not stamp buildinfo.json (git not available?)');
-}
-
-try {
-  const manifest = JSON.parse(fs.readFileSync(MANIFEST_FILE, 'utf8'));
-  // Fork versions are "X.Y.Z-hardened.N" in package.json; Gecko extension
-  // versions must be numeric, so the manifest uses "X.Y.Z.N".
+function expectedManifestVersion(packageVersion) {
+  // Fork versions are "X.Y.Z-hardened.N"; Gecko needs numeric "X.Y.Z.N".
   const fork = /^(\d+\.\d+\.\d+)-hardened\.(\d+)$/.exec(packageVersion);
-  manifest.version = fork ? `${fork[1]}.${fork[2]}` : packageVersion;
-  fs.writeFileSync(MANIFEST_FILE, JSON.stringify(manifest, null, 2) + '\n');
-} catch (err) {
-  console.error(`Error: could not update manifest.json version: ${err.message}`);
-  process.exit(1);
+  return fork ? `${fork[1]}.${fork[2]}` : packageVersion;
 }
 
-fs.mkdirSync(DIST_DIR, { recursive: true });
-const zip = new ZipWriter();
-addDir(zip, EXT_DIR, '');
-zip.addFile('LICENSE', fs.readFileSync(path.join(PROJECT_DIR, 'LICENSE')));
-fs.writeFileSync(OUT_FILE, zip.toBuffer());
-console.log(`Built: ${OUT_FILE} (${(fs.statSync(OUT_FILE).size / 1024).toFixed(0)} KB)`);
+// Returns { xpi, sha256, sourceDigest, version, files }.
+function buildXpi(source) {
+  const pkg = JSON.parse(source.readRoot("package.json").toString("utf8"));
+  if (typeof pkg.version !== "string" || !pkg.version) throw new Error('package.json has no string "version"');
+  const files = source.list()
+    .filter((rel) => !GENERATED.has(rel))
+    .map((rel) => ({ name: rel, data: normalizeText(rel, source.read(rel)) }));
+  files.push({ name: "LICENSE", data: normalizeText("LICENSE", source.readRoot("LICENSE")) });
+
+  const manifest = JSON.parse(files.find((file) => file.name === "manifest.json").data.toString("utf8"));
+  const manifestVersion = expectedManifestVersion(pkg.version);
+  if (manifest.version !== manifestVersion) {
+    throw new Error(`extension/manifest.json version ${manifest.version} does not match package.json ${pkg.version} (expected ${manifestVersion})`);
+  }
+
+  const digestInput = [...files]
+    .sort((a, b) => Buffer.compare(Buffer.from(a.name), Buffer.from(b.name)))
+    .map((file) => `${file.name}\0${sha256(file.data)}\n`).join("");
+  const sourceDigest = sha256(digestInput);
+  files.push({
+    name: "buildinfo.json",
+    data: Buffer.from(`${JSON.stringify({ version: pkg.version, sourceDigest })}\n`, "utf8"),
+  });
+  const xpi = zipStored(files);
+  return { xpi, sha256: sha256(xpi), sourceDigest, version: pkg.version, files: files.map((file) => file.name).sort() };
+}
+
+const sumsText = (hash) => `${hash}  ${XPI_NAME}\n`;
+
+function main(argv) {
+  const fromIndex = argv.indexOf("--from");
+  if (fromIndex >= 0) {
+    const source = gitSource(argv[fromIndex + 1] || "HEAD");
+    const built = buildXpi(source);
+    const committed = execFileSync("git", ["cat-file", "blob", `${source.commit}:dist/${XPI_NAME}`], { cwd: PROJECT_DIR, maxBuffer: 64 * 1024 * 1024 });
+    let sums = null;
+    try {
+      sums = execFileSync("git", ["cat-file", "blob", `${source.commit}:dist/SHA256SUMS`], { cwd: PROJECT_DIR, encoding: "utf8" });
+    } catch { /* not present in that commit */ }
+    console.log(`${source.label}: version ${built.version}, sources ${built.sourceDigest}`);
+    console.log(`rebuilt   ${built.sha256}`);
+    console.log(`committed ${sha256(committed)}`);
+    const ok = committed.equals(built.xpi) && (!sums || sums.replace(/\r\n/g, "\n") === sumsText(built.sha256));
+    console.log(ok ? "OK: the committed XPI is reproducible from this commit" : "MISMATCH");
+    return ok ? 0 : 1;
+  }
+
+  const built = buildXpi(workingTreeSource());
+  if (argv.includes("--verify")) {
+    const current = fs.existsSync(OUT_FILE) ? fs.readFileSync(OUT_FILE) : Buffer.alloc(0);
+    const sums = fs.existsSync(SUMS_FILE) ? fs.readFileSync(SUMS_FILE, "utf8").replace(/\r\n/g, "\n") : "";
+    const ok = current.equals(built.xpi) && sums === sumsText(built.sha256);
+    console.log(ok ? `OK: dist/${XPI_NAME} ${built.sha256}` : `MISMATCH: run node scripts/build-xpi.cjs (expected ${built.sha256})`);
+    return ok ? 0 : 1;
+  }
+  fs.mkdirSync(DIST_DIR, { recursive: true });
+  fs.writeFileSync(OUT_FILE, built.xpi);
+  fs.writeFileSync(SUMS_FILE, sumsText(built.sha256));
+  console.log(`Built: ${OUT_FILE} (${(built.xpi.length / 1024).toFixed(0)} KB)`);
+  console.log(`SHA-256 ${built.sha256}  version ${built.version}  sources ${built.sourceDigest}`);
+  return 0;
+}
+
+module.exports = { buildXpi, workingTreeSource, gitSource, zipStored, normalizeText, expectedManifestVersion };
+
+if (require.main === module) {
+  try {
+    process.exitCode = main(process.argv.slice(2));
+  } catch (e) {
+    console.error(`Error: ${e.message}`);
+    process.exitCode = 1;
+  }
+}
