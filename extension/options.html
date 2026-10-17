@@ -229,10 +229,11 @@
 <div class="section">
   <h2>Diagnostic Log</h2>
   <p class="mode-note">
-    Off by default. When on, each request records the tool, the client, the outcome, the operation
-    state, the permission decision and a redacted error text in a file in your Thunderbird profile
-    (rotated at 1 MiB). No message content, subjects, addresses, file paths, folder URIs or tokens
-    are written. Useful for reporting problems.
+    Off by default. When on, each request records the tool, the client's log ID (shown in the
+    client list), the outcome, the operation state, the permission decision and, for failures, a
+    fixed error category in a file in your Thunderbird profile (rotated at 1 MiB). Error texts,
+    message content, names, addresses, file paths, folder URIs and tokens are never written.
+    Useful for reporting problems.
   </p>
   <ul class="account-list">
     <li>

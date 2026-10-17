@@ -205,7 +205,7 @@ function renderClients(clients) {
     title.textContent = client.name;
     const details = document.createElement("span");
     const accounts = client.accounts.length ? client.accounts.join(", ") : "none";
-    details.textContent = ` — ${client.profile}; ${client.capabilities.length} capabilities; accounts: ${accounts}` +
+    details.textContent = ` — log ID ${client.id.slice(0, 8)}; ${client.profile}; ${client.capabilities.length} capabilities; accounts: ${accounts}` +
       `${client.calendars ? "; calendars" : ""}${client.addressBooks ? "; address books" : ""}`;
     const rotate = document.createElement("button");
     rotate.textContent = "New token";

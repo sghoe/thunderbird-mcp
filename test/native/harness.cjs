@@ -56,15 +56,17 @@ async function allCapabilities(extensionDir = EXTENSION_DIR) {
 }
 
 // clients: [{ name, capabilities?, profile?, accounts?, calendars?, addressBooks? }]
-// Missing fields mean full access. Returns { pref, tokens: { name: token } }.
+// Missing fields mean full access. Returns { pref, tokens: { name: token }, ids: { name: id } }.
 async function pairClients(clients, extensionDir = EXTENSION_DIR) {
   const all = await allCapabilities(extensionDir);
   const tokens = {};
+  const ids = {};
   const stored = clients.map((client, index) => {
     const token = crypto.randomBytes(32).toString("hex");
     tokens[client.name] = token;
+    ids[client.name] = crypto.randomBytes(16).toString("hex");
     return {
-      id: crypto.randomBytes(16).toString("hex"),
+      id: ids[client.name],
       name: client.name,
       verifier: crypto.createHash("sha256").update(token).digest("hex"),
       createdAt: Date.now() + index,
@@ -75,7 +77,7 @@ async function pairClients(clients, extensionDir = EXTENSION_DIR) {
       addressBooks: client.addressBooks ?? true,
     };
   });
-  return { pref: JSON.stringify({ version: 1, clients: stored }), tokens };
+  return { pref: JSON.stringify({ version: 1, clients: stored }), tokens, ids };
 }
 
 // ── Local SMTP sink ──────────────────────────────────────────────────────
@@ -388,6 +390,7 @@ async function startThunderbird({ mailboxes, extraPrefs, headless = true, authHe
   const registry = hasClientRegistry(extensionDir)
     ? await pairClients(clients || [{ name: "harness" }], extensionDir) : null;
   const clientTokens = registry ? registry.tokens : {};
+  const clientIds = registry ? registry.ids : {};
   const defaultToken = registry ? Object.values(registry.tokens)[0] : null;
   const profileDir = buildProfile({
     root,
@@ -518,7 +521,7 @@ async function startThunderbird({ mailboxes, extraPrefs, headless = true, authHe
     }
   }
 
-  return { root, tmpDir, profileDir, clientTokens, get connection() { return connection; }, smtp, probe, rpc, call, waitForMessages, reconnect, marionette, folderCounts, stop, log, child };
+  return { root, tmpDir, profileDir, clientTokens, clientIds, get connection() { return connection; }, smtp, probe, rpc, call, waitForMessages, reconnect, marionette, folderCounts, stop, log, child };
 }
 
 function randomId(prefix) {

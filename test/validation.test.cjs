@@ -43,6 +43,8 @@ function loadProductionAttachmentValidation(overrides = {}) {
     _callAttachFiles: null,
     trackCallAttachmentFiles: () => ({ stopCollecting() {}, release() {} }),
     writeDiagnostic: () => {},
+    diagnosticClient: () => undefined,
+    diagnosticMethod: () => 'other-method',
     _tempFileCounter: 0,
     // The private copy is tested separately (attachment-copy.test.cjs); here
     // the checked file stands in for it so the path checks stay visible.

@@ -26,8 +26,12 @@ describe("diagnostic log (native)", { skip: !h.thunderbirdBinary() && "THUNDERBI
   });
   after(async () => { await tb?.stop(); });
 
-  it("records outcomes, refusals and redacted errors without content", async () => {
+  it("records outcomes, refusals and error categories without content", async () => {
     await tb.call("listAccounts", {});
+    await tb.call("searchMessages", { query: "", folderPath: "INBOX/Acme Merger" });
+    await tb.call("sendMail", { to: "x@sink.test", subject: "s", body: "b", attachments: ["C:\\Users\\Alice Smith\\Gehalt 2026.pdf"], skipReview: true });
+    const unknownTool = "e".repeat(64);
+    await tb.rpc("tools/call", { name: unknownTool, arguments: {} });
     await tb.call("getMessage", { messageId: "diag@x.test", folderPath: INBOX });
     await tb.call("getMessage", { messageId: "missing.person@secret.test", folderPath: INBOX });
     await tb.call("getMessage", { messageId: "diag@x.test", folderPath: INBOX }, { client: "reader" });
@@ -37,11 +41,16 @@ describe("diagnostic log (native)", { skip: !h.thunderbirdBinary() && "THUNDERBI
     const entries = text.trim().split("\n").map((line) => JSON.parse(line));
     const tools = entries.filter((e) => e.event === "tool");
     assert.ok(entries.some((e) => e.event === "server" && e.outcome === "started"));
-    assert.ok(tools.some((e) => e.tool === "listAccounts" && e.outcome === "ok" && e.client === "harness" && Number.isInteger(e.ms)));
-    assert.ok(tools.some((e) => e.tool === "getMessage" && e.outcome === "error" && /Message not found: <addr>/.test(e.error)));
-    assert.ok(tools.some((e) => e.tool === "getMessage" && e.outcome === "refused" && e.client === "reader" && e.missing.includes("mail.body")));
+    const id = (name) => tb.clientIds[name].slice(0, 8);
+    assert.ok(tools.some((e) => e.tool === "listAccounts" && e.outcome === "ok" && e.client === id("harness") && Number.isInteger(e.ms)));
+    assert.ok(tools.some((e) => e.tool === "getMessage" && e.outcome === "error" && e.error === "Message not found"));
+    assert.ok(entries.some((e) => e.tool === "searchMessages" && /^(Folder not found|Account not found|Account not accessible)/.test(e.error)), text);
+    assert.ok(entries.some((e) => e.tool === "sendMail" && e.error === "Attachments refused"), text);
+    assert.ok(entries.some((e) => e.event === "error" && e.tool === "<unknown>"), "unknown tool names are not written");
+    assert.ok(tools.some((e) => e.tool === "getMessage" && e.outcome === "refused" && e.client === id("reader") && e.missing.includes("mail.body")));
     assert.ok(tools.some((e) => e.tool === "sendMail" && e.outcome === "ok" && e.operationState === "completed"));
-    for (const secret of ["missing.person", "secret.test", "bob.private", "Layoff", "very secret", "Quarterly", "secret body", "diag@x.test", "127.0.0.1"]) {
+    for (const secret of ["missing.person", "secret.test", "bob.private", "Layoff", "very secret", "Quarterly", "secret body", "diag@x.test", "127.0.0.1",
+      "Acme", "Alice", "Gehalt", "Users", unknownTool, "harness", "reader"]) {
       assert.equal(text.includes(secret), false, `log must not contain ${secret}`);
     }
     for (const token of Object.values(tb.clientTokens)) assert.equal(text.includes(token), false, "no token");

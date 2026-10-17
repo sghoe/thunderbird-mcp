@@ -3354,7 +3354,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
     // Optional, off by default. One JSON line per entry in
     // <profile>/thunderbird-mcp-hardened/diagnostic.log (owner-only), rotated
     // to diagnostic.log.1 at 1 MiB. Entries are built and redacted by
-    // core/diagnostic-log.sys.mjs: no content, recipients, paths or tokens.
+    // core/diagnostic-log.sys.mjs: only constants and numbers – never error
+    // texts, content, names, recipients, paths or tokens.
     function diagnosticLogEnabled() {
       try {
         return Services.prefs.getBoolPref(PREF_DIAGNOSTIC_LOG, false);
@@ -3370,10 +3371,35 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
       return file;
     }
 
+    const DIAGNOSTIC_TOOL_NAMES = new Set(ALL_TOOL_NAMES);
+    const DIAGNOSTIC_METHODS = new Set(["initialize", "resources/list", "prompts/list", "tools/list", "tools/call"]);
+
+    // Opaque client ID for the log: the start of the random registry ID,
+    // shown next to the client in the options page.
+    function diagnosticClient(client) {
+      return typeof client?.id === "string" ? client.id.slice(0, 8) : undefined;
+    }
+
+    function diagnosticMethod(method) {
+      return DIAGNOSTIC_METHODS.has(method) ? method : "other-method";
+    }
+
+    // The XPCOM result name (a constant of Components.results) of an error.
+    function diagnosticResultName(error) {
+      const result = error !== null && typeof error === "object" ? error.result : undefined;
+      if (typeof result !== "number") return undefined;
+      for (const name in Components.results) {
+        if (Components.results[name] === result) return name;
+      }
+      return undefined;
+    }
+
     function writeDiagnostic(fields) {
       if (!diagnosticLogEnabled()) return;
       try {
-        const line = `${Core.diagnosticLog.formatEntry(Date.now(), fields)}\n`;
+        const code = diagnosticResultName(fields.error);
+        const entry = Core.diagnosticLog.formatEntry(Date.now(), code ? { ...fields, code } : fields, { toolNames: DIAGNOSTIC_TOOL_NAMES });
+        const line = `${entry}\n`;
         const file = diagnosticLogFile();
         if (!file.parent.exists()) file.parent.create(Ci.nsIFile.DIRECTORY_TYPE, 0o700);
         if (file.exists() && file.fileSize > Core.diagnosticLog.MAX_FILE_BYTES) {
@@ -13474,7 +13500,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               }
 
               if (req.method !== "POST") {
-                writeDiagnostic({ event: "request", client: client.name, outcome: "refused", status: 405 });
+                writeDiagnostic({ event: "request", client: diagnosticClient(client), outcome: "refused", status: 405 });
                 res.setStatusLine("1.1", 405, "Method Not Allowed");
                 res.setHeader("Allow", "POST", false);
                 res.setHeader("Content-Type", "application/json; charset=utf-8", false);
@@ -13495,7 +13521,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 // Header missing — will be 0
               }
               if (contentLength > MAX_REQUEST_BODY) {
-                writeDiagnostic({ event: "request", client: client.name, outcome: "refused", status: 413 });
+                writeDiagnostic({ event: "request", client: diagnosticClient(client), outcome: "refused", status: 413 });
                 res.setStatusLine("1.1", 413, "Payload Too Large");
                 res.setHeader("Content-Type", "application/json; charset=utf-8", false);
                 res.write(JSON.stringify({
@@ -13511,7 +13537,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               try {
                 message = JSON.parse(readRequestBody(req));
               } catch {
-                writeDiagnostic({ event: "request", client: client.name, outcome: "refused", detail: "parse-error" });
+                writeDiagnostic({ event: "request", client: diagnosticClient(client), outcome: "refused", detail: "parse-error" });
                 res.setStatusLine("1.1", 200, "OK");
                 res.setHeader("Content-Type", "application/json; charset=utf-8", false);
                 res.write(JSON.stringify({
@@ -13617,7 +13643,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                         }
                         const decision = Core.policy.decide(params.name, toolArgs, client.capabilities, { inlinedLocalFiles });
                         if (!decision.allowed) {
-                          writeDiagnostic({ event: "tool", tool: params.name, client: client.name, outcome: "refused", missing: decision.missing });
+                          writeDiagnostic({ event: "tool", tool: params.name, client: diagnosticClient(client), outcome: "refused", missing: decision.missing });
                           const refusal = new Error(`Not permitted for client "${client.name}": requires ${decision.missing.join(", ")}. Grant it in the Thunderbird MCP options.`);
                           refusal.diagnosticLogged = true;
                           throw refusal;
@@ -13625,7 +13651,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                         const started = Date.now();
                         const toolResult = await runAsClient(client, () => callTool(params.name, toolArgs));
                         writeDiagnostic({
-                          event: "tool", tool: params.name, client: client.name,
+                          event: "tool", tool: params.name, client: diagnosticClient(client),
                           ...Core.diagnosticLog.summarizeToolResult(toolResult), ms: Date.now() - started,
                         });
                         result = {
@@ -13651,7 +13677,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 } catch (e) {
                   if (!e?.diagnosticLogged) {
                     writeDiagnostic({
-                      event: "error", client: client.name, detail: typeof method === "string" ? method : "<invalid>",
+                      event: "error", client: diagnosticClient(client), detail: diagnosticMethod(method),
                       ...(method === "tools/call" && typeof params?.name === "string" ? { tool: params.name } : {}),
                       error: e,
                     });
