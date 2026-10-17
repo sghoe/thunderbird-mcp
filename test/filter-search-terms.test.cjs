@@ -2512,6 +2512,10 @@ describe("stored filter actions need the calling client's capabilities", () => {
     rule.searchTerms[0].attrib = 9999;
     const customRun = custom.api.applyFilters("account", custom.folder.URI);
     assert.deepEqual(Array.from(customRun.skipped, (e) => `${e.name}:${e.reason}`), ["Custom condition:missing-capability"]);
+    // Custom-header conditions only read headers: mail.metadata suffices.
+    const header = makeFilterHarness({ granted: [...granted, "mail.metadata"] });
+    const listId = header.api.createFilter("account", "List rule", true, undefined, [{ attrib: "otherHeader", op: "contains", value: "x", header: "List-Id" }], markRead);
+    assert.equal(listId.success, true, listId.error);
     const ok = makeFilterHarness({ granted: [...granted, "mail.metadata", "mail.body"] });
     assert.equal(ok.api.createFilter("account", "Body", true, undefined, [{ attrib: "body", op: "contains", value: "cobalt" }], markRead).success, true);
   });

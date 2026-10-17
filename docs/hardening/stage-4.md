@@ -384,3 +384,12 @@ Forward rule after the moved range.
 * One sequential native run failed one subtest of the Trash/periodic block
   once; the block alone and two further full runs passed (59/59). Kept as an
   observed timing flake.
+
+## Review round 17 – fix
+
+Sol: no substantive findings. Opus: the round-16 rule for unknown
+condition attributes also caught header-only conditions (custom headers
+such as `List-Id`, copy-only attributes, header properties). These now
+count as known metadata attributes; add-on custom conditions and unmapped
+values still need `mail.body`. Regression test for a metadata-only client
+with a custom-header rule.

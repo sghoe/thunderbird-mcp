@@ -1941,11 +1941,15 @@ function missingFilterCapabilities(filter, hasCapability, { deletesPermanently =
   // fork does not know (add-on custom conditions, e.g. body regexes) may
   // read the body, so they need mail.body too (fail closed).
   try {
-    const known = new Set(Object.values(ATTRIB_MAP));
+    // Known header/flag attributes: every attribute spec (also copy-only
+    // ones), custom headers and header properties.
+    const hdrProperty = resolveXpcomConstant("nsMsgSearchAttrib", "HdrProperty");
+    const known = (attrib) => Object.hasOwn(ATTRIB_SPECS, attrib) || isArbitraryHeaderAttrib(attrib) ||
+      (hdrProperty !== undefined && attrib === hdrProperty);
     for (const term of filter.searchTerms) {
       if (term.matchAll) continue;
       needed.push("mail.metadata");
-      if (term.attrib === ATTRIB_MAP.body || !known.has(term.attrib)) needed.push("mail.body");
+      if (term.attrib === ATTRIB_MAP.body || !known(term.attrib)) needed.push("mail.body");
     }
   } catch {
     needed.push("mail.metadata", "mail.body");
