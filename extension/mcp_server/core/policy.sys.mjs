@@ -37,6 +37,7 @@ export const CAPABILITIES = Object.freeze({
   "filters.manage": "Create, change, reorder and delete filters",
   "filters.run": "Run filters on existing mail",
   "filters.autosend": "Filters that automatically forward or reply",
+  "filters.foreign": "Change, reorder or delete filter rules not created through MCP",
 });
 
 // Never granted; required for anything the policy does not know.

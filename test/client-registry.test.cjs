@@ -98,6 +98,18 @@ describe("client registry rules", () => {
 
 function loadAdapter({ initial, unreadable = false } = {}) {
   const prefs = new Map();
+  const filterList = {
+    filters: [],
+    saves: 0,
+    get filterCount() { return this.filters.length; },
+    getFilterAt(i) { return this.filters[i]; },
+    saveToDefaultFile() { this.saves++; },
+  };
+  const makeRule = (name, actions) => ({
+    filterName: name, enabled: true, filterType: 1, searchTerms: [{}],
+    get actionCount() { return actions.length; },
+    getActionAt: (i) => actions[i],
+  });
   if (initial !== undefined) prefs.set("extensions.thunderbird-mcp-hardened.clients", initial);
   const hashes = [];
   const sandbox = {
@@ -133,21 +145,32 @@ function loadAdapter({ initial, unreadable = false } = {}) {
       setStringPref: (name, value) => prefs.set(name, value),
       clearUserPref: (name) => prefs.delete(name),
     } },
-    ChromeUtils: { importESModule: () => ({ MailServices: { accounts: { accounts: [
-      { key: "account1", incomingServer: { prettyName: "Alice" } },
-      { key: "account2", incomingServer: { prettyName: "Bob" } },
-    ] } } }) },
+    ChromeUtils: { importESModule: () => ({ MailServices: { accounts: {
+      accounts: [
+        { key: "account1", incomingServer: { prettyName: "Alice", getFilterList: () => filterList } },
+        { key: "account2", incomingServer: { prettyName: "Bob" } },
+      ],
+      getAccount: (key) => (key === "account1" ? { key, incomingServer: { getFilterList: () => filterList } } : null),
+    } } }) },
+    // Rules are described by name/type/actions in this harness.
+    resolveXpcomConstant: (iface, name) => ({ Forward: 2, Reply: 3 }[name]),
+    serializeSearchTerm: () => ({ attrib: "subject", op: "contains", value: "x" }),
+    serializeRuleAction: (action) => ({ type: action.type === 2 ? "forward" : "markRead", value: action.value }),
+    console: { warn() {} },
   };
   vm.createContext(sandbox);
   vm.runInContext([
     constant("PREF_CLIENTS"),
+    constant("PREF_FILTER_REGISTRY"),
     block("CLIENT REGISTRY ADAPTER"),
+    block("FILTER REGISTRY ADAPTER"),
+    "this.registry = { filterFingerprint, registerFilterChange, revokeRegisteredFilters, readFilterRegistry };",
     "this.authenticateClient = authenticateClient;",
     "this.api = {",
     block("CLIENT MANAGEMENT API"),
     "};",
   ].join("\n"), sandbox);
-  return { sandbox, prefs, hashes, pref: () => prefs.get("extensions.thunderbird-mcp-hardened.clients") };
+  return { sandbox, prefs, hashes, filterList, makeRule, pref: () => prefs.get("extensions.thunderbird-mcp-hardened.clients") };
 }
 
 const settings = { name: "Codex", profile: "drafts", capabilities: ["mail.body", "mail.metadata"], accounts: ["account1"], calendars: false, addressBooks: false };
@@ -194,7 +217,7 @@ describe("client authentication and management", () => {
     const rotated = await env.sandbox.api.rotateClientToken(client.id);
     assert.equal(env.sandbox.authenticateClient(bearer(token)), null);
     assert.equal(env.sandbox.authenticateClient(bearer(rotated.token)).id, client.id);
-    assert.deepEqual(plain(await env.sandbox.api.deleteClient(client.id)), { success: true });
+    assert.equal((await env.sandbox.api.deleteClient(client.id)).success, true);
     assert.equal(env.sandbox.authenticateClient(bearer(rotated.token)), null);
   });
 
@@ -215,7 +238,7 @@ describe("client authentication and management", () => {
     assert.equal(env.sandbox.authenticateClient(bearer(token)), null);
     assert.equal((await env.sandbox.api.listClients()).corrupt, true);
     assert.match((await env.sandbox.api.createClient(settings)).error, /corrupt/);
-    assert.deepEqual(plain(await env.sandbox.api.removeAllClients()), { success: true });
+    assert.equal((await env.sandbox.api.removeAllClients()).success, true);
     assert.equal((await env.sandbox.api.listClients()).corrupt, false);
     assert.equal(env.sandbox.authenticateClient(bearer(token)), null);
   });
@@ -225,6 +248,36 @@ describe("client authentication and management", () => {
     assert.equal(unreadable.sandbox.authenticateClient(bearer("a".repeat(64))), null);
   });
 
+  it("revocation disables the client's unchanged sending rules and reports changed ones", async () => {
+    const { client } = await env.sandbox.api.createClient(settings);
+    const forward = env.makeRule("Forward rule", [{ type: 2, value: "x@example.invalid" }]);
+    const changed = env.makeRule("Changed rule", [{ type: 2, value: "y@example.invalid" }]);
+    const flag = env.makeRule("Flag rule", [{ type: 1 }]);
+    env.filterList.filters.push(forward, changed, flag);
+    for (const rule of [forward, changed, flag]) env.sandbox.registry.registerFilterChange(client.id, "account1", rule);
+    // The user changes one rule afterwards: its fingerprint no longer matches.
+    changed.getActionAt = () => ({ type: 2, value: "other@example.invalid" });
+    const result = await env.sandbox.api.deleteClient(client.id);
+    assert.equal(result.success, true);
+    assert.deepEqual(plain(result.filters.disabled), [{ account: "account1", name: "Forward rule" }]);
+    assert.deepEqual(plain(result.filters.conflicts).map((c) => c.name), ["Changed rule"]);
+    assert.equal(forward.enabled, false);
+    assert.equal(changed.enabled, true, "changed user rules are not disabled silently");
+    assert.equal(flag.enabled, true, "rules without sending actions stay");
+    assert.deepEqual(plain(env.sandbox.registry.readFilterRegistry().entries), []);
+  });
+
+  it("reports a rule whose disabling could not be saved", async () => {
+    const { client } = await env.sandbox.api.createClient(settings);
+    const forward = env.makeRule("Forward rule", [{ type: 2, value: "x@example.invalid" }]);
+    env.filterList.filters.push(forward);
+    env.sandbox.registry.registerFilterChange(client.id, "account1", forward);
+    env.filterList.saveToDefaultFile = () => { throw new Error("NS_ERROR_FILE_ACCESS_DENIED"); };
+    const result = await env.sandbox.api.deleteClient(client.id);
+    assert.deepEqual(plain(result.filters.disabled), []);
+    assert.match(result.filters.conflicts[0].reason, /could not be saved.*disable the rule manually/);
+    assert.equal(forward.enabled, false, "stays disabled for the running session");
+  });
   it("is not reachable through MCP tools", () => {
     const tools = Core.policy.knownTools();
     for (const name of ["listClients", "createClient", "updateClient", "rotateClientToken", "deleteClient", "removeAllClients"]) {

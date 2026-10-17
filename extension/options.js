@@ -139,6 +139,20 @@ retryServerBtn.addEventListener("click", async () => {
 // the user and account names from Thunderbird; both are inserted as text.
 let clientCatalogue = { capabilities: [], profiles: {}, accounts: [] };
 
+// Result of revoking clients: registered Forward/Reply rules that were
+// disabled, and rules that need the user's decision.
+function describeFilterRevocation(filters) {
+  if (!filters) return "";
+  const parts = [];
+  if (filters.disabled?.length) {
+    parts.push(`Disabled automatic sending rules: ${filters.disabled.map(r => `"${r.name}" (${r.account})`).join(", ")}.`);
+  }
+  if (filters.conflicts?.length) {
+    parts.push(`Please check these rules yourself: ${filters.conflicts.map(r => r.name ? `"${r.name}" (${r.account}): ${r.reason}` : r.reason).join("; ")}.`);
+  }
+  return parts.length ? ` ${parts.join(" ")}` : "";
+}
+
 function setClientStatus(message, error = false) {
   clientStatus.textContent = message;
   clientStatus.className = error ? "save-status error" : "save-status";
@@ -206,7 +220,7 @@ function renderClients(clients) {
     revoke.addEventListener("click", async () => {
       const result = await browser.mcpServer.deleteClient(client.id);
       if (result.error) return setClientStatus(result.error, true);
-      setClientStatus(`Revoked "${client.name}".`);
+      setClientStatus(`Revoked "${client.name}".${describeFilterRevocation(result.filters)}`, !!result.filters?.conflicts?.length);
       await loadAuthenticationConfig();
     });
     li.append(title, details, " ", rotate, " ", revoke);
@@ -278,7 +292,7 @@ copyClientTokenBtn.addEventListener("click", async () => {
 removeAllClientsBtn.addEventListener("click", async () => {
   const result = await browser.mcpServer.removeAllClients();
   if (result.error) return setClientStatus(result.error, true);
-  setClientStatus("All clients removed.");
+  setClientStatus(`All clients removed.${describeFilterRevocation(result.filters)}`, !!result.filters?.conflicts?.length);
   await loadAuthenticationConfig();
 });
 // END OPTIONS CLIENTS

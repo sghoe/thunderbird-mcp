@@ -71,3 +71,69 @@ describe("unique message references (native)", { skip: !h.thunderbirdBinary() &&
     assert.match(malformed.result.error, /Invalid message reference/);
   });
 });
+
+// Revoking a client stops its registered automatic sending rules; rules the
+// user changed afterwards are reported, not disabled.
+describe("filter register and revocation (native)", { skip: !h.thunderbirdBinary() && "THUNDERBIRD_BIN not set" }, () => {
+  let tb;
+  const NS = h.prefNamespace();
+  before(async () => {
+    tb = await h.startThunderbird({
+      extraPrefs: { "extensions.webextensions.remote": false, [`${NS}allowFilterSendActions`]: true, "mail.forward_message_mode": 0 },
+      clients: [{ name: "harness" }, { name: "rule-maker" }],
+    });
+  });
+  after(async () => { await tb?.stop(); });
+
+  const rule = (name, value, subject) => tb.call("createFilter", {
+    accountId: "account1", name, type: 17,
+    conditions: [{ attrib: "subject", op: "contains", value: subject }], actions: [{ type: "forward", value }],
+  }, { client: "rule-maker" });
+
+  it("revocation in the options page disables unchanged registered sending rules and reports changed ones", async () => {
+    assert.equal((await rule("Kept forward", "a@sink.test", "one")).result?.success, true);
+    assert.equal((await rule("User-changed forward", "b@sink.test", "two")).result?.success, true);
+    // The user changes the second rule directly in Thunderbird.
+    await tb.marionette.run(`
+      const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+      const list = MailServices.accounts.getAccount("account1").incomingServer.getFilterList(null);
+      for (let i = 0; i < list.filterCount; i++) {
+        const filter = list.getFilterAt(i);
+        if (filter.filterName === "User-changed forward") filter.getActionAt(0).strValue = "c@sink.test";
+      }
+      // Windows can briefly lock the rules file right after the previous save.
+      for (let attempt = 0; ; attempt++) {
+        try { list.saveToDefaultFile(); break; }
+        catch (e) {
+          if (attempt >= 20) throw e;
+          await new Promise(r => setTimeout(r, 100));
+        }
+      }
+      return true;
+    `);
+    const status = await tb.marionette.run(`
+      const url = WebExtensionPolicy.getByID(args.id).getURL("options.html");
+      const win = Services.wm.getMostRecentWindow("mail:3pane");
+      const tab = win.document.getElementById("tabmail").openTab("contentTab", { url, background: false });
+      let doc;
+      for (let i = 0; i < 200; i++) {
+        doc = tab.browser?.contentDocument;
+        if (doc?.readyState === "complete" && doc.getElementById("clientList")?.textContent.includes("rule-maker")) break;
+        await new Promise(r => setTimeout(r, 50));
+      }
+      const item = [...doc.querySelectorAll("#clientList li")].find(li => li.textContent.includes("rule-maker"));
+      [...item.querySelectorAll("button")].find(b => b.textContent === "Revoke").click();
+      for (let i = 0; i < 200; i++) {
+        const text = doc.getElementById("clientStatus").textContent;
+        if (text.includes("Revoked")) return text;
+        await new Promise(r => setTimeout(r, 50));
+      }
+      return null;
+    `, { id: h.addonId() }, { timeoutMs: 60000 });
+    assert.match(status, /Disabled automatic sending rules: "Kept forward" \(account1\)/);
+    assert.match(status, /User-changed forward.*changed or removed/);
+    const list = await tb.call("listFilters", { accountId: "account1" });
+    const byName = Object.fromEntries(list.result[0].filters.map((x) => [x.name, x.enabled]));
+    assert.deepEqual(byName, { "Kept forward": false, "User-changed forward": true });
+  });
+});

@@ -317,11 +317,14 @@ function makeFilterHarness({
   sentCopyAllowed = () => true,
   // Address collection effect of triggered sends (null = no restriction).
   collection = () => null,
+  // Filter register (Stage 5): whether a rule was created through MCP.
+  registered = () => true,
   defaultAccount = null,
   // Further accounts (e.g. POP accounts deferring into this one).
   otherAccounts = [],
 } = {}) {
   const prefReads = [];
+  const registryCalls = [];
   const submissions = [];
   const temporaryLists = [];
   const folder = { URI: "imap://account/Inbox" };
@@ -395,6 +398,11 @@ function makeFilterHarness({
       clientHasCapability: (capability) => granted.includes(capability),
       identitySentCopyAllowed: (identity) => sentCopyAllowed(identity),
       addressCollectionRestriction: (recipients) => collection(recipients),
+      filterIsRegistered: (accountKey, filter) => registered(filter),
+      filterFingerprint: (filter) => `fp:${filter.filterName}`,
+      registerFilterChange: (...args) => registryCalls.push(["register", ...args]),
+      forgetRegisteredFilter: (...args) => registryCalls.push(["forget", ...args]),
+      currentClientId: () => "c".repeat(32),
       // Minimal stand-in for Thunderbird's header parser ("Name <addr>, addr").
       parseRecipientsForCollection: (...headers) => headers.filter(Boolean).flatMap((header) => header.split(",").map((part) => {
         const match = /^\s*(.*?)\s*<([^>]+)>\s*$/.exec(part);
@@ -431,7 +439,7 @@ function makeFilterHarness({
     },
   });
   return {
-    api, ci, filterList, submissions, temporaryLists, prefReads, folder,
+    api, ci, filterList, submissions, temporaryLists, prefReads, folder, registryCalls,
     seed({ name = "Existing", conditions, actions, ...metadata } = {}) {
       const filter = makeFilter(name);
       Object.assign(filter, metadata);
@@ -2518,6 +2526,34 @@ describe("stored filter actions need the calling client's capabilities", () => {
     assert.equal(listId.success, true, listId.error);
     const ok = makeFilterHarness({ granted: [...granted, "mail.metadata", "mail.body"] });
     assert.equal(ok.api.createFilter("account", "Body", true, undefined, [{ attrib: "body", op: "contains", value: "cobalt" }], markRead).success, true);
+  });
+
+  describe("filter register (Stage 5)", () => {
+    const own = ["filters.read", "filters.manage", "filters.run", "mail.metadata", "mail.flag"];
+    it("records created and changed rules and forgets deleted ones", () => {
+      const h = makeFilterHarness({ granted: own });
+      const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
+      assert.equal(h.api.createFilter("account", "Mine", true, undefined, conditions, [{ type: "markRead" }]).success, true);
+      assert.deepEqual(h.registryCalls.at(-1).slice(0, 3), ["register", "c".repeat(32), "account"]);
+      assert.equal(h.api.updateFilter("account", 0, "Mine renamed").success, true);
+      assert.equal(h.registryCalls.at(-1)[0], "register");
+      assert.equal(h.registryCalls.at(-1)[4], "fp:Mine", "the old fingerprint is replaced");
+      assert.equal(h.api.deleteFilter("account", 0).success, true);
+      assert.deepEqual(h.registryCalls.at(-1), ["forget", "account", "fp:Mine renamed"]);
+    });
+
+    it("needs filters.foreign to change, reorder or delete rules not created through MCP", () => {
+      const h = makeFilterHarness({ granted: own, registered: () => false });
+      h.seed({ name: "User rule A" });
+      h.seed({ name: "User rule B" });
+      assert.match(h.api.updateFilter("account", 0, "x").error, /not created through MCP.*filters\.foreign/);
+      assert.match(h.api.updateFilter("account", 0, undefined, false).error, /filters\.foreign/);
+      assert.match(h.api.deleteFilter("account", 0).error, /filters\.foreign/);
+      assert.match(h.api.reorderFilters("account", 1, 0).error, /filters\.foreign/);
+      const granted = makeFilterHarness({ granted: [...own, "filters.foreign"], registered: () => false });
+      granted.seed({ name: "User rule" });
+      assert.equal(granted.api.updateFilter("account", 0, undefined, false).success, true);
+    });
   });
 
   it("updateFilter always allows disabling such a rule", () => {

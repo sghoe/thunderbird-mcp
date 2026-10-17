@@ -1142,6 +1142,8 @@ const PREF_ALLOWED_ACCOUNTS = "extensions.thunderbird-mcp-hardened.allowedAccoun
 const PREF_DISABLED_TOOLS = "extensions.thunderbird-mcp-hardened.disabledTools";
 const PREF_BLOCK_SKIPREVIEW = "extensions.thunderbird-mcp-hardened.blockSkipReview";
 const PREF_CLIENTS = "extensions.thunderbird-mcp-hardened.clients";
+// Register of filter rules created or changed through MCP (Stage 5).
+const PREF_FILTER_REGISTRY = "extensions.thunderbird-mcp-hardened.filterRegistry";
 const PREF_GET_MESSAGES_LIMIT = "extensions.thunderbird-mcp-hardened.getMessagesLimit";
 const PREF_LISTEN_ALL = "extensions.thunderbird-mcp-hardened.listenAll";
 const PREF_ALLOW_ENCRYPTED_MESSAGES = "extensions.thunderbird-mcp-hardened.allowEncryptedMessages";
@@ -2113,6 +2115,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
       calendarKind: loadCoreModule("calendar-kind"),
       policy: loadCoreModule("policy"),
       clientRegistry: loadCoreModule("client-registry"),
+      filterRegistry: loadCoreModule("filter-registry"),
     });
     // END CORE MODULE LOADER
 
@@ -3091,6 +3094,123 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
       return result === 0;
     }
     // END CLIENT REGISTRY ADAPTER
+
+    // BEGIN FILTER REGISTRY ADAPTER
+    // Rules created or changed through MCP are recorded with the client and a
+    // fingerprint of their effect (core/filter-registry.sys.mjs). Revoking a
+    // client disables its registered sending rules if they are unchanged;
+    // changed or missing rules are reported, never disabled by name/index.
+    function readFilterRegistry() {
+      let text = "";
+      try {
+        if (Services.prefs.getPrefType(PREF_FILTER_REGISTRY) !== Ci.nsIPrefBranch.PREF_INVALID) {
+          text = Services.prefs.getStringPref(PREF_FILTER_REGISTRY, "");
+        }
+      } catch {
+        return { entries: [], corrupt: true };
+      }
+      return Core.filterRegistry.parseFilterRegistry(text);
+    }
+
+    function writeFilterRegistry(entries) {
+      Services.prefs.setStringPref(PREF_FILTER_REGISTRY, Core.filterRegistry.serializeFilterRegistry(entries));
+    }
+
+    function filterFingerprint(filter) {
+      const terms = [];
+      for (const term of filter.searchTerms) terms.push(serializeSearchTerm(term));
+      const actions = [];
+      for (let i = 0; i < filter.actionCount; i++) actions.push(serializeRuleAction(filter.getActionAt(i)));
+      const text = Core.filterRegistry.canonicalFilter({ type: filter.filterType, terms, actions });
+      return sha256Hex(unescape(encodeURIComponent(text)));
+    }
+
+    // A corrupt register counts as "not registered" (rules need
+    // filters.foreign) and is never overwritten silently.
+    function filterIsRegistered(accountKey, filter) {
+      try {
+        const registry = readFilterRegistry();
+        return !registry.corrupt && Core.filterRegistry.isRegistered(registry.entries, accountKey, filterFingerprint(filter));
+      } catch {
+        return false;
+      }
+    }
+
+    function registerFilterChange(clientId, accountKey, filter, oldFingerprint = null) {
+      try {
+        const registry = readFilterRegistry();
+        if (registry.corrupt || !clientId) return;
+        writeFilterRegistry(Core.filterRegistry.recordFilter(registry.entries, {
+          clientId, accountKey, name: String(filter.filterName || ""), fingerprint: filterFingerprint(filter), oldFingerprint, now: Date.now(),
+        }));
+      } catch (e) {
+        console.warn("thunderbird-mcp: could not record filter change:", e);
+      }
+    }
+
+    function forgetRegisteredFilter(accountKey, fingerprint) {
+      try {
+        const registry = readFilterRegistry();
+        if (!registry.corrupt) writeFilterRegistry(Core.filterRegistry.forgetFilter(registry.entries, accountKey, fingerprint));
+      } catch (e) {
+        console.warn("thunderbird-mcp: could not update filter register:", e);
+      }
+    }
+
+    // Disables the registered sending rules (Forward/Reply) of the given
+    // clients that are still unchanged; reports the others as conflicts.
+    function revokeRegisteredFilters(clientIds) {
+      const result = { disabled: [], conflicts: [] };
+      const registry = readFilterRegistry();
+      if (registry.corrupt) {
+        result.conflicts.push({ reason: "The filter register is unreadable; check Forward/Reply rules created through MCP manually." });
+        return result;
+      }
+      const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+      const forward = resolveXpcomConstant("nsMsgFilterAction", "Forward");
+      const reply = resolveXpcomConstant("nsMsgFilterAction", "Reply");
+      const targets = registry.entries.filter(entry => clientIds.includes(entry.clientId));
+      for (const entry of targets) {
+        const label = { account: entry.accountKey, name: entry.name };
+        try {
+          const list = MailServices.accounts.getAccount(entry.accountKey)?.incomingServer?.getFilterList(null);
+          if (!list) {
+            result.conflicts.push({ ...label, reason: "account or filter list not found" });
+            continue;
+          }
+          const matches = [];
+          for (let i = 0; i < list.filterCount; i++) {
+            const rule = list.getFilterAt(i);
+            if (filterFingerprint(rule) === entry.fingerprint) matches.push(rule);
+          }
+          if (matches.length !== 1) {
+            result.conflicts.push({ ...label, reason: matches.length ? "several rules match" : "the rule was changed or removed after it was registered" });
+            continue;
+          }
+          const rule = matches[0];
+          let sends = false;
+          for (let i = 0; i < rule.actionCount; i++) {
+            const type = rule.getActionAt(i).type;
+            if (type === forward || type === reply) sends = true;
+          }
+          if (sends && rule.enabled) {
+            rule.enabled = false;
+            try {
+              list.saveToDefaultFile();
+            } catch (e) {
+              result.conflicts.push({ ...label, reason: `disabled until Thunderbird restarts, but the change could not be saved (${e.message || e}); disable the rule manually` });
+              continue;
+            }
+            result.disabled.push(label);
+          }
+        } catch (e) {
+          result.conflicts.push({ ...label, reason: `could not check the rule: ${e.message || e}` });
+        }
+      }
+      writeFilterRegistry(registry.entries.filter(entry => !clientIds.includes(entry.clientId)));
+      return result;
+    }
+    // END FILTER REGISTRY ADAPTER
     function readConnectionInfo() {
       const tmpDir = Services.dirsvc.get("TmpD", Ci.nsIFile);
       tmpDir.append("thunderbird-mcp-hardened");
@@ -3536,6 +3656,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             // calling client's capabilities. Without a client: nothing.
             function clientHasCapability(capability) {
               return !!activeClient && activeClient.capabilities.includes(capability);
+            }
+
+            function currentClientId() {
+              return activeClient ? activeClient.id : null;
             }
 
 
@@ -11940,6 +12064,13 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               return null;
             }
 
+            // Rules not created or changed through MCP belong to the user;
+            // changing, reordering or deleting them needs filters.foreign.
+            function foreignRuleRestriction(accountKey, filter) {
+              if (clientHasCapability("filters.foreign") || filterIsRegistered(accountKey, filter)) return null;
+              return { error: `Not permitted for this client: the filter "${filter.filterName}" was not created through MCP; changing it requires filters.foreign. Grant it in the Thunderbird MCP options.` };
+            }
+
             function filterCapabilityError(missing) {
               return { error: `Not permitted for this client: the filter's actions require ${missing.join(", ")}. Grant it in the Thunderbird MCP options.` };
             }
@@ -12020,7 +12151,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                 const fl = getFilterListForAccount(accountId);
                 if (fl.error) return fl;
-                const { filterList, server } = fl;
+                const { filterList, server, account } = fl;
 
                 const filter = filterList.createFilter(name);
                 filter.enabled = enabled !== false;
@@ -12056,6 +12187,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   filterList.removeFilterAt(idx);
                   throw e;
                 }
+                registerFilterChange(currentClientId(), account.key, filter);
 
                 return {
                   success: true,
@@ -12094,7 +12226,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                 const fl = getFilterListForAccount(accountId);
                 if (fl.error) return fl;
-                const { filterList, server } = fl;
+                const { filterList, server, account } = fl;
 
                 if (filterIndex < 0 || filterIndex >= filterList.filterCount) {
                   return { error: `Invalid filter index: ${filterIndex}` };
@@ -12105,6 +12237,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 if (filter.unparseable) {
                   return { error: "Cannot update an unparseable filter; repair it in Thunderbird or delete it" };
                 }
+                const foreign = foreignRuleRestriction(account.key, filter);
+                if (foreign) return foreign;
+                const oldFingerprint = filterFingerprint(filter);
 
                 // Validate a detached replacement even for metadata-only updates.
                 const candidate = filterList.createFilter(name !== undefined ? name : filter.filterName);
@@ -12163,6 +12298,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   filterList.setFilterAt(filterIndex, filter);
                   throw e;
                 }
+                registerFilterChange(currentClientId(), account.key, candidate, oldFingerprint);
 
                 return {
                   success: true,
@@ -12181,7 +12317,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                 const fl = getFilterListForAccount(accountId);
                 if (fl.error) return fl;
-                const { filterList, server } = fl;
+                const { filterList, server, account } = fl;
 
                 if (filterIndex < 0 || filterIndex >= filterList.filterCount) {
                   return { error: `Invalid filter index: ${filterIndex}` };
@@ -12189,8 +12325,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                 const filter = filterList.getFilterAt(filterIndex);
                 const filterName = filter.filterName;
+                const foreign = foreignRuleRestriction(account.key, filter);
+                if (foreign) return foreign;
                 const reach = reachableRulesRestriction(filterList, server, filterIndex + 1, undefined, { exclude: filter });
                 if (reach) return reach;
+                const fingerprint = filterFingerprint(filter);
                 filterList.removeFilterAt(filterIndex);
                 try {
                   filterList.saveToDefaultFile();
@@ -12198,6 +12337,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   filterList.insertFilterAt(filterIndex, filter);
                   throw e;
                 }
+                forgetRegisteredFilter(account.key, fingerprint);
 
                 return { success: true, deleted: filterName, remainingCount: filterList.filterCount };
               } catch (e) {
@@ -12214,7 +12354,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                 const fl = getFilterListForAccount(accountId);
                 if (fl.error) return fl;
-                const { filterList, server } = fl;
+                const { filterList, server, account } = fl;
 
                 if (fromIndex < 0 || fromIndex >= filterList.filterCount) {
                   return { error: `Invalid source index: ${fromIndex}` };
@@ -12222,6 +12362,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 if (toIndex < 0 || toIndex >= filterList.filterCount) {
                   return { error: `Invalid target index: ${toIndex}` };
                 }
+                const foreign = foreignRuleRestriction(account.key, filterList.getFilterAt(fromIndex));
+                if (foreign) return foreign;
                 // A new order changes what every rule from the lower position
                 // on sees (also rules after the moved range).
                 if (fromIndex !== toIndex) {
@@ -13088,13 +13230,28 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
           if (registry.corrupt) return { error: "The client registry is corrupt. Remove all clients to repair it." };
           if (!registry.clients.some(client => client.id === clientId)) return { error: "Unknown client" };
           writeClientRegistry(registry.clients.filter(client => client.id !== clientId));
-          return { success: true };
+          // Stop the client's registered automatic sending rules (Stage 5).
+          let filters;
+          try {
+            filters = revokeRegisteredFilters([clientId]);
+          } catch (e) {
+            filters = { disabled: [], conflicts: [{ reason: `could not check registered filters: ${e.message || e}` }] };
+          }
+          return { success: true, filters };
         },
 
         // Explicit repair of a corrupt registry: removes every client.
         removeAllClients: async function() {
+          // Registered sending rules of every client are stopped first.
+          let filters;
+          try {
+            const ids = [...new Set(readFilterRegistry().entries.map(entry => entry.clientId))];
+            filters = revokeRegisteredFilters(ids);
+          } catch (e) {
+            filters = { disabled: [], conflicts: [{ reason: `could not check registered filters: ${e.message || e}` }] };
+          }
           try { Services.prefs.clearUserPref(PREF_CLIENTS); } catch { /* not set */ }
-          return { success: true };
+          return { success: true, filters };
         },
         // END CLIENT MANAGEMENT API
         // BEGIN OPTIONS ACCESS API

@@ -15,6 +15,7 @@ const MODULES = {
   calendarKind: "calendar-kind",
   policy: "policy",
   clientRegistry: "client-registry",
+  filterRegistry: "filter-registry",
 };
 
 const Core = {};
