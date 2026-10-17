@@ -37,6 +37,13 @@ function loadReply(options = {}) {
   const sandbox = {
     Core,
     draftFolderPeriodicRestriction: () => null,
+    // Whether the saved draft is found in the validated Drafts folder.
+    folderMessageKeys: (folderURI) => new Set([`known:${folderURI}`]),
+    async confirmMessageStored(folderURI, messageIds, knownKeys) {
+      calls.confirmations = [...(calls.confirmations || []), { folderURI, messageIds: [...messageIds], knownKeys: [...(knownKeys || [])] }];
+      return options.stored !== false;
+    },
+    UNCONFIRMED_SAVE_ERROR: "Thunderbird finished the save, but the message could not be found in the intended folder. Check Drafts before retrying.",
     TextDecoder,
     Uint8Array,
     atob,
@@ -95,6 +102,7 @@ function loadReply(options = {}) {
         gCloseWindowAfterSave: options.originalCloseFlag ?? false,
         gMsgCompose: {
           identity: composeIdentity,
+          compFields: { messageId: "<draft-1@example.test>" },
           RegisterStateListener(value) { listener = value; },
           UnregisterStateListener(value) { assert.equal(value, listener); win.unregistered = true; },
         },
@@ -327,5 +335,25 @@ describe("replyToMessage saveAsDraft", () => {
     assert.equal(Object.hasOwn(calls.windows[0], "DisplaySaveFolderDlg"), false);
     calls.windows[0].completeSave(0);
     assert.notEqual(calls.windows[0].closed, true);
+  });
+});
+
+describe("replyToMessage saveAsDraft confirmation (Stage 5 review round 2)", () => {
+  it("confirms the draft in the validated Drafts folder by its Message-ID", async () => {
+    const { reply, calls } = loadReply();
+    const result = await reply();
+    assert.equal(result.operationState, "completed");
+    assert.deepEqual({ ...calls.confirmations[0] }, { folderURI: DRAFTS_URI, messageIds: ["<draft-1@example.test>"], knownKeys: [`known:${DRAFTS_URI}`] });
+  });
+
+  it("reports unknown when Thunderbird reports success but the draft is not found", async () => {
+    const { reply, calls } = loadReply({ stored: false });
+    const result = await reply();
+    assert.equal(result.success, undefined);
+    assert.equal(result.operationState, "unknown");
+    assert.equal(result.saveOutcome, "uncertain");
+    assert.match(result.error, /could not be found/);
+    const win = calls.windows[0];
+    assert.equal(win.gCloseWindowAfterSave, false, "window state restored");
   });
 });

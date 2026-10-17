@@ -123,6 +123,9 @@ function loadPrivacyRuntime({ initial = {}, unreadable = [], legacyAddonManager 
     console: { warn: (...args) => warnings.push(args), error() {} },
     Core,
     __testClient: makeTestClient(Core, client),
+    // Clients removed or changed while a call waits (runAsClient).
+    __staleClients: new Set(),
+    clientRecordCurrent: (c) => !sandbox.__staleClients.has(c.id),
   };
   const prefConstants = [
     "PREF_ALLOWED_ACCOUNTS", "PREF_DISABLED_TOOLS", "PREF_BLOCK_SKIPREVIEW",
@@ -155,7 +158,7 @@ function loadPrivacyRuntime({ initial = {}, unreadable = [], legacyAddonManager 
     // Checks that depend on the calling client run as the test client.
     "const asTestClient = (fn) => (...args) => { const previous = activeClient; activeClient = __testClient; try { return fn(...args); } finally { activeClient = previous; } };",
     "this.withoutClient = { isAccountAllowed, clientHasCapability, clientScopeAllows };",
-    "this.clientContext = { runAsClient, current: () => activeClient, isAccountAllowed };",
+    "this.clientContext = { runAsClient, current: () => activeClient, isAccountAllowed, stale: __staleClients };",
     "this.isAccountAllowed = asTestClient(isAccountAllowed);",
     "this.isToolEnabled = isToolEnabled;",
     "this.isPrivacyOptInEnabled = isPrivacyOptInEnabled;",
@@ -366,6 +369,26 @@ describe("Per-client scope on top of the global settings", () => {
     await Promise.all([first, second, third]);
     assert.deepEqual(events, ["a1 start", "a1 sees a true false", "b start false true", "a2 start"]);
     assert.equal(current(), null);
+  });
+
+  it("refuses a waiting call whose client was removed or changed meanwhile, without running it", async () => {
+    const runtime = loadPrivacyRuntime();
+    const { runAsClient, stale, current } = runtime.clientContext;
+    const a = makeTestClient(Core, { id: "a".repeat(32) });
+    const b = makeTestClient(Core, { id: "b".repeat(32) });
+    let releaseA;
+    const gateA = new Promise(resolve => { releaseA = resolve; });
+    const first = runAsClient(a, () => gateA);
+    let ran = false;
+    const second = runAsClient(b, async () => { ran = true; });
+    stale.add(b.id);
+    releaseA();
+    await first;
+    await assert.rejects(second, /removed or its settings changed while the call was waiting; nothing was done/);
+    assert.equal(ran, false);
+    assert.equal(current(), null);
+    // Without waiting there is no gap after authorization: no re-check.
+    assert.equal(await runAsClient(b, async () => "ran"), "ran");
   });
 
   it("runs calls of the same client concurrently while nobody waits", async () => {

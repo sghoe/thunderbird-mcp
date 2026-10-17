@@ -17,7 +17,7 @@ function validEntry(entry) {
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
   if (Object.keys(entry).sort().join() !== "accountKey,clientId,createdAt,fingerprint,name") return false;
   return CLIENT_ID_PATTERN.test(entry.clientId) && ACCOUNT_KEY_PATTERN.test(entry.accountKey) &&
-    FINGERPRINT_PATTERN.test(entry.fingerprint) && typeof entry.name === "string" && entry.name.length <= MAX_NAME_LENGTH &&
+    FINGERPRINT_PATTERN.test(entry.fingerprint) && typeof entry.name === "string" && Array.from(entry.name).length <= MAX_NAME_LENGTH &&
     Number.isSafeInteger(entry.createdAt) && entry.createdAt >= 0;
 }
 
@@ -50,7 +50,18 @@ export function canonicalFilter(description) {
   return JSON.stringify(canonical({ type: description.type, terms: description.terms, actions: description.actions }));
 }
 
-export const MAX_NAME_LENGTH = 500;
+export const MAX_NAME_LENGTH = 200;
+// Gecko refuses string preferences over 1 MiB; stay well below it.
+export const MAX_SERIALIZED_BYTES = 512 * 1024;
+
+export function utf8Length(text) {
+  let bytes = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0);
+    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+  }
+  return bytes;
+}
 
 function sameRule(entry, accountKey, fingerprint) {
   return entry.accountKey === accountKey && entry.fingerprint === fingerprint;
@@ -84,10 +95,12 @@ function releaseOne(entries, accountKey, fingerprint, clientId, liveMatchesBefor
 // the caller must refuse the change before saving it.
 export function recordFilter(entries, { clientId, accountKey, name, fingerprint, oldFingerprint = null, oldLiveMatches = 0, now }) {
   const base = oldFingerprint ? releaseOne(entries, accountKey, oldFingerprint, clientId, oldLiveMatches) : entries;
-  if (base.length >= MAX_ENTRIES) {
-    throw new Error(`The filter register is full (${MAX_ENTRIES} rules created or changed through MCP); delete such rules or remove clients first`);
-  }
-  return [...base, { clientId, accountKey, name: String(name).slice(0, MAX_NAME_LENGTH), fingerprint, createdAt: now }];
+  const full = () => new Error(`The filter register is full (${MAX_ENTRIES} rules or ${MAX_SERIALIZED_BYTES / 1024} KiB of rules created or changed through MCP); delete such rules or remove clients first`);
+  if (base.length >= MAX_ENTRIES) throw full();
+  // Truncate by code points so no lone surrogate is stored.
+  const next = [...base, { clientId, accountKey, name: Array.from(String(name)).slice(0, MAX_NAME_LENGTH).join(""), fingerprint, createdAt: now }];
+  if (utf8Length(serializeFilterRegistry(next)) > MAX_SERIALIZED_BYTES) throw full();
+  return next;
 }
 
 export function forgetFilter(entries, accountKey, fingerprint, { clientId = null, liveMatchesBefore = 1 } = {}) {
@@ -113,10 +126,15 @@ export function revocationGroups(entries, clientIds) {
 
 // What revocation may do with the live rules of a group: disable them only
 // if every one of them is accounted for by the revoked clients' entries.
+// live < revoked: the remaining identical rules are disabled, and the
+// missing ones (changed or removed since) are reported as well.
 export function revocationDecision({ live, revoked, others }) {
   if (live === 0) return { conflict: "the rule was changed or removed after it was registered" };
   if (others > 0) return { conflict: "an identical rule is also registered for another client; check it manually" };
   if (live > revoked) return { conflict: "identical rules exist that were not created through MCP; check them manually" };
+  if (live < revoked) {
+    return { disable: true, conflict: `${revoked - live} of ${revoked} identical registered rules were changed or removed after they were registered; check them manually` };
+  }
   return { disable: true };
 }
 

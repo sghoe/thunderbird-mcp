@@ -113,9 +113,13 @@ Stage 2 hotfixes stay in force throughout.
   until Thunderbird shuts down for review windows (the user may still
   send) and after `unknown` (Thunderbird may still read them). Disabling
   or updating the add-on keeps the files that open compose windows still
-  attach (all of them if the windows cannot be inspected) and hands them
-  to the next instance; uninstalling while such a window is open leaves
-  them in the private temp directory.
+  attach (all of them if a window is still loading or its compose state
+  cannot be inspected) and hands them to the next instance through the
+  preference `extensions.thunderbird-mcp-hardened.retainedAttachments`
+  (the re-enabled add-on gets a fresh script scope); the next instance
+  adopts only files of the private outgoing directory and removes them
+  at application shutdown. Uninstalling while such a window is open
+  leaves them in the private temp directory.
 * Inline base64 attachments and files inlined by the bridge were already
   bound to their content (bytes travel in the request).
 * Residual: between the path checks and the single read, a process of the
@@ -148,6 +152,21 @@ unrestricted test fails; without the retention the native reload test
 finds no copy. The previous `onShutdown` also deleted decoded inline
 attachments of open review windows on add-on disable (upstream
 behaviour); they are now kept the same way.
+## Review round 2 (Sol, Opus)
+
+| Finding | Fix |
+|---|---|
+| Gecko refuses string preferences over 1 MiB; with long multibyte names the register write failed after the rule was saved, and the rule stayed unregistered (Sol, Opus) | names are truncated to 200 code points; the register's serialized UTF-8 size is limited to 512 KiB; the pre-check dry-runs the real change (with the real name); if recording still fails, a new rule or an effect change is taken back and the call fails |
+| Revocation treated a group with fewer live identical rules than entries as complete; a changed member stayed enabled and unreported (Sol) | the unchanged members are disabled and the missing ones are reported |
+| TB 153 ends a failed Drafts copy with `onStopCopy(0)` after "Don't Save" or a failed Local Folders fallback (`notifyListenerOnStopCopy` → `_doFcc2`), so status 0 is no proof (Sol, Opus) | both draft paths (direct `saveDraft`, compose-window `replyToMessage saveAsDraft`) report `completed` only once a message that was not in the intended folder before the copy (new message key; keys taken at the first `onGetDraftFolderURI` / before `SaveAsDraft`) appears there with the draft's Message-ID – or, when replacing a draft, the replaced one's (TB 153 gives a replaced local draft's new header the old Message-ID; native parity "saveDraft replace" caught this) – polling up to 5 s; otherwise `unknown`. Keys also exclude an earlier autosave with the same Message-ID. Natively confirmed for local Drafts; IMAP Drafts not natively tested (may report `unknown` if the server copy is not yet in the folder database) |
+| A call waiting in `runAsClient` behind another client's call ran with the client record from before the wait; a client removed meanwhile could still create a rule under its old id (Opus) | after waiting, the stored client record must still be identical (not removed, rights or token unchanged), otherwise the call is refused without effect |
+| Compose windows still loading were treated as having no attachments (Sol) | a loading window or a compose window without compose state makes all files kept; attachments are read from the bucket and from the compose fields |
+| The hand-over through `globalThis` did not survive a re-enable (fresh script scope) (Sol) | hand-over through a preference; native test: review window open, add-on disabled and re-enabled, preference consumed, Thunderbird quit → file removed |
+
+Negative controls: without adoption the native hand-over test fails
+(file left behind); the unit tests cover the multibyte size limit,
+partial groups, undo after a failed register write, the unconfirmed
+draft and the refused waiting call.
 ## Bound approvals – how each approval is tied to the concrete action
 
 | Approval | Bound to | Where |

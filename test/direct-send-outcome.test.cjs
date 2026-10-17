@@ -74,6 +74,13 @@ function loadSend(options = {}) {
       messageServiceFromURI: () => ({ messageURIToMsgHdr: () => hdr }),
     },
     releaseOutgoingAttachments(descs) { state.released = [...(state.released || []), descs]; },
+    // Whether a saved message is found in its folder (STORED MESSAGE CONFIRMATION).
+    folderMessageKeys: (folderURI) => new Set([`known:${folderURI}`]),
+    async confirmMessageStored(folderURI, messageIds, knownKeys) {
+      state.confirmations = [...(state.confirmations || []), { folderURI, messageIds: [...messageIds], knownKeys: [...(knownKeys || [])] }];
+      return options.stored !== false;
+    },
+    UNCONFIRMED_SAVE_ERROR: "Thunderbird finished the save, but the message could not be found in the intended folder. Check Drafts before retrying.",
     descsToMsgAttachments(descs) {
       if (options.attachmentError) throw options.attachmentError;
       return descs;
@@ -437,5 +444,34 @@ describe("threading headers of a direct reply (Stage 5 review)", () => {
     assert.equal(h.state.fields.headers["In-Reply-To"], "<original>");
     h.state.listener.onStopSending("id", 0);
     assert.equal((await result).success, true);
+  });
+});
+
+describe("saved drafts must be found in their folder (Stage 5 review round 2)", () => {
+  it("checks the intended folder, not Thunderbird's Local Folders fallback", async () => {
+    const h = loadSend();
+    const result = h.start("direct", modes.SaveAsDraft);
+    h.state.listener.onGetDraftFolderURI("<d1@example.test>", "imap://user@example.test/Drafts");
+    h.state.listener.onGetDraftFolderURI("<d1@example.test>", "mailbox://nobody@Local%20Folders/Drafts-user");
+    h.state.listener.onStopCopy(0);
+    const value = await result;
+    assert.equal(value.operationState, "completed");
+    assert.deepEqual({ ...h.state.confirmations[0] }, {
+      folderURI: "imap://user@example.test/Drafts",
+      messageIds: ["<d1@example.test>", undefined],
+      knownKeys: ["known:imap://user@example.test/Drafts"],
+    }, "keys of the intended folder, taken before the copy");
+  });
+
+  it("reports unknown when Thunderbird ends with status 0 but the draft is not there (failed copy, Don't Save)", async () => {
+    const h = loadSend({ stored: false });
+    const result = h.start("direct", modes.SaveAsDraft);
+    h.state.listener.onGetDraftFolderURI("<d2@example.test>", "imap://user@example.test/Drafts");
+    h.state.listener.onStopCopy(0);
+    const value = await result;
+    assert.equal(value.success, undefined);
+    assert.equal(value.operationState, "unknown");
+    assert.match(value.error, /could not be found in the intended folder/);
+    assert.equal((h.state.released || []).length, 0, "copies stay after an unknown outcome");
   });
 });

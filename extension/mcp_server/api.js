@@ -795,9 +795,31 @@ function getExtVersion() {
   return _cachedExtVersion;
 }
 // Track temp attachment files (cleaned up on shutdown). Files a previous
-// instance kept for open compose windows are adopted (see onShutdown).
-const _tempAttachFiles = new Set(Array.isArray(globalThis.__tbMcpHardenedRetainedAttachFiles) ? globalThis.__tbMcpHardenedRetainedAttachFiles : []);
-globalThis.__tbMcpHardenedRetainedAttachFiles = null;
+// instance kept for open compose windows are handed over through a
+// preference (a re-enabled add-on gets a fresh script scope; see
+// onShutdown). Only files of the private outgoing directory are adopted.
+const PREF_RETAINED_ATTACHMENTS = "extensions.thunderbird-mcp-hardened.retainedAttachments";
+const RETAINED_ATTACHMENT_NAME = /^\d+_\d+_[A-Za-z0-9._-]+$/;
+function adoptRetainedAttachmentFiles() {
+  const adopted = [];
+  try {
+    const text = Services.prefs.getStringPref(PREF_RETAINED_ATTACHMENTS, "");
+    Services.prefs.clearUserPref(PREF_RETAINED_ATTACHMENTS);
+    const list = text ? JSON.parse(text) : [];
+    if (!Array.isArray(list)) return adopted;
+    const dir = Services.dirsvc.get("TmpD", Ci.nsIFile);
+    dir.append("thunderbird-mcp-hardened");
+    dir.append("outgoing");
+    for (const entry of list.slice(0, 1000)) {
+      if (typeof entry !== "string") continue;
+      const file = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
+      file.initWithPath(entry);
+      if (file.parent?.path === dir.path && RETAINED_ATTACHMENT_NAME.test(file.leafName)) adopted.push(file.path);
+    }
+  } catch { /* nothing to adopt */ }
+  return adopted;
+}
+const _tempAttachFiles = new Set(adoptRetainedAttachmentFiles());
 // Track compose windows already claimed by an in-flight replyToMessage or
 // forwardMessage call, so concurrent reply/forward operations on the same
 // original message never bind two observers to the same compose window
@@ -3096,6 +3118,16 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
       }
       return result === 0;
     }
+    function clientRecordCurrent(client) {
+      try {
+        const registry = readClientRegistry();
+        if (registry.corrupt) return false;
+        const current = registry.clients.find(entry => entry.id === client.id);
+        return !!current && JSON.stringify(current) === JSON.stringify(client);
+      } catch {
+        return false;
+      }
+    }
     // END CLIENT REGISTRY ADAPTER
 
     // BEGIN FILTER REGISTRY ADAPTER
@@ -3158,14 +3190,15 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
     // Checked before a rule is created or its effect changed: the change is
     // refused if it could not be registered (and later revoked).
-    function filterRegistryRestriction(clientId, accountKey, { oldFingerprint = null, oldLiveMatches = 0 } = {}) {
+    function filterRegistryRestriction(clientId, accountKey, { name = "", oldFingerprint = null, oldLiveMatches = 0 } = {}) {
       try {
         const registry = readFilterRegistry();
         if (registry.corrupt) {
           return { error: "The register of filter rules created through MCP is unreadable, so new rules could not be revoked. \"Remove all clients\" in the Thunderbird MCP options resets it." };
         }
+        // Dry run with the real name: the stored size depends on it.
         Core.filterRegistry.recordFilter(registry.entries, {
-          clientId, accountKey, name: "", fingerprint: "0".repeat(64), oldFingerprint, oldLiveMatches, now: 0,
+          clientId, accountKey, name: String(name || ""), fingerprint: "0".repeat(64), oldFingerprint, oldLiveMatches, now: Date.now(),
         });
         return null;
       } catch (e) {
@@ -3173,16 +3206,20 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
       }
     }
 
+    // Returns whether the change was recorded; callers undo a new rule or a
+    // change of effect that could not be recorded.
     function registerFilterChange(clientId, accountKey, filter, { oldFingerprint = null, oldLiveMatches = 0 } = {}) {
       try {
         const registry = readFilterRegistry();
-        if (registry.corrupt || !clientId) return;
+        if (registry.corrupt || !clientId) return false;
         writeFilterRegistry(Core.filterRegistry.recordFilter(registry.entries, {
           clientId, accountKey, name: String(filter.filterName || ""), fingerprint: filterFingerprint(filter),
           oldFingerprint, oldLiveMatches, now: Date.now(),
         }));
+        return true;
       } catch (e) {
         console.warn("thunderbird-mcp: could not record filter change:", e);
+        return false;
       }
     }
 
@@ -3226,10 +3263,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             if (filterFingerprint(rule) === group.fingerprint) matches.push(rule);
           }
           const decision = Core.filterRegistry.revocationDecision({ live: matches.length, revoked: group.revoked, others: group.others });
-          if (decision.conflict) {
-            result.conflicts.push({ ...label, reason: decision.conflict });
-            continue;
-          }
+          if (decision.conflict) result.conflicts.push({ ...label, reason: decision.conflict });
+          if (!decision.disable) continue;
           const toDisable = matches.filter(rule => {
             if (!rule.enabled) return false;
             for (let i = 0; i < rule.actionCount; i++) {
@@ -3663,8 +3698,15 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             const clientWaiters = [];
 
             async function runAsClient(client, fn) {
+              let waited = false;
               while (activeClientCalls > 0 && (activeClient?.id !== client.id || clientWaiters.length > 0)) {
+                waited = true;
                 await new Promise(resolve => clientWaiters.push(resolve));
+              }
+              // While waiting, the client may have been removed or changed
+              // (rights, token): its call was authorized for the old state.
+              if (waited && !clientRecordCurrent(client)) {
+                throw new Error("This client was removed or its settings changed while the call was waiting; nothing was done.");
               }
               activeClient = client;
               activeClientCalls++;
@@ -4771,12 +4813,53 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
              * into unrelated saves (including concurrent ones on the same
              * identity).
              */
+            // BEGIN STORED MESSAGE CONFIRMATION
+            // Thunderbird 153 reports the end of a Drafts/Outbox copy with
+            // status 0 even when the copy failed and the user declined to save
+            // it (MessageSend notifyListenerOnStopCopy -> _doFcc2). A save only
+            // counts as completed once a message that was not there before the
+            // copy (new message key) with the expected Message-ID is in the
+            // intended folder. A replaced local draft keeps the replaced
+            // header's Message-ID in the database (TB 153), and an earlier
+            // autosave can carry the same ID, hence keys plus IDs.
+            function folderMessageKeys(folderURI) {
+              try {
+                const folder = MailServices.folderLookup.getFolderForURL(folderURI);
+                return new Set([...folder.msgDatabase.enumerateMessages()].map(hdr => hdr.messageKey));
+              } catch {
+                return null;
+              }
+            }
+
+            async function confirmMessageStored(folderURI, messageIds, knownKeys, timeoutMs = 5000) {
+              const ids = messageIds.map(id => String(id || "").replace(/^<|>$/g, "")).filter(Boolean);
+              if (!folderURI || !ids.length || !knownKeys) return false;
+              const { setTimeout } = ChromeUtils.importESModule("resource://gre/modules/Timer.sys.mjs");
+              const deadline = Date.now() + timeoutMs;
+              for (;;) {
+                try {
+                  const folder = MailServices.folderLookup.getFolderForURL(folderURI);
+                  for (const hdr of folder.msgDatabase.enumerateMessages()) {
+                    if (!knownKeys.has(hdr.messageKey) && ids.includes(hdr.messageId)) return true;
+                  }
+                } catch { /* not readable yet */ }
+                if (Date.now() >= deadline) return false;
+                await new Promise(resolve => setTimeout(resolve, 100));
+              }
+            }
+            const UNCONFIRMED_SAVE_ERROR = "Thunderbird finished the save, but the message could not be found in the intended folder (the copy may have failed, been declined, or gone to Local Folders). Check Drafts before retrying.";
+            // END STORED MESSAGE CONFIRMATION
+
             // BEGIN COMPOSE WINDOW DRAFT HELPER
             function saveComposeWindowAsDraft(composeWin) {
               return new Promise((resolve) => {
                 const SAVE_TIMEOUT_MS = 60000;
                 let settled = false;
                 let originalWindowState = null;
+                // The validated Drafts folder the save must land in, and the
+                // message keys it held before the save.
+                let confirmedDraftURI = null;
+                let knownDraftKeys = null;
 
                 const compose = composeWin.gMsgCompose;
                 const timer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
@@ -4788,7 +4871,16 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   SaveInFolderDone() {},
                   ComposeProcessDone(aResult) {
                     if (Components.isSuccessCode(aResult)) {
-                      settle({ success: true, operationState: Core.operationState.OPERATION_STATES.COMPLETED });
+                      // Status 0 does not prove the draft was stored (see above).
+                      let messageId = null;
+                      try { messageId = compose.compFields?.messageId; } catch { /* window gone */ }
+                      try { timer.cancel(); } catch {}
+                      confirmMessageStored(confirmedDraftURI, [messageId], knownDraftKeys)
+                        .catch(() => false)
+                        .then(found => settle(found
+                          ? { success: true, operationState: Core.operationState.OPERATION_STATES.COMPLETED }
+                          : { error: UNCONFIRMED_SAVE_ERROR, saveOutcome: "uncertain", operationState: Core.operationState.OPERATION_STATES.UNKNOWN }))
+                        .catch(() => {});
                     } else {
                       settle({ error: `Saving reply draft failed (status 0x${(aResult >>> 0).toString(16)})`, operationState: Core.operationState.OPERATION_STATES.FAILED });
                     }
@@ -4843,7 +4935,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                     settle({ error: "Cannot save reply draft: the compose identity must have an accessible Drafts-flagged destination" });
                     return;
                   }
-                  const draftPeriodic = draftFolderPeriodicRestriction(getIdentityDraftFolderURI(composeWin.gCurrentIdentity || compose.identity));
+                  confirmedDraftURI = getIdentityDraftFolderURI(composeWin.gCurrentIdentity || compose.identity);
+                  const draftPeriodic = draftFolderPeriodicRestriction(confirmedDraftURI);
                   if (draftPeriodic) {
                     settle({ error: draftPeriodic.error });
                     return;
@@ -4858,6 +4951,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   // Drafts" dialog for this save, leaving identity.showSaveMsgDlg
                   // (and any other in-flight save on the same identity) alone.
                   composeWin.DisplaySaveFolderDlg = () => {};
+                  knownDraftKeys = folderMessageKeys(confirmedDraftURI);
                   compose.RegisterStateListener(stateListener);
                   composeWin.gCloseWindowAfterSave = true;
                   Promise.resolve(composeWin.SaveAsDraft()).catch((e) => {
@@ -5169,6 +5263,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               // Set once Thunderbird starts the SMTP transaction; from then on an
               // interrupted delivery may already have been accepted.
               let deliveryStarted = false;
+              // Folder and Message-ID of a Drafts/Outbox copy (onGetDraftFolderURI).
+              let copyTarget = null;
 
               return new Promise((resolve) => {
                 let settled = false;
@@ -5256,7 +5352,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                         });
                       }
                     },
-                    onGetDraftFolderURI() {},
+                    onGetDraftFolderURI(msgID, folderURI) {
+                      // The first call names the intended folder, right before
+                      // the copy starts; a later one is the Local Folders fallback.
+                      if (!copyTarget) copyTarget = { messageId: msgID, folderURI, knownKeys: folderMessageKeys(folderURI) };
+                    },
                     onSendNotPerformed(msgID, status) {
                       timer.cancel();
                       settle({ error: "Send was not performed", operationState: STATES.FAILED });
@@ -5274,7 +5374,15 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                       if (mode === Ci.nsIMsgCompDeliverMode.Now) return;
                       timer.cancel();
                       if (Components.isSuccessCode(status)) {
-                        settle({ success: true, message: "Saved", operationState: savedState });
+                        // Status 0 does not prove the copy (STORED MESSAGE CONFIRMATION).
+                        let replacedId = null;
+                        try { replacedId = msgToReplace?.messageId; } catch { /* header gone */ }
+                        confirmMessageStored(copyTarget?.folderURI, [copyTarget?.messageId, replacedId], copyTarget?.knownKeys)
+                          .catch(() => false)
+                          .then(found => settle(found
+                            ? { success: true, message: "Saved", operationState: savedState }
+                            : { error: UNCONFIRMED_SAVE_ERROR, operationState: STATES.UNKNOWN }))
+                          .catch(() => {});
                       } else {
                         // Thunderbird then offers to retry or to save into Local Folders.
                         settle({
@@ -12361,7 +12469,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   const deferred = deferredListRestriction(server) || periodicRulesRestriction(server);
                   if (deferred) return deferred;
                 }
-                const registryError = filterRegistryRestriction(currentClientId(), account.key);
+                const registryError = filterRegistryRestriction(currentClientId(), account.key, { name: filter.filterName });
                 if (registryError) return registryError;
                 filterList.insertFilterAt(idx, filter);
                 try {
@@ -12370,7 +12478,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   filterList.removeFilterAt(idx);
                   throw e;
                 }
-                registerFilterChange(currentClientId(), account.key, filter);
+                if (!registerFilterChange(currentClientId(), account.key, filter)) {
+                  // An unregistered rule could not be revoked: take it back.
+                  filterList.removeFilterAt(idx);
+                  filterList.saveToDefaultFile();
+                  return { error: "The rule could not be recorded in the register of filter rules created through MCP, so it was not created." };
+                }
 
                 return {
                   success: true,
@@ -12477,8 +12590,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                 // A change of effect must be registrable; renaming or
                 // enabling/disabling keeps the effect and is always possible.
-                if (filterFingerprint(candidate) !== oldFingerprint) {
-                  const registryError = filterRegistryRestriction(currentClientId(), account.key, { oldFingerprint, oldLiveMatches });
+                const effectChanged = filterFingerprint(candidate) !== oldFingerprint;
+                if (effectChanged) {
+                  const registryError = filterRegistryRestriction(currentClientId(), account.key, { name: candidate.filterName, oldFingerprint, oldLiveMatches });
                   if (registryError) return registryError;
                 }
                 filterList.setFilterAt(filterIndex, candidate);
@@ -12488,7 +12602,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   filterList.setFilterAt(filterIndex, filter);
                   throw e;
                 }
-                registerFilterChange(currentClientId(), account.key, candidate, { oldFingerprint, oldLiveMatches });
+                if (!registerFilterChange(currentClientId(), account.key, candidate, { oldFingerprint, oldLiveMatches }) && effectChanged) {
+                  filterList.setFilterAt(filterIndex, filter);
+                  filterList.saveToDefaultFile();
+                  return { error: "The change could not be recorded in the register of filter rules created through MCP, so it was not applied." };
+                }
 
                 return {
                   success: true,
@@ -13421,7 +13539,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
         },
 
         // Revocation takes effect for the next request; calls that already
-        // passed authorization run to completion (see migration notes).
+        // passed authorization run to completion; calls still waiting in
+        // runAsClient are refused (see migration notes).
         deleteClient: async function(clientId) {
           const registry = readClientRegistry();
           if (registry.corrupt) return { error: "The client registry is corrupt. Remove all clients to repair it." };
@@ -13759,12 +13878,21 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
     // the add-on stops (disable, update), files that open compose windows
     // still attach are kept and handed to the next instance; if the windows
     // cannot be inspected, all are kept. Application shutdown removes all.
+    // A window that is still loading, or a compose window without its
+    // compose state, cannot be inspected: then every file is kept.
     let attachmentsInUse = new Set();
     if (!isAppShutdown) {
       try {
-        for (const win of Services.wm.getEnumerator("msgcompose")) {
-          for (const item of win.gAttachmentBucket?.itemChildren || []) {
+        for (const win of Services.ww.getWindowEnumerator()) {
+          const doc = win.document;
+          if (doc?.readyState !== "complete") throw new Error("window still loading");
+          if (doc.documentElement?.getAttribute("windowtype") !== "msgcompose") continue;
+          if (!win.gMsgCompose || !win.gAttachmentBucket) throw new Error("compose window not ready");
+          for (const item of win.gAttachmentBucket.itemChildren) {
             if (item.attachment?.url) attachmentsInUse.add(item.attachment.url);
+          }
+          for (const att of win.gMsgCompose.compFields?.attachments || []) {
+            if (att?.url) attachmentsInUse.add(att.url);
           }
         }
       } catch {
@@ -13784,7 +13912,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
       } catch {}
     }
     _tempAttachFiles.clear();
-    globalThis.__tbMcpHardenedRetainedAttachFiles = retainedAttachments;
+    try {
+      if (retainedAttachments.length) Services.prefs.setStringPref(PREF_RETAINED_ATTACHMENTS, JSON.stringify(retainedAttachments));
+      else Services.prefs.clearUserPref(PREF_RETAINED_ATTACHMENTS);
+    } catch { /* best effort */ }
     if (isAppShutdown) return;
     resProto.setSubstitution("thunderbird-mcp-hardened", null);
     Services.obs.notifyObservers(null, "startupcache-invalidate");

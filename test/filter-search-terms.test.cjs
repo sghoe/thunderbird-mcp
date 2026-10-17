@@ -321,6 +321,8 @@ function makeFilterHarness({
   registered = () => true,
   // Error of the register pre-check (full or unreadable register).
   registryError = null,
+  // The register write fails after the rule was saved.
+  registerFails = false,
   defaultAccount = null,
   // Further accounts (e.g. POP accounts deferring into this one).
   otherAccounts = [],
@@ -407,7 +409,7 @@ function makeFilterHarness({
       return registryError ? { error: registryError } : null;
     },
       filterFingerprint: (filter) => `fp:${filter.filterName}`,
-      registerFilterChange: (...args) => registryCalls.push(["register", ...args]),
+      registerFilterChange: (...args) => { registryCalls.push(["register", ...args]); return !registerFails; },
       forgetRegisteredFilter: (...args) => registryCalls.push(["forget", ...args]),
       currentClientId: () => "c".repeat(32),
       // Minimal stand-in for Thunderbird's header parser ("Name <addr>, addr").
@@ -2551,6 +2553,16 @@ describe("stored filter actions need the calling client's capabilities", () => {
       assert.deepEqual({ ...h.registryCalls.at(-1)[4] }, { oldFingerprint: "fp:Mine", oldLiveMatches: 1 }, "the old fingerprint is replaced");
       assert.equal(h.api.deleteFilter("account", 0).success, true);
       assert.deepEqual(h.registryCalls.at(-1), ["forget", "c".repeat(32), "account", "fp:Mine renamed", 1]);
+    });
+
+    it("takes a new rule or an effect change back if registering it fails after saving", () => {
+      const h = makeFilterHarness({ granted: own, registerFails: true });
+      const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
+      assert.match(h.api.createFilter("account", "Mine", true, undefined, conditions, [{ type: "markRead" }]).error, /could not be recorded.*not created/);
+      assert.equal(h.filterList.filters.length, 0);
+      h.seed({ name: "Existing" });
+      assert.match(h.api.updateFilter("account", 0, "Renamed changes the mock fingerprint").error, /could not be recorded.*not applied/);
+      assert.equal(h.filterList.filters[0].filterName, "Existing");
     });
 
     it("refuses creating or changing the effect of a rule that could not be registered, but still allows disabling", () => {

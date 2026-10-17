@@ -98,6 +98,9 @@ function loadDraftTools(options = {}) {
     },
     descsToMsgAttachments: descs => descs,
     releaseOutgoingAttachments() {},
+    folderMessageKeys: () => new Set(),
+    confirmMessageStored: async () => true,
+    UNCONFIRMED_SAVE_ERROR: "unconfirmed",
   };
   vm.createContext(sandbox);
   vm.runInContext([

@@ -300,6 +300,20 @@ describe("client authentication and management", () => {
     assert.equal(copy.enabled, true);
   });
 
+  it("disables the unchanged member of a partly changed group and reports the changed one", async () => {
+    const { client } = await env.sandbox.api.createClient(settings);
+    const first = env.makeRule("Forward 1", [{ type: 2, value: "x@example.invalid" }]);
+    const second = env.makeRule("Forward 2", [{ type: 2, value: "x@example.invalid" }]);
+    env.filterList.filters.push(first, second);
+    env.sandbox.registry.registerFilterChange(client.id, "account1", first);
+    env.sandbox.registry.registerFilterChange(client.id, "account1", second);
+    second.getActionAt = () => ({ type: 2, value: "elsewhere@example.invalid" });
+    const result = await env.sandbox.api.deleteClient(client.id);
+    assert.equal(first.enabled, false);
+    assert.equal(second.enabled, true);
+    assert.match(result.filters.conflicts[0].reason, /1 of 2 identical registered rules were changed or removed/);
+  });
+
   it("never stores a register that would read as corrupt", () => {
     const before = env.prefs.get("extensions.thunderbird-mcp-hardened.filterRegistry");
     assert.throws(() => env.sandbox.registry.writeFilterRegistry([{ clientId: "nope" }]), /invalid filter register/);

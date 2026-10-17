@@ -108,3 +108,40 @@ describe("filter register: identical rules, capacity and names (Stage 5 review)"
     assert.match(decide({ live: 2, revoked: 1, others: 1 }).conflict, /another client/);
   });
 });
+
+describe("filter register: stored size and partial groups (Stage 5 review round 2)", () => {
+  const A = "a".repeat(32);
+  const record = (entries, overrides = {}) => R().recordFilter(entries, { clientId: A, accountKey: "account1", name: "Rule", fingerprint: "f".repeat(64), now: 1, ...overrides });
+
+  it("stays below the preference size limit even with multibyte names", () => {
+    let entries = [];
+    let refused = null;
+    for (let i = 0; i < R().MAX_ENTRIES; i++) {
+      try {
+        entries = record(entries, { name: "日本語".repeat(100), fingerprint: i.toString(16).padStart(64, "0") });
+      } catch (e) { refused = e; break; }
+    }
+    assert.match(String(refused), /register is full/);
+    const bytes = Buffer.byteLength(R().serializeFilterRegistry(entries), "utf8");
+    assert.ok(bytes <= R().MAX_SERIALIZED_BYTES && bytes < 1024 * 1024, `${bytes} bytes`);
+    assert.equal(R().parseFilterRegistry(R().serializeFilterRegistry(entries)).corrupt, false);
+  });
+
+  it("measures UTF-8 like the platform", () => {
+    for (const text of ["abc", "äöü", "日本", "😀x", "\"quoted\""]) {
+      assert.equal(R().utf8Length(text), Buffer.byteLength(text, "utf8"), text);
+    }
+  });
+
+  it("truncates names by code points (no lone surrogates)", () => {
+    const [stored] = record([], { name: "😀".repeat(500) });
+    assert.equal(Array.from(stored.name).length, R().MAX_NAME_LENGTH);
+    assert.equal(R().parseFilterRegistry(R().serializeFilterRegistry([stored])).corrupt, false);
+  });
+
+  it("disables the remaining identical rules of a partly changed group and reports the missing ones", () => {
+    const decision = R().revocationDecision({ live: 1, revoked: 2, others: 0 });
+    assert.equal(decision.disable, true);
+    assert.match(decision.conflict, /1 of 2 identical registered rules were changed or removed/);
+  });
+});

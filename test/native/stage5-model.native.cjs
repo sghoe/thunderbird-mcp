@@ -205,6 +205,9 @@ describe("operation states (native)", { skip: !h.thunderbirdBinary() && "THUNDER
     assert.equal(review.result.operationState, "opened-for-review", JSON.stringify(review.result));
     const draft = await tb.call("saveDraft", { to: "draft@sink.test", subject: "state draft", body: "b" });
     assert.equal(draft.result.operationState, "completed", JSON.stringify(draft.result));
+    // Native compose-window save: confirmed by the draft's Message-ID in Drafts.
+    const replyDraft = await tb.call("replyToMessage", { messageId: "orig@x.test", folderPath: INBOX, body: "r", saveAsDraft: true });
+    assert.equal(replyDraft.result.operationState, "completed", JSON.stringify(replyDraft.result));
     assert.ok(await closeWindows() >= 1);
     assert.equal(tb.smtp.messages.length, before);
   });
@@ -321,5 +324,39 @@ describe("content-bound path attachments (native)", { skip: !h.thunderbirdBinary
     assert.equal(r.result.operationState, "completed", JSON.stringify(r.result));
     assert.match(tb.smtp.messages.at(-1).data, /filename="?direct\.txt"?/);
     assert.equal((await outgoingFiles()).filter((n) => n.endsWith("_direct.txt")).length, 0);
+  });
+
+  it("hands kept copies to the re-enabled add-on, which removes them at application shutdown", async () => {
+    const file = path.join(dir, "handoff.txt");
+    fs.writeFileSync(file, "handoff content");
+    const r = await tb.call("sendMail", { to: "handoff@sink.test", subject: "handoff", body: "b", attachments: [file] });
+    assert.equal(r.result.operationState, "opened-for-review", JSON.stringify(r.result));
+    await tb.marionette.run(`
+      for (let i = 0; i < 100; i++) {
+        const win = Services.wm.getMostRecentWindow("msgcompose");
+        if (win?.gAttachmentBucket?.itemCount === 1) return true;
+        await new Promise(r => setTimeout(r, 100));
+      }
+      return false;
+    `);
+    await tb.marionette.run(`
+      const { AddonManager } = ChromeUtils.importESModule("resource://gre/modules/AddonManager.sys.mjs");
+      const addon = await AddonManager.getAddonByID(args.id);
+      await addon.disable();
+      await addon.enable();
+      return true;
+    `, { id: h.addonId() });
+    await tb.reconnect();
+    const outgoing = path.join(tb.tmpDir, "thunderbird-mcp-hardened", "outgoing");
+    const kept = fs.readdirSync(outgoing).filter((n) => n.endsWith("_handoff.txt"));
+    assert.equal(kept.length, 1, "kept for the open window");
+    const pref = await tb.marionette.run(`return Services.prefs.getStringPref("extensions.thunderbird-mcp-hardened.retainedAttachments", "");`);
+    assert.equal(pref, "", "the new instance took the hand-over");
+    // Quit Thunderbird (no prompts); the adopting instance must remove the file.
+    try { await tb.marionette.run(`Services.startup.quit(Ci.nsIAppStartup.eForceQuit); return true;`); } catch { /* connection ends */ }
+    const deadline = Date.now() + 30000;
+    while (tb.child.exitCode === null && Date.now() < deadline) await new Promise((res) => setTimeout(res, 200));
+    assert.notEqual(tb.child.exitCode, null, "Thunderbird exited");
+    assert.equal(fs.readdirSync(outgoing).filter((n) => n.endsWith("_handoff.txt")).length, 0, "removed at application shutdown");
   });
 });
