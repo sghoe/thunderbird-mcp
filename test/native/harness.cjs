@@ -180,12 +180,14 @@ function userPref(name, value) {
  *  - one SMTP server pointing at the sink
  *  - one enabled storage calendar bound to identity id1
  */
-function buildProfile({ root, smtpPort, mailboxes = {}, extraPrefs = {}, extensionDir = EXTENSION_DIR, extraAddons = [] }) {
+function buildProfile({ root, smtpPort, mailboxes = {}, extraPrefs = {}, extensionDir = EXTENSION_DIR, extraAddons = [], xpi = null }) {
   const profileDir = path.join(root, "profile");
   fs.mkdirSync(path.join(profileDir, "extensions"), { recursive: true });
 
-  // Unpacked extension via a proxy file pointing at the working tree.
-  fs.writeFileSync(path.join(profileDir, "extensions", addonId(extensionDir)), extensionDir);
+  // Unpacked extension via a proxy file pointing at the working tree, or
+  // the packaged XPI itself (xpi: path; ids and names still come from source).
+  if (xpi) fs.copyFileSync(xpi, path.join(profileDir, "extensions", `${addonId(extensionDir)}.xpi`));
+  else fs.writeFileSync(path.join(profileDir, "extensions", addonId(extensionDir)), extensionDir);
   for (const { id, xpi } of extraAddons) {
     fs.copyFileSync(xpi, path.join(profileDir, "extensions", `${id}.xpi`));
   }
@@ -372,7 +374,7 @@ const REPARSE_SCRIPT = `
  * Starts a fully isolated Thunderbird. Returns an object with
  * call(tool, args), rpc(method, params), stop(), and the probe/sink.
  */
-async function startThunderbird({ mailboxes, extraPrefs, headless = true, authHeader, extensionDir = EXTENSION_DIR, extraAddons, clients } = {}) {
+async function startThunderbird({ mailboxes, extraPrefs, headless = true, authHeader, extensionDir = EXTENSION_DIR, extraAddons, clients, xpi } = {}) {
   const bin = thunderbirdBinary();
   if (!bin) throw new Error("THUNDERBIRD_BIN is not set");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "tbmcp-native-"));
@@ -393,6 +395,7 @@ async function startThunderbird({ mailboxes, extraPrefs, headless = true, authHe
     mailboxes: resolvedMailboxes,
     extensionDir,
     extraAddons,
+    xpi,
     extraPrefs: {
       "marionette.port": marionettePort,
       ...(registry ? { [`${prefNamespace(extensionDir)}clients`]: registry.pref } : {}),

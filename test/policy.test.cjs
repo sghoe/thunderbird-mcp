@@ -170,3 +170,22 @@ describe("profiles", () => {
     assert.equal(P.isToolVisible("updateMessage", []), false);
   });
 });
+
+describe("every tool has a positive and a negative permission case (Stage 6 acceptance)", () => {
+  it("covers all 40 tools", () => {
+    assert.equal(P.knownTools().length, 40);
+  });
+  it("allows each tool with exactly its required capabilities and refuses it without any one of them", () => {
+    for (const tool of P.knownTools()) {
+      const required = plain(P.requiredCapabilities(tool, {}));
+      assert.ok(required.length > 0, `${tool} needs at least one capability`);
+      assert.equal(required.includes(P.UNCLASSIFIED), false, tool);
+      assert.equal(P.decide(tool, {}, required).allowed, true, `${tool} with ${required}`);
+      for (const cap of required) {
+        const decision = P.decide(tool, {}, required.filter((c) => c !== cap));
+        assert.equal(decision.allowed, false, `${tool} without ${cap}`);
+        assert.deepEqual(plain(decision.missing), [cap], tool);
+      }
+    }
+  });
+});
