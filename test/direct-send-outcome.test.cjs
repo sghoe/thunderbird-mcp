@@ -48,7 +48,10 @@ function loadSend(options = {}) {
     Cc: {
       "@mozilla.org/timer;1": { createInstance: () => timer },
       "@mozilla.org/messengercompose/composeparams;1": { createInstance: () => ({}) },
-      "@mozilla.org/messengercompose/composefields;1": { createInstance: () => ({ setHeader() {}, addAttachment() {} }) },
+      "@mozilla.org/messengercompose/composefields;1": { createInstance: () => {
+        state.fields = { headers: {}, setHeader(name, value) { this.headers[name] = value; }, addAttachment() {} };
+        return state.fields;
+      } },
       "@mozilla.org/messengercompose/send;1": { createInstance: () => ({
         createAndSendMessage(...args) {
           state.calls.push(args);
@@ -109,7 +112,7 @@ function loadSend(options = {}) {
     start(tool = "direct", mode) {
       let result;
       if (tool === "reply") {
-        result = sandbox.replyToMessage("original", "folder", "Reply", false, false,
+        result = sandbox.replyToMessage(options.messageId || "original", "folder", "Reply", false, false,
           undefined, undefined, undefined, undefined, undefined, true);
       } else if (tool === "forward") {
         result = sandbox.forwardMessage("original", "folder", "recipient@example.test", "Forward", false,
@@ -238,21 +241,29 @@ describe("Post-outgoing filters of the reply's copy folder", () => {
 describe("draft and queued completion", () => {
   for (const mode of [modes.SaveAsDraft, modes.Later]) {
     for (const completion of ["promise", "copy"]) {
-      it(`still completes ${mode} via ${completion}`, async () => {
+      it(`completes ${mode} only when the copy is confirmed (${completion} first)`, async () => {
         const h = loadSend();
         const result = h.start("direct", mode);
-        if (completion === "promise") h.state.deliveryStarted();
-        else h.state.listener.onStopCopy(0);
+        if (completion === "promise") {
+          // The promise fulfills once the copy has merely started.
+          h.state.deliveryStarted();
+          await new Promise(resolve => setImmediate(resolve));
+          assert.equal(h.state.result, undefined, "not completed before onStopCopy");
+          assert.equal(h.timer.cancelled, false);
+        }
+        h.state.listener.onStopCopy(0);
         assert.equal((await result).success, true);
         assert.equal(h.timer.cancelled, true);
       });
     }
-    it(`reports copy failure for ${mode} even if creation later fulfills`, async () => {
+    it(`reports a copy failure for ${mode} as unknown (Thunderbird may retry), even if creation later fulfills`, async () => {
       const h = loadSend();
       const result = h.start("direct", mode);
       h.state.listener.onStopCopy(failure);
       h.state.deliveryStarted();
-      assert.match((await result).error, /Save failed.*80004005/);
+      const value = await result;
+      assert.match(value.error, /Save failed.*80004005.*check Drafts before retrying/);
+      assert.equal(value.operationState, "unknown");
     });
   }
 });
@@ -357,18 +368,26 @@ describe("operation states of direct delivery (Stage 5)", () => {
 
   for (const [mode, expected] of [[modes.SaveAsDraft, "completed"], [modes.Later, "queued"]]) {
     for (const completion of ["promise", "copy"]) {
-      it(`reports ${expected} for mode ${mode} via ${completion}`, async () => {
+      it(`reports ${expected} for mode ${mode} after the confirmed copy (${completion} first)`, async () => {
         const h = loadSend();
         const result = h.start("direct", mode);
         if (completion === "promise") h.state.deliveryStarted();
-        else h.state.listener.onStopCopy(0);
+        h.state.listener.onStopCopy(0);
         assert.equal((await result).operationState, expected);
       });
     }
-    it(`reports failed for a failed copy in mode ${mode}`, async () => {
+    it(`reports unknown when only the promise fulfilled and the copy never confirmed (mode ${mode})`, async () => {
       const h = loadSend();
       const result = h.start("direct", mode);
-      h.state.listener.onStopCopy(failure);
+      h.state.deliveryStarted();
+      await new Promise(resolve => setImmediate(resolve));
+      h.timer.callback.notify();
+      assert.equal((await result).operationState, "unknown");
+    });
+    it(`reports failed when the message could not be created (mode ${mode})`, async () => {
+      const h = loadSend();
+      const result = h.start("direct", mode);
+      h.state.creationFailed(new Error("message file could not be created"));
       assert.equal((await result).operationState, "failed");
     });
   }
@@ -406,5 +425,17 @@ describe("private attachment copies after direct delivery (Stage 5)", () => {
     const h = loadSend({ sentCopyDenied: true });
     await h.start();
     assert.equal(h.state.released.length, 1);
+  });
+});
+
+describe("threading headers of a direct reply (Stage 5 review)", () => {
+  it("uses the original's Message-ID, not a msgref: lookup reference", async () => {
+    const h = loadSend({ messageId: "msgref:42:original" });
+    const result = h.start("reply");
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.state.fields.references, "<original>");
+    assert.equal(h.state.fields.headers["In-Reply-To"], "<original>");
+    h.state.listener.onStopSending("id", 0);
+    assert.equal((await result).success, true);
   });
 });

@@ -319,6 +319,8 @@ function makeFilterHarness({
   collection = () => null,
   // Filter register (Stage 5): whether a rule was created through MCP.
   registered = () => true,
+  // Error of the register pre-check (full or unreadable register).
+  registryError = null,
   defaultAccount = null,
   // Further accounts (e.g. POP accounts deferring into this one).
   otherAccounts = [],
@@ -399,6 +401,11 @@ function makeFilterHarness({
       identitySentCopyAllowed: (identity) => sentCopyAllowed(identity),
       addressCollectionRestriction: (recipients) => collection(recipients),
       filterIsRegistered: (accountKey, filter) => registered(filter),
+    liveFilterMatches: () => 1,
+    filterRegistryRestriction: (...args) => {
+      registryCalls.push(["check", ...args]);
+      return registryError ? { error: registryError } : null;
+    },
       filterFingerprint: (filter) => `fp:${filter.filterName}`,
       registerFilterChange: (...args) => registryCalls.push(["register", ...args]),
       forgetRegisteredFilter: (...args) => registryCalls.push(["forget", ...args]),
@@ -2481,9 +2488,13 @@ describe("stored filter actions need the calling client's capabilities", () => {
       assert.equal(h.api.deleteFilter("account", 0).success, true);
     });
 
-    it("keeps upstream behaviour for clients with all capabilities and unrestricted scope", () => {
+    for (const [label, granted] of [
+      ["all capabilities", undefined],
+      // Clients paired before Stage 5 lack the ownership right filters.foreign.
+      ["all capabilities except filters.foreign", () => Object.keys(Core.policy.CAPABILITIES).filter(cap => cap !== "filters.foreign")],
+    ]) it(`keeps upstream behaviour for clients with ${label} and unrestricted scope`, () => {
       // A later rule with a missing Move target would block a restricted client.
-      const h = makeFilterHarness({ allowSend: true, getAccessibleFolder: (uri) => (uri.includes("Gone") ? { error: "Folder not found" } : { folder: makeAccessibleFolder(uri) }) });
+      const h = makeFilterHarness({ allowSend: true, ...(granted ? { granted: granted() } : {}), getAccessibleFolder: (uri) => (uri.includes("Gone") ? { error: "Folder not found" } : { folder: makeAccessibleFolder(uri) }) });
       h.seed({ name: "Stop", actions: [{ type: "stopExecution" }] });
       const stale = h.seed({ name: "Stale move", actions: [{ type: "markRead" }] });
       const move = makeRuleAction();
@@ -2537,9 +2548,21 @@ describe("stored filter actions need the calling client's capabilities", () => {
       assert.deepEqual(h.registryCalls.at(-1).slice(0, 3), ["register", "c".repeat(32), "account"]);
       assert.equal(h.api.updateFilter("account", 0, "Mine renamed").success, true);
       assert.equal(h.registryCalls.at(-1)[0], "register");
-      assert.equal(h.registryCalls.at(-1)[4], "fp:Mine", "the old fingerprint is replaced");
+      assert.deepEqual({ ...h.registryCalls.at(-1)[4] }, { oldFingerprint: "fp:Mine", oldLiveMatches: 1 }, "the old fingerprint is replaced");
       assert.equal(h.api.deleteFilter("account", 0).success, true);
-      assert.deepEqual(h.registryCalls.at(-1), ["forget", "account", "fp:Mine renamed"]);
+      assert.deepEqual(h.registryCalls.at(-1), ["forget", "c".repeat(32), "account", "fp:Mine renamed", 1]);
+    });
+
+    it("refuses creating or changing the effect of a rule that could not be registered, but still allows disabling", () => {
+      const h = makeFilterHarness({ granted: own, registryError: "The filter register is full" });
+      const conditions = [{ attrib: "subject", op: "contains", value: "x" }];
+      assert.match(h.api.createFilter("account", "Mine", true, undefined, conditions, [{ type: "markRead" }]).error, /register is full/);
+      assert.equal(h.filterList.filters.length, 0, "nothing saved");
+      h.seed({ name: "Existing" });
+      assert.match(h.api.updateFilter("account", 0, "Renamed changes the mock fingerprint").error, /register is full/);
+      assert.equal(h.filterList.filters[0].filterName, "Existing");
+      const disabled = h.api.updateFilter("account", 0, undefined, false);
+      assert.equal(disabled.success, true, disabled.error);
     });
 
     it("needs filters.foreign to change, reorder or delete rules not created through MCP", () => {

@@ -17,7 +17,7 @@ function validEntry(entry) {
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
   if (Object.keys(entry).sort().join() !== "accountKey,clientId,createdAt,fingerprint,name") return false;
   return CLIENT_ID_PATTERN.test(entry.clientId) && ACCOUNT_KEY_PATTERN.test(entry.accountKey) &&
-    FINGERPRINT_PATTERN.test(entry.fingerprint) && typeof entry.name === "string" && entry.name.length <= 500 &&
+    FINGERPRINT_PATTERN.test(entry.fingerprint) && typeof entry.name === "string" && entry.name.length <= MAX_NAME_LENGTH &&
     Number.isSafeInteger(entry.createdAt) && entry.createdAt >= 0;
 }
 
@@ -50,21 +50,74 @@ export function canonicalFilter(description) {
   return JSON.stringify(canonical({ type: description.type, terms: description.terms, actions: description.actions }));
 }
 
-export function isRegistered(entries, accountKey, fingerprint) {
-  return entries.some((entry) => entry.accountKey === accountKey && entry.fingerprint === fingerprint);
+export const MAX_NAME_LENGTH = 500;
+
+function sameRule(entry, accountKey, fingerprint) {
+  return entry.accountKey === accountKey && entry.fingerprint === fingerprint;
 }
 
-// Records that clientId created or changed a rule. An entry for the
-// previous content (oldFingerprint) of the same rule is replaced.
-export function recordFilter(entries, { clientId, accountKey, name, fingerprint, oldFingerprint = null, now }) {
-  const kept = entries.filter((entry) =>
-    !(entry.accountKey === accountKey && (entry.fingerprint === fingerprint || (oldFingerprint && entry.fingerprint === oldFingerprint))));
-  const next = [...kept, { clientId, accountKey, name, fingerprint, createdAt: now }];
-  return next.length > MAX_ENTRIES ? next.slice(next.length - MAX_ENTRIES) : next;
+export function entryCount(entries, accountKey, fingerprint) {
+  return entries.filter((entry) => sameRule(entry, accountKey, fingerprint)).length;
 }
 
-export function forgetFilter(entries, accountKey, fingerprint) {
-  return entries.filter((entry) => !(entry.accountKey === accountKey && entry.fingerprint === fingerprint));
+// Identical rules cannot be told apart. They count as created through MCP
+// only while the register holds at least one entry per live rule; an
+// identical rule of the user's makes all of them foreign (fail closed).
+export function isRegistered(entries, accountKey, fingerprint, liveMatches) {
+  return liveMatches >= 1 && liveMatches <= entryCount(entries, accountKey, fingerprint);
+}
+
+// Removes one entry for a rule that is going away (deleted or replaced),
+// but only if the register then still has no more entries than live rules
+// with that effect: a deleted foreign twin must not take another client's
+// registration with it. The current client's entry goes first.
+function releaseOne(entries, accountKey, fingerprint, clientId, liveMatchesBefore) {
+  if (entryCount(entries, accountKey, fingerprint) <= liveMatchesBefore - 1) return entries;
+  let index = entries.findIndex((entry) => sameRule(entry, accountKey, fingerprint) && entry.clientId === clientId);
+  if (index < 0) index = entries.findLastIndex((entry) => sameRule(entry, accountKey, fingerprint));
+  return index < 0 ? entries : entries.filter((_, i) => i !== index);
+}
+
+// Records that clientId created a rule, or changed one whose previous
+// effect was oldFingerprint (oldLiveMatches: live rules with that effect
+// before the change). Entries are never evicted: a full register throws and
+// the caller must refuse the change before saving it.
+export function recordFilter(entries, { clientId, accountKey, name, fingerprint, oldFingerprint = null, oldLiveMatches = 0, now }) {
+  const base = oldFingerprint ? releaseOne(entries, accountKey, oldFingerprint, clientId, oldLiveMatches) : entries;
+  if (base.length >= MAX_ENTRIES) {
+    throw new Error(`The filter register is full (${MAX_ENTRIES} rules created or changed through MCP); delete such rules or remove clients first`);
+  }
+  return [...base, { clientId, accountKey, name: String(name).slice(0, MAX_NAME_LENGTH), fingerprint, createdAt: now }];
+}
+
+export function forgetFilter(entries, accountKey, fingerprint, { clientId = null, liveMatchesBefore = 1 } = {}) {
+  return releaseOne(entries, accountKey, fingerprint, clientId, liveMatchesBefore);
+}
+
+// Groups of identical registered rules that concern the revoked clients.
+export function revocationGroups(entries, clientIds) {
+  const groups = new Map();
+  for (const entry of entries) {
+    const key = `${entry.accountKey}\n${entry.fingerprint}`;
+    if (!groups.has(key)) groups.set(key, { accountKey: entry.accountKey, fingerprint: entry.fingerprint, names: [], revoked: 0, others: 0 });
+    const group = groups.get(key);
+    if (clientIds.includes(entry.clientId)) {
+      group.revoked++;
+      if (!group.names.includes(entry.name)) group.names.push(entry.name);
+    } else {
+      group.others++;
+    }
+  }
+  return [...groups.values()].filter((group) => group.revoked > 0);
+}
+
+// What revocation may do with the live rules of a group: disable them only
+// if every one of them is accounted for by the revoked clients' entries.
+export function revocationDecision({ live, revoked, others }) {
+  if (live === 0) return { conflict: "the rule was changed or removed after it was registered" };
+  if (others > 0) return { conflict: "an identical rule is also registered for another client; check it manually" };
+  if (live > revoked) return { conflict: "identical rules exist that were not created through MCP; check them manually" };
+  return { disable: true };
 }
 
 export function entriesForClient(entries, clientId) {

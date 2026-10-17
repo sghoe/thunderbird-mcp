@@ -40,6 +40,11 @@ export const CAPABILITIES = Object.freeze({
   "filters.foreign": "Change, reorder or delete filter rules not created through MCP",
 });
 
+// Rights over objects owned by the user rather than over data or effects.
+// They are checked where they apply and do not decide whether a client
+// counts as unrestricted (exempt from reach checks, Stage 4).
+export const OWNERSHIP_CAPABILITIES = Object.freeze(["filters.foreign"]);
+
 // Never granted; required for anything the policy does not know.
 export const UNCLASSIFIED = "unclassified";
 

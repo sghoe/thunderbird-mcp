@@ -111,7 +111,11 @@ Stage 2 hotfixes stay in force throughout.
 * Copies (and decoded inline base64 attachments) are removed after a
   direct send or draft with outcome `completed` or `failed`. They stay
   until Thunderbird shuts down for review windows (the user may still
-  send) and after `unknown` (Thunderbird may still read them).
+  send) and after `unknown` (Thunderbird may still read them). Disabling
+  or updating the add-on keeps the files that open compose windows still
+  attach (all of them if the windows cannot be inspected) and hands them
+  to the next instance; uninstalling while such a window is open leaves
+  them in the private temp directory.
 * Inline base64 attachments and files inlined by the bridge were already
   bound to their content (bytes travel in the request).
 * Residual: between the path checks and the single read, a process of the
@@ -126,6 +130,24 @@ Stage 2 hotfixes stay in force throughout.
   review window + replaced file → reviewed content sent; private copy
   removed after a completed direct send.
 
+## Review round 1 (Sol, Opus)
+
+| Finding | Fix |
+|---|---|
+| Register evicted the oldest entries at 1,000 – a client could push its Forward rule out and escape revocation (Sol, Opus) | entries are never evicted; creating a rule or changing its effect is refused **before saving** if it could not be registered (full or unreadable register); renaming and enabling/disabling stay possible |
+| Entries matched only on account + fingerprint: copying a user rule made the user rule "registered" (bypassing `filters.foreign`); deleting/changing one of several identical rules dropped another client's entry (Sol, Opus) | one entry per MCP-made rule; identical rules count as MCP-made only while the register has at least one entry per live identical rule – a user's twin makes all of them foreign (fail closed); a removed or changed rule releases an entry only if more entries than remaining identical rules exist, the current client's first; revocation works per group of identical rules and reports a conflict if a group also belongs to another client or has more live rules than entries |
+| Filter names over 500 characters made the whole register read as corrupt (Opus) | stored names are truncated; every write is validated before it is stored; "Remove all clients" reports and resets an unreadable register (deleting a single client does not) |
+| Fingerprint ignored condition grouping (parentheses) (Sol) | `beginsGrouping`/`endsGrouping` are part of the fingerprint |
+| `filters.foreign` made existing full-access clients "restricted" (Opus) | ownership rights (`OWNERSHIP_CAPABILITIES` in `core/policy.sys.mjs`) do not decide whether a client is unrestricted |
+| Drafts reported `completed` when the copy into Drafts had only started (TB 153 `_mimeDoFcc` does not await the copy) (Sol, Opus) | `completed` only after `onStopCopy(0)`; a copy error is `unknown` (Thunderbird offers retry / save to Local Folders); without confirmation the timeout reports `unknown` |
+| Direct reply with a `msgref:` reference wrote it into `References`/`In-Reply-To` (Sol) | headers come from the resolved message |
+| Disabling the add-on deleted copies still attached by open review windows (Sol) | see 5d; native test disables/re-enables the add-on with an open review window and sends the original content |
+
+Negative controls: without the `OWNERSHIP_CAPABILITIES` exclusion the
+unrestricted test fails; without the retention the native reload test
+finds no copy. The previous `onShutdown` also deleted decoded inline
+attachments of open review windows on add-on disable (upstream
+behaviour); they are now kept the same way.
 ## Bound approvals – how each approval is tied to the concrete action
 
 | Approval | Bound to | Where |

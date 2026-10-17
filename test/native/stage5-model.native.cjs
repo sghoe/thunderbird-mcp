@@ -280,6 +280,40 @@ describe("content-bound path attachments (native)", { skip: !h.thunderbirdBinary
     assert.equal(sent, "VERSION-A reviewed content");
   });
 
+  it("keeps the copy of an open review window when the add-on is disabled and re-enabled", async () => {
+    const file = path.join(dir, "reload.txt");
+    fs.writeFileSync(file, "RELOAD-A reviewed content");
+    const before = tb.smtp.messages.length;
+    const r = await tb.call("sendMail", { to: "reload@sink.test", subject: "reload attachment", body: "b", attachments: [file] });
+    assert.equal(r.result.operationState, "opened-for-review", JSON.stringify(r.result));
+    const url = await tb.marionette.run(`
+      for (let i = 0; i < 100; i++) {
+        const win = Services.wm.getMostRecentWindow("msgcompose");
+        const item = win?.gAttachmentBucket?.itemChildren?.[0];
+        if (item?.attachment?.url) return item.attachment.url;
+        await new Promise(r => setTimeout(r, 100));
+      }
+      return null;
+    `);
+    assert.match(url || "", /thunderbird-mcp-hardened\/outgoing\/\d+_\d+_reload\.txt$/, "the window attaches the private copy");
+    await tb.marionette.run(`
+      const { AddonManager } = ChromeUtils.importESModule("resource://gre/modules/AddonManager.sys.mjs");
+      const addon = await AddonManager.getAddonByID(args.id);
+      await addon.disable();
+      await addon.enable();
+      return true;
+    `, { id: h.addonId() });
+    await tb.reconnect();
+    assert.equal((await outgoingFiles()).filter((n) => n.endsWith("_reload.txt")).length, 1, "copy kept for the open window");
+    fs.writeFileSync(file, "RELOAD-B swapped");
+    await tb.marionette.run(`Services.wm.getMostRecentWindow("msgcompose").goDoCommand("cmd_sendNow"); return true;`);
+    const deadline = Date.now() + 30000;
+    while (tb.smtp.messages.length === before && Date.now() < deadline) await new Promise((res) => setTimeout(res, 200));
+    assert.equal(tb.smtp.messages.length, before + 1, "message sent from the review window");
+    const part = /filename="reload\.txt"\r\nContent-Transfer-Encoding: base64\r\n\r\n([A-Za-z0-9+/=\r\n]+?)\r\n(?:\r\n)?--/.exec(tb.smtp.messages.at(-1).data);
+    assert.ok(part, "base64 attachment part");
+    assert.equal(Buffer.from(part[1].replace(/\s/g, ""), "base64").toString("utf8"), "RELOAD-A reviewed content");
+  });
   it("removes the private copy after a completed direct send", async () => {
     const file = path.join(dir, "direct.txt");
     fs.writeFileSync(file, "direct content");

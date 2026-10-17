@@ -164,7 +164,7 @@ function loadAdapter({ initial, unreadable = false } = {}) {
     constant("PREF_FILTER_REGISTRY"),
     block("CLIENT REGISTRY ADAPTER"),
     block("FILTER REGISTRY ADAPTER"),
-    "this.registry = { filterFingerprint, registerFilterChange, revokeRegisteredFilters, readFilterRegistry };",
+    "this.registry = { filterFingerprint, registerFilterChange, revokeRegisteredFilters, readFilterRegistry, writeFilterRegistry, filterIsRegistered };",
     "this.authenticateClient = authenticateClient;",
     "this.api = {",
     block("CLIENT MANAGEMENT API"),
@@ -278,6 +278,43 @@ describe("client authentication and management", () => {
     assert.match(result.filters.conflicts[0].reason, /could not be saved.*disable the rule manually/);
     assert.equal(forward.enabled, false, "stays disabled for the running session");
   });
+  it("includes condition grouping in the fingerprint", () => {
+    const grouped = env.makeRule("Rule", [{ type: 2, value: "x@example.invalid" }]);
+    const plainRule = env.makeRule("Rule", [{ type: 2, value: "x@example.invalid" }]);
+    grouped.searchTerms = [{ beginsGrouping: true }, { endsGrouping: true }];
+    plainRule.searchTerms = [{}, {}];
+    assert.notEqual(env.sandbox.registry.filterFingerprint(grouped), env.sandbox.registry.filterFingerprint(plainRule));
+  });
+
+  it("treats a copied user rule as foreign and does not disable it on revocation", async () => {
+    const { client } = await env.sandbox.api.createClient(settings);
+    const user = env.makeRule("User forward", [{ type: 2, value: "x@example.invalid" }]);
+    const copy = env.makeRule("Copy", [{ type: 2, value: "x@example.invalid" }]);
+    env.filterList.filters.push(user, copy);
+    env.sandbox.registry.registerFilterChange(client.id, "account1", copy);
+    assert.equal(env.sandbox.registry.filterIsRegistered("account1", user, env.filterList), false);
+    const result = await env.sandbox.api.deleteClient(client.id);
+    assert.deepEqual(plain(result.filters.disabled), []);
+    assert.match(result.filters.conflicts[0].reason, /not created through MCP/);
+    assert.equal(user.enabled, true);
+    assert.equal(copy.enabled, true);
+  });
+
+  it("never stores a register that would read as corrupt", () => {
+    const before = env.prefs.get("extensions.thunderbird-mcp-hardened.filterRegistry");
+    assert.throws(() => env.sandbox.registry.writeFilterRegistry([{ clientId: "nope" }]), /invalid filter register/);
+    assert.equal(env.prefs.get("extensions.thunderbird-mcp-hardened.filterRegistry"), before);
+  });
+
+  it("\"Remove all clients\" reports and resets an unreadable filter register", async () => {
+    env.prefs.set("extensions.thunderbird-mcp-hardened.filterRegistry", "{broken");
+    const result = await env.sandbox.api.removeAllClients();
+    assert.match(result.filters.conflicts[0].reason, /unreadable/);
+    assert.equal(env.sandbox.registry.readFilterRegistry().corrupt, false);
+    const removal = await env.sandbox.api.deleteClient("0".repeat(32));
+    assert.match(removal.error, /Unknown client/, "deleting one client does not reset it");
+  });
+
   it("is not reachable through MCP tools", () => {
     const tools = Core.policy.knownTools();
     for (const name of ["listClients", "createClient", "updateClient", "rotateClientToken", "deleteClient", "removeAllClients"]) {
