@@ -9,7 +9,7 @@ Stage 2 hotfixes stay in force throughout.
 
 * An RFC Message-ID stays the normal input. If several messages in the
   folder share it, the call is refused (as since Stage 2) and the error
-  now lists `candidates`: one `msgref:<messageKey>:<Message-ID>` reference
+  now lists `candidates`: one `msgref:<messageKey>:<date>:<Message-ID>` reference
   per message, with date and author (no subjects – they can be protected
   for encrypted messages). Up to 20 candidates.
 * Every tool that takes a `messageId` accepts such a reference. It is
@@ -31,7 +31,9 @@ Stage 2 hotfixes stay in force throughout.
   overwritten silently.
 * Revoking a client (and "Remove all clients") disables its registered
   Forward/Reply rules that are still unchanged and enabled. Rules that no
-  longer match their fingerprint (changed by the user), are missing or
+  longer match their fingerprint (changed by the user, or their Move/Copy
+  target folder was renamed, moved or deleted – Thunderbird rewrites the
+  target in every rule), are missing or
   ambiguous are reported in the options page as conflicts for the user to
   decide; nothing is disabled by name or index. If Thunderbird cannot save
   the disabled rule (e.g. the rules file is locked on Windows), the rule
@@ -203,6 +205,13 @@ draft and the refused waiting call.
 |---|---|
 | Renaming one of identical rules, of which only one was registered, added an entry and made the user's identical rule "registered" (revocation disabled both) (Sol) | renaming and disabling leave the register untouched; changing the effect of, switching on or deleting a rule of a group of identical rules of which only some are registered is refused (the register cannot tell which one is meant); the user can do it in Thunderbird |
 | A sender can choose a Message-ID that looks like a reference (`msgref:5:<other ID>`); it was resolved by key to another message (Opus) | if the input matches both a message's literal Message-ID and a valid reference, it is refused as ambiguous; otherwise the one matching reading is used (unit tests with the real block) |
+## Review round 8 (Sol, Opus)
+
+| Finding | Fix |
+|---|---|
+| Fingerprints contain Move/Copy target URIs, which Thunderbird rewrites in all rules when a folder is renamed, moved or deleted; two renames could make an untouched user rule look registered, one rename could take a client's own rule out of the disable step (Opus) | renaming, moving or deleting a folder (or a parent of one) that a rule not created through MCP targets needs `filters.foreign`; a client's own registered rules may still be affected – their fingerprint then no longer matches and revocation reports them as conflicts (5b wording corrected) |
+| Identical rules of two clients: deleting one took the caller's registration away, regardless of whose rule was deleted, so revocation of the other client missed its rule silently (Sol) | groups of identical rules whose entries belong to more than one client count as ambiguous too: changing, switching on or deleting one of them is refused |
+| A reference bound only key and Message-ID; Thunderbird can reuse a message key (provisional keys of IMAP offline copies) for another message with the same Message-ID (Sol) | references are `msgref:<key>:<date>:<Message-ID>`; a reused key with another date is stale. Residual: a message with the same key, Message-ID and date is treated as the same message |
 ## Bound approvals – how each approval is tied to the concrete action
 
 | Approval | Bound to | Where |

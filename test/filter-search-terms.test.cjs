@@ -2605,6 +2605,29 @@ describe("stored filter actions need the calling client's capabilities", () => {
       assert.equal(calls.slice(original).some(call => call[0] === "register"), false);
     });
 
+    it("needs filters.foreign to rename, move or delete a folder that a user rule targets", () => {
+      const withMove = (h, target) => {
+        const rule = h.seed({ name: "User move", actions: [{ type: "markRead" }] });
+        const move = makeRuleAction();
+        move.type = h.ci.nsMsgFilterAction.MoveToFolder;
+        move.targetFolderUri = target;
+        rule.appendAction(move);
+        return rule;
+      };
+      const foreign = makeFilterHarness({ granted: own, registered: () => false });
+      withMove(foreign, "imap://account/Projects/Q3");
+      assert.match(foreign.api.filterTargetRestriction({ URI: "imap://account/Projects/Q3" }).error, /User move.*requires filters\.foreign/);
+      assert.match(foreign.api.filterTargetRestriction({ URI: "imap://account/Projects" }).error, /filters\.foreign/, "a parent folder too");
+      assert.equal(foreign.api.filterTargetRestriction({ URI: "imap://account/Projects/Q30" }), null, "not a prefix match by name");
+      assert.equal(foreign.api.filterTargetRestriction({ URI: "imap://account/Other" }), null);
+      const own_ = makeFilterHarness({ granted: own, registered: () => true });
+      withMove(own_, "imap://account/Projects/Q3");
+      assert.equal(own_.api.filterTargetRestriction({ URI: "imap://account/Projects/Q3" }), null, "only its own rules target it");
+      const granted = makeFilterHarness({ granted: [...own, "filters.foreign"], registered: () => false });
+      withMove(granted, "imap://account/Projects/Q3");
+      assert.equal(granted.api.filterTargetRestriction({ URI: "imap://account/Projects/Q3" }), null);
+    });
+
     it("treats switching a rule on as a change that must be registered", () => {
       const h = makeFilterHarness({ granted: own, registryError: "The filter register is full" });
       h.seed({ name: "Off rule", enabled: false });

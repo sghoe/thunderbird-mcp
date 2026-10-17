@@ -36,7 +36,7 @@ describe("unique message references (native)", { skip: !h.thunderbirdBinary() &&
     assert.match(r.result.error, /ambiguous/);
     candidates = r.result.candidates;
     assert.equal(candidates.length, 2);
-    for (const c of candidates) assert.match(c.messageId, /^msgref:\d+:dup@x\.test$/);
+    for (const c of candidates) assert.match(c.messageId, /^msgref:\d+:\d+:dup@x\.test$/);
     assert.deepEqual(candidates.map((c) => c.author).sort(), ["Boss <boss@corp.test>", "Mallory <m@attacker.test>"]);
     assert.equal(JSON.stringify(candidates).includes("Spoofed"), false, "no subjects in candidates");
   });
@@ -62,10 +62,13 @@ describe("unique message references (native)", { skip: !h.thunderbirdBinary() &&
 
   it("refuses stale and malformed references", async () => {
     const boss = candidates.find((c) => c.author.startsWith("Boss"));
-    const key = Number(boss.messageId.split(":")[1]);
-    const stale = await tb.call("getMessage", { messageId: `msgref:${key}:other@x.test`, folderPath: INBOX });
+    const [, key, date] = boss.messageId.split(":");
+    const stale = await tb.call("getMessage", { messageId: `msgref:${key}:${date}:other@x.test`, folderPath: INBOX });
     assert.match(stale.result.error, /stale/);
-    const missing = await tb.call("getMessage", { messageId: "msgref:999999:dup@x.test", folderPath: INBOX });
+    const otherDate = await tb.call("getMessage", { messageId: `msgref:${key}:${Number(date) + 1}:dup@x.test`, folderPath: INBOX });
+    assert.match(otherDate.result.error, /stale/, "the date is part of the reference");
+    assert.match(stale.result.error, /stale/);
+    const missing = await tb.call("getMessage", { messageId: `msgref:999999:${date}:dup@x.test`, folderPath: INBOX });
     assert.match(missing.result.error, /stale/);
     const malformed = await tb.call("getMessage", { messageId: "msgref:abc:dup@x.test", folderPath: INBOX });
     assert.match(malformed.result.error, /Invalid message reference/);

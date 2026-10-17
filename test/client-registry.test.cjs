@@ -164,7 +164,7 @@ function loadAdapter({ initial, unreadable = false } = {}) {
     constant("PREF_FILTER_REGISTRY"),
     block("CLIENT REGISTRY ADAPTER"),
     block("FILTER REGISTRY ADAPTER"),
-    "this.registry = { filterFingerprint, registerFilterChange, revokeRegisteredFilters, readFilterRegistry, writeFilterRegistry, filterIsRegistered };",
+    "this.registry = { filterFingerprint, registerFilterChange, revokeRegisteredFilters, readFilterRegistry, writeFilterRegistry, filterIsRegistered, filterGroupMixed };",
     "this.authenticateClient = authenticateClient;",
     "this.api = {",
     block("CLIENT MANAGEMENT API"),
@@ -314,6 +314,19 @@ describe("client authentication and management", () => {
     assert.match(result.filters.conflicts[0].reason, /1 of 2 identical registered rules were changed or removed/);
   });
 
+  it("treats identical rules of several clients as ambiguous", async () => {
+    const a = (await env.sandbox.api.createClient(settings)).client;
+    const b = (await env.sandbox.api.createClient({ ...settings, name: "Other" })).client;
+    const first = env.makeRule("A forward", [{ type: 2, value: "x@example.invalid" }]);
+    const second = env.makeRule("B forward", [{ type: 2, value: "x@example.invalid" }]);
+    env.filterList.filters.push(first, second);
+    env.sandbox.registry.registerFilterChange(a.id, "account1", first);
+    const fp = env.sandbox.registry.filterFingerprint(first);
+    assert.equal(env.sandbox.registry.filterGroupMixed("account1", fp, 1), false, "one client, fully registered");
+    env.sandbox.registry.registerFilterChange(b.id, "account1", second);
+    assert.equal(env.sandbox.registry.filterGroupMixed("account1", fp, 2), true, "two clients: which rule is whose is unknown");
+    assert.equal(env.sandbox.registry.filterGroupMixed("account1", "0".repeat(64), 1), false, "not registered at all");
+  });
   it("never stores a register that would read as corrupt", () => {
     const before = env.prefs.get("extensions.thunderbird-mcp-hardened.filterRegistry");
     assert.throws(() => env.sandbox.registry.writeFilterRegistry([{ clientId: "nope" }]), /invalid filter register/);

@@ -3213,17 +3213,20 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
     // Identical rules of which only some are registered cannot be told
     // apart: changing, switching on or deleting one of them could hand the
     // registration to the wrong one (an untouched user rule), so it is refused.
+    // The same holds when identical rules belong to several clients: the
+    // register could take the registration of the wrong client away.
     function filterGroupMixed(accountKey, fingerprint, liveMatches) {
       try {
         const registry = readFilterRegistry();
         if (registry.corrupt) return false;
-        const entries = Core.filterRegistry.entryCount(registry.entries, accountKey, fingerprint);
-        return entries > 0 && liveMatches > entries;
+        const group = registry.entries.filter(entry => entry.accountKey === accountKey && entry.fingerprint === fingerprint);
+        if (!group.length) return false;
+        return liveMatches > group.length || new Set(group.map(entry => entry.clientId)).size > 1;
       } catch {
         return true;
       }
     }
-    const MIXED_GROUP_ERROR = "Not permitted: identical rules exist, of which only some were created through MCP, so the register could not tell which one changed. Change or delete it in Thunderbird, or make the rules differ first.";
+    const MIXED_GROUP_ERROR = "Not permitted: identical rules exist that were not all created through MCP by one client, so the register could not tell which one changed. Change or delete it in Thunderbird, or make the rules differ first.";
 
     // Checked before a rule is created or its effect changed: the change is
     // refused if it could not be registered (and later revoked).
@@ -6308,18 +6311,20 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	            // "msgref:<messageKey>:<Message-ID>". The key is resolved in the given
 	            // folder and the Message-ID is checked again, so a reference made stale by
 	            // a move or compaction fails instead of selecting another message.
+	            // msgref:<key>:<date>:<Message-ID>. The date (nsIMsgDBHdr.date) is
+	            // part of the reference because Thunderbird can reuse a message key
+	            // (e.g. provisional keys of IMAP offline copies) for another message
+	            // with the same Message-ID.
 	            const MESSAGE_REF_PREFIX = "msgref:";
 	            function parseMessageRef(value) {
 	              if (typeof value !== "string" || !value.startsWith(MESSAGE_REF_PREFIX)) return null;
-	              const rest = value.slice(MESSAGE_REF_PREFIX.length);
-	              const separator = rest.indexOf(":");
-	              const key = separator > 0 ? Number(rest.slice(0, separator)) : NaN;
-	              const messageId = separator > 0 ? rest.slice(separator + 1) : "";
-	              if (!/^\d+$/.test(rest.slice(0, Math.max(separator, 0))) || !Number.isSafeInteger(key) || !messageId) return { invalid: true };
-	              return { key, messageId };
+	              const match = /^(\d+):(\d+):([\s\S]+)$/.exec(value.slice(MESSAGE_REF_PREFIX.length));
+	              const key = match ? Number(match[1]) : NaN;
+	              if (!match || !Number.isSafeInteger(key) || !Number.isSafeInteger(Number(match[2]))) return { invalid: true };
+	              return { key, date: match[2], messageId: match[3] };
 	            }
 	            function messageRefFor(hdr) {
-	              return `${MESSAGE_REF_PREFIX}${hdr.messageKey}:${hdr.messageId}`;
+	              return `${MESSAGE_REF_PREFIX}${hdr.messageKey}:${Math.trunc(Number(hdr.date) || 0)}:${hdr.messageId}`;
 	            }
 	            // Candidates for an ambiguous Message-ID: reference, date and author only
 	            // (no subjects, which may be protected for encrypted messages); date and
@@ -6360,7 +6365,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	                let byKey = null;
 	                if (!ref.invalid) {
 	                  try { byKey = db.getMsgHdrForKey(ref.key); } catch { byKey = null; }
-	                  if (byKey && byKey.messageId !== ref.messageId) byKey = null;
+	                  if (byKey && (byKey.messageId !== ref.messageId || String(Math.trunc(Number(byKey.date) || 0)) !== ref.date)) byKey = null;
 	                }
 	                if (byKey) return count > 0 ? { ambiguous: true } : { hdr: byKey };
 	                if (count === 0) return ref.invalid ? { invalidRef: true } : { staleRef: true };
@@ -11827,6 +11832,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 if (renameResult.error) return renameResult;
                 const folder = renameResult.folder;
                 if (wouldBecomeOutbox(folder.parent, newName)) return { error: OUTBOX_FOLDER_NAME_ERROR };
+                const targetError = filterTargetRestriction(folder);
+                if (targetError) return targetError;
 
                 folder.rename(newName, null);
                 return {
@@ -11854,6 +11861,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 if (!parent) {
                   return { error: "Cannot delete a root folder" };
                 }
+                const targetError = filterTargetRestriction(folder);
+                if (targetError) return targetError;
 
                 // Check if folder is already in Trash — if so, permanently delete
                 if (isTrashOrDescendant(folder)) {
@@ -12030,6 +12039,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 if (folder.parent && folder.parent.URI === newParentPath) {
                   return { error: "Folder is already under this parent" };
                 }
+                const targetError = filterTargetRestriction(folder);
+                if (targetError) return targetError;
 
                 MailServices.copy.copyFolder(folder, newParent, true, null, null);
                 return {
@@ -12492,6 +12503,44 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
             // Rules not created or changed through MCP belong to the user;
             // changing, reordering or deleting them needs filters.foreign.
+            // Thunderbird rewrites the Move/Copy targets of filter rules in every
+            // account when a folder is renamed, moved or deleted, which changes
+            // their fingerprints. Without filters.foreign a client may not do that
+            // to a folder (or a parent of one) that rules not created through MCP
+            // target: it could make such a rule look registered, or change it.
+            function filterTargetRestriction(folder) {
+              try {
+                if (clientHasCapability("filters.foreign")) return null;
+                const move = resolveXpcomConstant("nsMsgFilterAction", "MoveToFolder");
+                const copy = resolveXpcomConstant("nsMsgFilterAction", "CopyToFolder");
+                const uri = folder.URI;
+                for (const account of MailServices.accounts.accounts) {
+                  let list = null;
+                  try {
+                    const server = account.incomingServer;
+                    if (server && server.canHaveFilters !== false) list = server.getFilterList(null);
+                  } catch { list = null; }
+                  if (!list) continue;
+                  for (let i = 0; i < list.filterCount; i++) {
+                    const rule = list.getFilterAt(i);
+                    let targets = false;
+                    for (let a = 0; a < rule.actionCount; a++) {
+                      const action = rule.getActionAt(a);
+                      if (action.type !== move && action.type !== copy) continue;
+                      const target = String(action.targetFolderUri || "");
+                      if (target === uri || target.startsWith(`${uri}/`)) targets = true;
+                    }
+                    if (targets && !filterIsRegistered(account.key, rule, list)) {
+                      return { error: `Not permitted for this client: the filter "${rule.filterName}" (not created through MCP) moves or copies mail into this folder, and this change would rewrite it; that requires filters.foreign. Grant it in the Thunderbird MCP options.` };
+                    }
+                  }
+                }
+                return null;
+              } catch {
+                return { error: "Not permitted for this client: the filter rules that target this folder could not be checked" };
+              }
+            }
+
             function foreignRuleRestriction(accountKey, filter, filterList) {
               if (clientHasCapability("filters.foreign") || filterIsRegistered(accountKey, filter, filterList)) return null;
               return { error: `Not permitted for this client: the filter "${filter.filterName}" was not created through MCP; changing it requires filters.foreign. Grant it in the Thunderbird MCP options.` };

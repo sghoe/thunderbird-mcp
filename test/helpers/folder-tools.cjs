@@ -22,6 +22,7 @@ function loadFolderTools({ accounts, folders, isAccountAllowed = () => true, cop
   const runtime = vm.createContext({
     Core,
     trackCallAttachmentFiles: () => ({ stopCollecting() {}, release() {} }),
+    filterTargetRestriction: () => null,
     console,
     Ci: { nsMsgFolderFlags: { Trash: 0x100 } },
     isAccountAllowed,
