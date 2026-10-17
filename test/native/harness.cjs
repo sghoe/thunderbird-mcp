@@ -433,6 +433,8 @@ async function startThunderbird({ mailboxes, extraPrefs, headless = true, authHe
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        // No idle keep-alive socket survives a server restart (add-on reload).
+        Connection: "close",
         ...(header !== undefined ? (header ? { Authorization: header } : {}) :
           authHeader ? { Authorization: authHeader } : token ? { Authorization: `Bearer ${token}` } : {}),
       },

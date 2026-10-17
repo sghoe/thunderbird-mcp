@@ -96,9 +96,10 @@ respective fix.
 
 ## Tested combinations and open points
 
-* Tested dynamically: Windows 11, Thunderbird 153.5.0esr (portable,
-  isolated profile), Node.js 22.23.2; local mbox accounts, Local Folders,
-  a storage calendar, a local SMTP sink.
+* Tested dynamically: Windows 11, Thunderbird 153.5.0esr and 158.0
+  (portable, isolated profile), Node.js 22.23.2; local mbox accounts,
+  Local Folders, a storage calendar, a local SMTP sink. The manifest
+  accepts 140–158.*; 140 and 154–157 are not tested.
 * Not tested natively: Thunderbird 140 ESR (the manifest still allows
   140 – owner decision 3 of Stage 0), Linux and macOS (unit tests and CI
   run there; the discovery and path rules for Snap/Flatpak/macOS are
@@ -108,6 +109,18 @@ respective fix.
 * Owner decisions still open (nothing has been published): public name
   and repository, a signed update channel, Thunderbird 140 support.
 
+## Thunderbird 158
+
+`strict_max_version` was `153.*`, so Thunderbird 158 refused to load the
+add-on (control run: the server never started). With `158.*` and the
+official Thunderbird 158.0 (win64, signed by Mozilla, extracted
+portably), all 77 native tests pass and native parity with upstream
+v0.9.2 shows no differences (64 calls, 40 tools, 4 SMTP deliveries;
+`operationState` as additive key). The same runs on 153.5.0esr remain
+green. The native harness now sends `Connection: close`: an idle
+keep-alive socket hitting the server restart during the add-on reload
+test made Node's HTTP client fail once (test process only; the add-on
+was not involved).
 ## Final review round 1 (Sol, Opus)
 
 | Finding | Fix |
