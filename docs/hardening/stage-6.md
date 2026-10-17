@@ -166,6 +166,8 @@ was not involved).
 | Unquoted calendar, filter, folder and attachment names, display names and SMTP host survived redaction (Opus, Sol) | same |
 | The address pattern scanned long inputs in quadratic time before truncation; a paired client could stall Thunderbird with a 128 000-character argument name (Sol) | at most 512 characters are examined, only by prefix comparison; regression test with 128 000 characters |
 | `tool` accepted any safe-looking string (a 64-digit token as unknown tool name was logged), `client` copied the user-chosen name (Sol) | only known tool names; opaque client log ID; outcome, operation state and method checked against fixed lists |
+
+Review round 2 (`d5a0926`): both reviewers without findings.
 ## Final review round 1 (Sol, Opus)
 
 | Finding | Fix |
