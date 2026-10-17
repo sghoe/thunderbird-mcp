@@ -70,6 +70,7 @@ function loadSend(options = {}) {
       accounts: { accounts: [{ key: "account", identities: [identity] }] },
       messageServiceFromURI: () => ({ messageURIToMsgHdr: () => hdr }),
     },
+    releaseOutgoingAttachments(descs) { state.released = [...(state.released || []), descs]; },
     descsToMsgAttachments(descs) {
       if (options.attachmentError) throw options.attachmentError;
       return descs;
@@ -383,4 +384,27 @@ describe("operation states of direct delivery (Stage 5)", () => {
       assert.equal(h.state.dispositions.length, 0);
     });
   }
+});
+
+describe("private attachment copies after direct delivery (Stage 5)", () => {
+  for (const [label, finish, released] of [
+    ["completed", h => { h.state.listener.onStartSending(); h.state.listener.onStopSending("id", 0); }, true],
+    ["failed", h => h.state.listener.onStopSending("id", failure), true],
+    ["unknown (timeout)", h => h.timer.callback.notify(), false],
+    ["unknown (reset after the start)", h => { h.state.listener.onStartSending(); h.state.listener.onStopSending("id", 0x804b0014); }, false],
+  ]) {
+    it(`${released ? "releases" : "keeps"} them when the outcome is ${label}`, async () => {
+      const h = loadSend();
+      const result = h.start("direct", modes.Now);
+      finish(h);
+      await result;
+      assert.equal((h.state.released || []).length, released ? 1 : 0);
+    });
+  }
+
+  it("releases them after a refusal before sending", async () => {
+    const h = loadSend({ sentCopyDenied: true });
+    await h.start();
+    assert.equal(h.state.released.length, 1);
+  });
 });

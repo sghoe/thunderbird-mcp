@@ -39,6 +39,9 @@ function loadProductionAttachmentValidation(overrides = {}) {
     getConfiguredGetMessagesLimit: () => 20,
     _tempAttachFiles: new Set(),
     _tempFileCounter: 0,
+    // The private copy is tested separately (attachment-copy.test.cjs); here
+    // the checked file stands in for it so the path checks stay visible.
+    copyCheckedAttachmentFile: file => file,
     Cc: { '@mozilla.org/messengercompose/attachment;1': { createInstance: () => ({}) } },
     Ci: {},
     ...overrides,

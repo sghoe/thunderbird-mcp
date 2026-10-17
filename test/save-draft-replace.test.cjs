@@ -97,6 +97,7 @@ function loadDraftTools(options = {}) {
       return { descs: attachments || [], failed: [] };
     },
     descsToMsgAttachments: descs => descs,
+    releaseOutgoingAttachments() {},
   };
   vm.createContext(sandbox);
   vm.runInContext([

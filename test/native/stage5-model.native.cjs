@@ -227,3 +227,65 @@ describe("operation states (native)", { skip: !h.thunderbirdBinary() && "THUNDER
     await closeWindows();
   });
 });
+
+// A path attachment is bound to the content it had when it was checked:
+// replacing the file while the review window is open changes nothing.
+describe("content-bound path attachments (native)", { skip: !h.thunderbirdBinary() && "THUNDERBIRD_BIN not set" }, () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const { makeAllowedTempDir } = require("../helpers/fixture-dir.cjs");
+  let tb;
+  let dir;
+  before(async () => {
+    // A directory the attachment policy allows (Windows temp lies in AppData).
+    dir = makeAllowedTempDir("tb-mcp-stage5-");
+    tb = await h.startThunderbird({});
+  });
+  after(async () => {
+    await tb?.stop();
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const outgoingFiles = () => tb.marionette.run(`
+    const dir = Services.dirsvc.get("TmpD", Ci.nsIFile);
+    dir.append("thunderbird-mcp-hardened");
+    dir.append("outgoing");
+    return dir.exists() ? [...dir.directoryEntries].map(f => f.leafName) : [];
+  `);
+
+  it("sends the reviewed content even if the file is replaced before Send", async () => {
+    const file = path.join(dir, "report.txt");
+    fs.writeFileSync(file, "VERSION-A reviewed content");
+    const before = tb.smtp.messages.length;
+    const r = await tb.call("sendMail", { to: "review@sink.test", subject: "bound attachment", body: "b", attachments: [file] });
+    assert.equal(r.result.operationState, "opened-for-review", JSON.stringify(r.result));
+    assert.equal((await outgoingFiles()).filter((n) => n.endsWith("_report.txt")).length, 1, "private copy while the window is open");
+    const ready = await tb.marionette.run(`
+      for (let i = 0; i < 100; i++) {
+        const win = Services.wm.getMostRecentWindow("msgcompose");
+        if (win?.gAttachmentBucket?.itemCount === 1) return true;
+        await new Promise(r => setTimeout(r, 100));
+      }
+      return false;
+    `);
+    assert.equal(ready, true, "compose window with one attachment");
+    fs.writeFileSync(file, "VERSION-B swapped after review!!");
+    await tb.marionette.run(`Services.wm.getMostRecentWindow("msgcompose").goDoCommand("cmd_sendNow"); return true;`);
+    const deadline = Date.now() + 30000;
+    while (tb.smtp.messages.length === before && Date.now() < deadline) await new Promise((res) => setTimeout(res, 200));
+    assert.equal(tb.smtp.messages.length, before + 1, "message sent from the review window");
+    const data = tb.smtp.messages.at(-1).data;
+    const part = /filename="report\.txt"\r\nContent-Transfer-Encoding: base64\r\n\r\n([A-Za-z0-9+/=\r\n]+?)\r\n(?:\r\n)?--/.exec(data);
+    assert.ok(part, "base64 attachment part");
+    const sent = Buffer.from(part[1].replace(/\s/g, ""), "base64").toString("utf8");
+    assert.equal(sent, "VERSION-A reviewed content");
+  });
+
+  it("removes the private copy after a completed direct send", async () => {
+    const file = path.join(dir, "direct.txt");
+    fs.writeFileSync(file, "direct content");
+    const r = await tb.call("sendMail", { to: "x@sink.test", subject: "direct attachment", body: "b", attachments: [file], skipReview: true });
+    assert.equal(r.result.operationState, "completed", JSON.stringify(r.result));
+    assert.match(tb.smtp.messages.at(-1).data, /filename="?direct\.txt"?/);
+    assert.equal((await outgoingFiles()).filter((n) => n.endsWith("_direct.txt")).length, 0);
+  });
+});

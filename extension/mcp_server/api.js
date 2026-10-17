@@ -4144,6 +4144,75 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
              * Any refused entry throws before a send/draft/window can proceed,
              * and removes temporary files created by this conversion.
              */
+            // BEGIN OUTGOING ATTACHMENT FILES
+            // A checked path attachment is read once, right after its checks,
+            // into a private copy (<TmpD>/thunderbird-mcp-hardened/outgoing,
+            // never an attachment source itself). The review window and the
+            // sent message use that copy, so replacing the file or the path
+            // afterwards cannot change what is reviewed and sent (Stage 5).
+            function outgoingAttachmentDir() {
+              const dir = Services.dirsvc.get("TmpD", Ci.nsIFile);
+              dir.append("thunderbird-mcp-hardened");
+              dir.append("outgoing");
+              if (!dir.exists()) dir.create(Ci.nsIFile.DIRECTORY_TYPE, 0o700);
+              return dir;
+            }
+
+            function copyCheckedAttachmentFile(file, expectedSize, createdTempFiles) {
+              const changed = () => new Error("the file changed while it was being attached");
+              const modified = file.lastModifiedTime;
+              const buffer = new ArrayBuffer(expectedSize);
+              const input = Cc["@mozilla.org/network/file-input-stream;1"].createInstance(Ci.nsIFileInputStream);
+              input.init(file, 0x01, 0, 0);
+              const binary = Cc["@mozilla.org/binaryinputstream;1"].createInstance(Ci.nsIBinaryInputStream);
+              try {
+                binary.setInputStream(input);
+                const read = expectedSize ? binary.readArrayBuffer(expectedSize, buffer) : 0;
+                if (read !== expectedSize || binary.readArrayBuffer(1, new ArrayBuffer(1)) !== 0) throw changed();
+              } finally {
+                try { binary.close(); } catch { input.close(); }
+              }
+              const fresh = createLocalFile(file.path);
+              if (fresh.fileSize !== expectedSize || fresh.lastModifiedTime !== modified) throw changed();
+
+              const copy = outgoingAttachmentDir();
+              let safeName = file.leafName.replace(/[^a-zA-Z0-9._-]/g, "_");
+              if (!safeName || safeName === "." || safeName === "..") safeName = "attachment";
+              copy.append(`${Date.now()}_${++_tempFileCounter}_${safeName}`);
+              const output = Cc["@mozilla.org/network/file-output-stream;1"].createInstance(Ci.nsIFileOutputStream);
+              // Exclusive creation: never write into a file that already exists.
+              output.init(copy, 0x02 | 0x08 | 0x80, 0o600, 0);
+              createdTempFiles.push(copy);
+              _tempAttachFiles.add(copy.path);
+              let writer;
+              try {
+                writer = Cc["@mozilla.org/binaryoutputstream;1"].createInstance(Ci.nsIBinaryOutputStream);
+                writer.setOutputStream(output);
+                writer.writeByteArray(new Uint8Array(buffer), expectedSize);
+              } finally {
+                try { if (writer) writer.close(); } finally { output.close(); }
+              }
+              return copy;
+            }
+
+            // Removes this call's private attachment files once Thunderbird no
+            // longer needs them. Not for review windows (the user may still
+            // send) or an unknown outcome (a send may still be reading them);
+            // those are removed at shutdown.
+            function releaseOutgoingAttachments(attachDescs) {
+              for (const desc of attachDescs || []) {
+                if (!desc?.tempPath || !_tempAttachFiles.has(desc.tempPath)) continue;
+                try {
+                  const file = createLocalFile(desc.tempPath);
+                  if (file.exists()) file.remove(false);
+                  _tempAttachFiles.delete(desc.tempPath);
+                } catch (e) {
+                  console.warn("thunderbird-mcp: temporary attachment cleanup failed:", e);
+                }
+              }
+            }
+            // END OUTGOING ATTACHMENT FILES
+
             // BEGIN OUTBOUND ATTACHMENT CONVERSION
             function filePathsToAttachDescs(filePaths) {
               const descs = [];
@@ -4281,7 +4350,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                       failed.push(`${entry} (exceeds ${MAX_TOTAL_ATTACHMENT_BYTES / 1024 / 1024}MB aggregate attachment limit)`);
                       continue;
                     }
-                    const desc = { url: Services.io.newFileURI(file).spec, name: file.leafName, size: fileSize };
+                    const copy = copyCheckedAttachmentFile(file, fileSize, createdTempFiles);
+                    const desc = { url: Services.io.newFileURI(copy).spec, name: file.leafName, size: fileSize, tempPath: copy.path };
                     descs.push(desc);
                     totalAttachmentBytes += fileSize;
                   } else if (entry && typeof entry === "object" && (entry.base64 || entry.content) && entry.name) {
@@ -4360,7 +4430,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                     } finally {
                       try { if (bstream) bstream.close(); } finally { ostream.close(); }
                     }
-                    const desc = { url: Services.io.newFileURI(tmpFile).spec, name: entry.name || entry.filename, size: tmpFile.fileSize };
+                    const desc = { url: Services.io.newFileURI(tmpFile).spec, name: entry.name || entry.filename, size: tmpFile.fileSize, tempPath: tmpFile.path };
                     if (entry.contentType) desc.contentType = entry.contentType;
                     descs.push(desc);
                     totalAttachmentBytes += bytes.length;
@@ -4987,7 +5057,16 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               ].includes(status);
             }
 
-            function sendMessageDirectly(composeFields, identity, attachDescs, originalMsgURI, compType, deliverMode, bodyType, msgToReplace) {
+            // Private attachment copies are no longer needed once the outcome is
+            // known; after an unknown outcome Thunderbird may still read them.
+            function sendMessageDirectly(composeFields, identity, attachDescs, ...rest) {
+              return sendMessageDirectlyUnreleased(composeFields, identity, attachDescs, ...rest).then(result => {
+                if (result?.operationState !== Core.operationState.OPERATION_STATES.UNKNOWN) releaseOutgoingAttachments(attachDescs);
+                return result;
+              });
+            }
+
+            function sendMessageDirectlyUnreleased(composeFields, identity, attachDescs, originalMsgURI, compType, deliverMode, bodyType, msgToReplace) {
               if (!identity) {
                 return Promise.resolve({ error: "No identity available for direct send" });
               }

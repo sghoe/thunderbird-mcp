@@ -91,3 +91,37 @@ Stage 2 hotfixes stay in force throughout.
   resets the connection (→ `unknown`; the sink holds the message, no
   second delivery within 3 s). Review window, saved draft, refused
   forward, direct calendar write and calendar dialog are checked too.
+
+## 5d – Content-bound path attachments
+
+* Before: a path attachment was checked and then attached as a `file:`
+  URL; Thunderbird read it only when sending – for a review window when
+  the user clicked Send. Replacing the file (or a path component)
+  afterwards changed what was sent. Natively demonstrated: with the copy
+  disabled, a file replaced while the review window was open was sent
+  with the new content.
+* Now the file is read once, right after all path checks, into a private
+  copy in `<TmpD>/thunderbird-mcp-hardened/outgoing/` (exclusive creation,
+  0600; that directory is never an attachment source). The read must
+  return exactly the checked size with nothing left over, and a fresh stat
+  afterwards must show the same size and modification time; otherwise the
+  attachment is refused ("the file changed while it was being attached").
+  The review window and the sent message use the copy under the original
+  file name.
+* Copies (and decoded inline base64 attachments) are removed after a
+  direct send or draft with outcome `completed` or `failed`. They stay
+  until Thunderbird shuts down for review windows (the user may still
+  send) and after `unknown` (Thunderbird may still read them).
+* Inline base64 attachments and files inlined by the bridge were already
+  bound to their content (bytes travel in the request).
+* Residual: between the path checks and the single read, a process of the
+  same Windows user could swap a path component (e.g. to a junction). Such
+  a process can read the file itself anyway; the checks protect against
+  clients that only control the path string. On Windows the 0600 mode is
+  not applied; the copy inherits the user's temp directory ACL (Stage 0,
+  spike 4).
+* Tests: `test/attachment-copy.test.cjs` (exact bytes, growth, shrinking,
+  later modification, empty file, failed write, release only of tracked
+  copies), `direct-send-outcome` (release per outcome); native:
+  review window + replaced file → reviewed content sent; private copy
+  removed after a completed direct send.
