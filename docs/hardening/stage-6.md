@@ -116,3 +116,10 @@ respective fix.
 | README said `--from` checks a downloaded XPI; it only checks the committed one (Sol, Opus) | `--check <file>` compares a given XPI with the rebuild; README and this document corrected |
 | The per-tool matrix derived its expectations from the policy under test (Sol) | independent expectation per tool; a mutation (`createFolder` requiring `accounts.read`) now fails the test |
 | Working-tree builds packed untracked and git-ignored files (editor/OS debris) (Opus) | tracked files only in a git checkout, untracked ones refuse the build; debris filter outside git |
+
+## Result
+
+Final review round 2: both reviewers without findings. At HEAD the
+committed XPI (SHA-256 `a5ebf796555df8884a9e2da2dfabedb2bed545ac2c0684101643bad54b550847`,
+source digest `56ca5ed236b4c44e3e97793b49d3544633a74823c4b5b3900165af7279327191`)
+is reproducible from its commit (`--from HEAD --check dist/thunderbird-mcp.xpi`).
