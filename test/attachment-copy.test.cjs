@@ -32,6 +32,8 @@ function load({ content = Buffer.from("contract v1"), growBy = 0, shrinkBy = 0, 
   const sandbox = {
     _tempAttachFiles: new Set(["/unrelated"]),
     _pinnedAttachFiles: new Set(),
+    _uncertainAttachFiles: new Set(),
+    _callAttachFiles: null,
     _tempFileCounter: 0,
     console: { warn() {} },
     Ci: { nsIFile: { DIRECTORY_TYPE: 1 } },
@@ -82,7 +84,7 @@ function load({ content = Buffer.from("contract v1"), growBy = 0, shrinkBy = 0, 
     },
   };
   vm.createContext(sandbox);
-  vm.runInContext(snippet("OUTGOING ATTACHMENT FILES"), sandbox);
+  vm.runInContext([snippet("PRIVATE ATTACHMENT NAMES"), snippet("OUTGOING ATTACHMENT FILES")].join("\n"), sandbox);
   return { sandbox, state, original };
 }
 
@@ -142,5 +144,25 @@ describe("content-bound path attachments (Stage 5)", () => {
     assert.equal(sandbox._tempAttachFiles.has(copy.path), false);
     assert.equal(sandbox._pinnedAttachFiles.has(copy.path), false, "unpinned once released");
     assert.ok(sandbox._tempAttachFiles.has("/unrelated"));
+  });
+});
+
+describe("private attachment names (Stage 5 review round 5)", () => {
+  function nameFor(name) {
+    const sandbox = { _tempFileCounter: 0 };
+    vm.createContext(sandbox);
+    vm.runInContext(snippet("PRIVATE ATTACHMENT NAMES"), sandbox);
+    return sandbox.privateAttachmentName(name);
+  }
+  it("stays short for a long original name and keeps the extension", () => {
+    const name = nameFor(`${"a".repeat(240)}.pdf`);
+    assert.ok(name.length < 100, `${name.length} characters`);
+    assert.match(name, /^\d+_1_a{40}\.pdf$/);
+  });
+  it("sanitizes and handles names without a usable stem", () => {
+    assert.match(nameFor("Vertrag (final).docx"), /^\d+_1_Vertrag__final_\.docx$/);
+    assert.match(nameFor(".."), /^\d+_1_attachment$/);
+    assert.match(nameFor(".bashrc"), /^\d+_1_attachment\.bashrc$/);
+    assert.match(nameFor(""), /^\d+_1_attachment$/);
   });
 });

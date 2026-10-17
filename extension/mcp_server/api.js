@@ -800,33 +800,44 @@ function getExtVersion() {
 // onShutdown). Only files of the private outgoing directory are adopted.
 const PREF_RETAINED_ATTACHMENTS = "extensions.thunderbird-mcp-hardened.retainedAttachments";
 const RETAINED_ATTACHMENT_NAME = /^\d+_\d+_[A-Za-z0-9._-]+$/;
+// Hand-over format: { files: [...], pinned: [...] } with file names inside
+// the private outgoing directory and indexes of the pinned ones; at most
+// MAX_RETAINED_ATTACHMENTS short names (< 100 characters each) keep it far
+// below Gecko's 1 MiB limit for string preferences.
+const MAX_RETAINED_ATTACHMENTS = 5000;
 function adoptRetainedAttachmentFiles() {
-  const adopted = [];
+  const adopted = { files: [], pinned: [] };
   try {
     const text = Services.prefs.getStringPref(PREF_RETAINED_ATTACHMENTS, "");
     Services.prefs.clearUserPref(PREF_RETAINED_ATTACHMENTS);
-    const list = text ? JSON.parse(text) : [];
-    if (!Array.isArray(list)) return adopted;
+    const data = text ? JSON.parse(text) : null;
+    if (!data || !Array.isArray(data.files)) return adopted;
+    const pinned = new Set(Array.isArray(data.pinned) ? data.pinned.filter(Number.isSafeInteger) : []);
     const dir = Services.dirsvc.get("TmpD", Ci.nsIFile);
     dir.append("thunderbird-mcp-hardened");
     dir.append("outgoing");
-    for (const entry of list) {
-      if (typeof entry !== "string") continue;
-      const file = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
-      file.initWithPath(entry);
-      if (file.parent?.path === dir.path && RETAINED_ATTACHMENT_NAME.test(file.leafName)) adopted.push(file.path);
-    }
+    data.files.forEach((entry, index) => {
+      if (typeof entry !== "string" || !RETAINED_ATTACHMENT_NAME.test(entry)) return;
+      const file = dir.clone();
+      file.append(entry);
+      adopted.files.push(file.path);
+      if (pinned.has(index)) adopted.pinned.push(file.path);
+    });
   } catch { /* nothing to adopt */ }
   return adopted;
 }
 const _adoptedAttachFiles = adoptRetainedAttachmentFiles();
-const _tempAttachFiles = new Set(_adoptedAttachFiles);
-// Files still needed: pinned when created (a call may still be preparing
-// its message), unpinned when the call is refused or a direct send/save
-// ends with a known outcome. Pinned files survive an add-on shutdown like
-// files of open compose windows; adopted ones stay pinned until application
-// shutdown.
-const _pinnedAttachFiles = new Set(_adoptedAttachFiles);
+const _tempAttachFiles = new Set(_adoptedAttachFiles.files);
+// Files still needed without an open compose window referring to them:
+// pinned while the tool call that created them runs (it may still be
+// preparing its message), and after it only if a direct send/save ended
+// with an unknown outcome (_uncertainAttachFiles). Pinned files survive an
+// add-on shutdown like files of open compose windows; adopted pinned files
+// stay pinned until application shutdown.
+const _pinnedAttachFiles = new Set(_adoptedAttachFiles.pinned);
+const _uncertainAttachFiles = new Set();
+// Files created by the tool call whose synchronous part is running (callTool).
+let _callAttachFiles = null;
 // Track compose windows already claimed by an in-flight replyToMessage or
 // forwardMessage call, so concurrent reply/forward operations on the same
 // original message never bind two observers to the same compose window
@@ -4235,6 +4246,19 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
              * Any refused entry throws before a send/draft/window can proceed,
              * and removes temporary files created by this conversion.
              */
+            // BEGIN PRIVATE ATTACHMENT NAMES
+            // Short, bounded names for private attachment files (the original
+            // name travels in the attachment descriptor): NTFS allows 255
+            // characters per name component.
+            function privateAttachmentName(name) {
+              let safe = String(name || "").replace(/[^a-zA-Z0-9._-]/g, "_");
+              if (!safe || safe === "." || safe === "..") safe = "attachment";
+              const ext = /\.[A-Za-z0-9]{1,16}$/.exec(safe)?.[0] || "";
+              const stem = safe.slice(0, safe.length - ext.length).slice(0, 40) || "attachment";
+              return `${Date.now()}_${++_tempFileCounter}_${stem}${ext}`;
+            }
+            // END PRIVATE ATTACHMENT NAMES
+
             // BEGIN OUTGOING ATTACHMENT FILES
             // A checked path attachment is read once, right after its checks,
             // into a private copy (<TmpD>/thunderbird-mcp-hardened/outgoing,
@@ -4267,15 +4291,14 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               if (fresh.fileSize !== expectedSize || fresh.lastModifiedTime !== modified) throw changed();
 
               const copy = outgoingAttachmentDir();
-              let safeName = file.leafName.replace(/[^a-zA-Z0-9._-]/g, "_");
-              if (!safeName || safeName === "." || safeName === "..") safeName = "attachment";
-              copy.append(`${Date.now()}_${++_tempFileCounter}_${safeName}`);
+              copy.append(privateAttachmentName(file.leafName));
               const output = Cc["@mozilla.org/network/file-output-stream;1"].createInstance(Ci.nsIFileOutputStream);
               // Exclusive creation: never write into a file that already exists.
               output.init(copy, 0x02 | 0x08 | 0x80, 0o600, 0);
               createdTempFiles.push(copy);
               _tempAttachFiles.add(copy.path);
               _pinnedAttachFiles.add(copy.path);
+              _callAttachFiles?.add(copy.path);
               let writer;
               try {
                 writer = Cc["@mozilla.org/binaryoutputstream;1"].createInstance(Ci.nsIBinaryOutputStream);
@@ -4299,10 +4322,25 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   if (file.exists()) file.remove(false);
                   _tempAttachFiles.delete(desc.tempPath);
                   _pinnedAttachFiles.delete(desc.tempPath);
+                  _uncertainAttachFiles.delete(desc.tempPath);
                 } catch (e) {
                   console.warn("thunderbird-mcp: temporary attachment cleanup failed:", e);
                 }
               }
+            }
+            // All tools create their attachment files in the synchronous part of
+            // the call (before callTool's first await), so callTool collects
+            // them and unpins them once the call is over.
+            function trackCallAttachmentFiles() {
+              const previous = _callAttachFiles;
+              const files = new Set();
+              _callAttachFiles = files;
+              return {
+                stopCollecting() { _callAttachFiles = previous; },
+                release() {
+                  for (const path of files) if (!_uncertainAttachFiles.has(path)) _pinnedAttachFiles.delete(path);
+                },
+              };
             }
             // END OUTGOING ATTACHMENT FILES
 
@@ -4504,9 +4542,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                       tmpDir.create(Ci.nsIFile.DIRECTORY_TYPE, 0o700);
                     }
                     const tmpFile = tmpDir.clone();
-                    let safeName = (entry.name || entry.filename || "attachment").replace(/[^a-zA-Z0-9._-]/g, "_");
-                    if (!safeName || safeName === "." || safeName === "..") safeName = "attachment";
-                    tmpFile.append(`${Date.now()}_${++_tempFileCounter}_${safeName}`);
+                    tmpFile.append(privateAttachmentName(entry.name || entry.filename || "attachment"));
                     // Write via XPCOM binary stream
                     const ostream = Cc["@mozilla.org/network/file-output-stream;1"]
                       .createInstance(Ci.nsIFileOutputStream);
@@ -4515,6 +4551,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                     createdTempFiles.push(tmpFile);
                     _tempAttachFiles.add(tmpFile.path);
                     _pinnedAttachFiles.add(tmpFile.path);
+                    _callAttachFiles?.add(tmpFile.path);
                     let bstream;
                     try {
                       bstream = Cc["@mozilla.org/binaryoutputstream;1"]
@@ -5257,7 +5294,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 directSaveTail = tail;
               }
               return operation.then(result => {
-                if (result?.operationState !== Core.operationState.OPERATION_STATES.UNKNOWN) releaseOutgoingAttachments(attachDescs);
+                if (result?.operationState !== Core.operationState.OPERATION_STATES.UNKNOWN) {
+                  releaseOutgoingAttachments(attachDescs);
+                } else {
+                  // Thunderbird may still read them: keep them until application shutdown.
+                  for (const desc of attachDescs || []) if (desc?.tempPath) _uncertainAttachFiles.add(desc.tempPath);
+                }
                 return result;
               });
             }
@@ -13076,7 +13118,18 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             // Tools that send, save drafts or write calendar items report an
             // operationState; errors raised before any effect are "failed".
             async function callTool(name, args) {
-              return Core.operationState.finalizeOperationState(name, await callToolUnfinalized(name, args));
+              const attachmentFiles = trackCallAttachmentFiles();
+              let pending;
+              try {
+                pending = callToolUnfinalized(name, args);
+              } finally {
+                attachmentFiles.stopCollecting();
+              }
+              try {
+                return Core.operationState.finalizeOperationState(name, await pending);
+              } finally {
+                attachmentFiles.release();
+              }
             }
 
             async function callToolUnfinalized(name, args) {
@@ -13964,13 +14017,18 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
       }
     }
     const retainedAttachments = [];
-    for (const tmpPath of _tempAttachFiles) {
+    const retainedPinned = [];
+    // Pinned files first: beyond MAX_RETAINED_ATTACHMENTS files are removed.
+    const ordered = [..._tempAttachFiles].sort((a, b) => Number(_pinnedAttachFiles.has(b)) - Number(_pinnedAttachFiles.has(a)));
+    for (const tmpPath of ordered) {
       try {
         const f = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
         f.initWithPath(tmpPath);
-        if (!isAppShutdown && (attachmentsInUse === null || _pinnedAttachFiles.has(tmpPath) ||
-            attachmentsInUse.has(Services.io.newFileURI(f).spec))) {
-          retainedAttachments.push(tmpPath);
+        if (!isAppShutdown && retainedAttachments.length < MAX_RETAINED_ATTACHMENTS &&
+            (attachmentsInUse === null || _pinnedAttachFiles.has(tmpPath) ||
+             attachmentsInUse.has(Services.io.newFileURI(f).spec))) {
+          if (_pinnedAttachFiles.has(tmpPath)) retainedPinned.push(retainedAttachments.length);
+          retainedAttachments.push(f.leafName);
           continue;
         }
         if (f.exists()) f.remove(false);
@@ -13978,8 +14036,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
     }
     _tempAttachFiles.clear();
     _pinnedAttachFiles.clear();
+    _uncertainAttachFiles.clear();
     try {
-      if (retainedAttachments.length) Services.prefs.setStringPref(PREF_RETAINED_ATTACHMENTS, JSON.stringify(retainedAttachments));
+      if (retainedAttachments.length) {
+        Services.prefs.setStringPref(PREF_RETAINED_ATTACHMENTS, JSON.stringify({ files: retainedAttachments, pinned: retainedPinned }));
+      }
       else Services.prefs.clearUserPref(PREF_RETAINED_ATTACHMENTS);
     } catch { /* best effort */ }
     // END SHUTDOWN ATTACHMENT CLEANUP

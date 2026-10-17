@@ -42,6 +42,7 @@ function loadDraftTools(options = {}) {
   const destination = options.destination || folder;
   const sandbox = {
     Core,
+    trackCallAttachmentFiles: () => ({ stopCollecting() {}, release() {} }),
     Ci,
     Components: { isSuccessCode: status => status === 0 },
     ChromeUtils: { generateQI: () => () => {} },

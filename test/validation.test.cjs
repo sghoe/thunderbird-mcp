@@ -39,6 +39,9 @@ function loadProductionAttachmentValidation(overrides = {}) {
     getConfiguredGetMessagesLimit: () => 20,
     _tempAttachFiles: new Set(),
     _pinnedAttachFiles: new Set(),
+    _uncertainAttachFiles: new Set(),
+    _callAttachFiles: null,
+    trackCallAttachmentFiles: () => ({ stopCollecting() {}, release() {} }),
     _tempFileCounter: 0,
     // The private copy is tested separately (attachment-copy.test.cjs); here
     // the checked file stands in for it so the path checks stay visible.
@@ -58,6 +61,7 @@ function loadProductionAttachmentValidation(overrides = {}) {
     getMarkedApiSnippet('// BEGIN FILTER SEARCH TERM HELPERS', '// END FILTER SEARCH TERM HELPERS'),
     getMarkedApiSnippet('// BEGIN TOOL SCHEMA BUILDER', '// END TOOL SCHEMA BUILDER'),
     getMarkedApiSnippet('// BEGIN TOOL SCHEMA VALIDATOR', '// END TOOL SCHEMA VALIDATOR'),
+    getMarkedApiSnippet('// BEGIN PRIVATE ATTACHMENT NAMES', '// END PRIVATE ATTACHMENT NAMES'),
     getMarkedApiSnippet('// BEGIN OUTBOUND ATTACHMENT CONVERSION', '// END OUTBOUND ATTACHMENT CONVERSION'),
     getMarkedApiSnippet('// BEGIN ATTACHMENT EXPORT DIRECTORY', '// END ATTACHMENT EXPORT DIRECTORY'),
     'Object.assign(this, { composeMail, saveDraft, replyToMessage, forwardMessage, isSensitiveFilePath, ensureAttachmentDir, descsToMsgAttachments, addAttachmentsToComposeWindow });',

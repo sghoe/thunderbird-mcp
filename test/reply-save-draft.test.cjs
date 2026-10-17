@@ -36,6 +36,7 @@ function loadReply(options = {}) {
   };
   const sandbox = {
     Core,
+    trackCallAttachmentFiles: () => ({ stopCollecting() {}, release() {} }),
     draftFolderPeriodicRestriction: () => null,
     // Whether the saved draft is found in the validated Drafts folder.
     folderMessageKeys: (folderURI) => new Set([`known:${folderURI}`]),

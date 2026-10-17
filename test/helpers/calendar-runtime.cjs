@@ -417,6 +417,7 @@ function loadCalendarRuntime({
   };
   const sandbox = {
     cal, CalEvent: CalendarItem, CalTodo: CalendarTodo, CalAttendee: CalendarAttendee, Cc, Core,
+    trackCallAttachmentFiles: () => ({ stopCollecting() {}, release() {} }),
     Ci: { nsIPrefBranch: prefTypes, calICalendar: CALENDAR_FILTERS },
     Services: { prefs: preferences, wm: { getMostRecentWindow: () => window } },
     MailServices: { accounts: { getIdentity() {

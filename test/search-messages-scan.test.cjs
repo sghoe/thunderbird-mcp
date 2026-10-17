@@ -126,6 +126,10 @@ function makeHarness({ roots = [makeFolder("INBOX", { count: 3 })], onYield, glo
   }
   const runtime = vm.createContext({
     Core,
+    // The loaded slice contains the real attachment-file tracking.
+    _callAttachFiles: null,
+    _pinnedAttachFiles: new Set(),
+    _uncertainAttachFiles: new Set(),
     Date: SearchDate,
     GlodaMsgSearcher,
     Services: {

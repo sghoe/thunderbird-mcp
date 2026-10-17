@@ -117,9 +117,12 @@ Stage 2 hotfixes stay in force throughout.
   cannot be inspected) and hands them to the next instance through the
   preference `extensions.thunderbird-mcp-hardened.retainedAttachments`
   (the re-enabled add-on gets a fresh script scope); the next instance
-  adopts only files of the private outgoing directory and removes them
-  at application shutdown. Uninstalling while such a window is open
-  leaves them in the private temp directory.
+  adopts only files of the private outgoing directory; files of open
+  windows are checked again at its own add-on shutdown, files of
+  running or `unknown` direct operations stay until application
+  shutdown. Uninstalling while such a window is open, or after an
+  `unknown` direct send, leaves those files in the private temp
+  directory.
 * Inline base64 attachments and files inlined by the bridge were already
   bound to their content (bytes travel in the request).
 * Residual: between the path checks and the single read, a process of the
@@ -179,8 +182,15 @@ draft and the refused waiting call.
 | Finding | Fix |
 |---|---|
 | A save that waited in the queue started without checking again; meanwhile the client could have been revoked or narrowed, or the identity's Drafts setting moved to an account the client may not use (Sol, Opus) | before a queued save starts, the client record must still be current and the identity's current Drafts folder accessible, Drafts-flagged and free of Periodic rules the client may not run; otherwise `failed` without creating the message (`QUEUED SAVE CHECK`) |
-| Direct reply/forward create their private files before the asynchronous MIME read of the original; an add-on shutdown in that window deleted them (Sol) | files are pinned when they are created and unpinned when the call is refused (attachment errors) or a direct send/save ends with a known outcome; others (review windows, calls refused later in preparation, `unknown`) stay until application shutdown |
+| Direct reply/forward create their private files before the asynchronous MIME read of the original; an add-on shutdown in that window deleted them (Sol) | files are pinned while the tool call that created them runs (superseded in round 5: no longer until application shutdown) |
 | The hand-over adopted only the first 1,000 paths and lost the rest (Sol) | every valid entry is adopted; unit tests for > 1,000 entries and for paths outside the private directory |
+## Review round 5 (Sol, Opus)
+
+| Finding | Fix |
+|---|---|
+| Round 4 pinned every private file until application shutdown, so review-window files of the whole session survived disabling or uninstalling the add-on (Opus) | `callTool` collects the files a call creates (all four tools create them in the synchronous part of the call) and unpins them when the call ends; only files of a direct send/save with outcome `unknown` stay pinned. Review-window files are then protected only by the open-window check. Unit tests use the real `callTool` and tracking |
+| The hand-over list could exceed Gecko's 1 MiB preference limit; the write failed after tracking was cleared (Sol) | the hand-over stores file names only (the directory is implicit) and the pinned ones as indexes, at most 5,000 files with pinned ones first; files beyond that are removed. Worst case < 1 MiB (unit test) |
+| Private names embedded the full original name and could exceed NTFS's 255-character limit (Sol) | short names `<time>_<counter>_<stem ≤ 40>.<ext ≤ 16>`; the original name stays in the attachment descriptor |
 ## Bound approvals – how each approval is tied to the concrete action
 
 | Approval | Bound to | Where |

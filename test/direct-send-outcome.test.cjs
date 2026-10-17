@@ -74,6 +74,7 @@ function loadSend(options = {}) {
       messageServiceFromURI: () => ({ messageURIToMsgHdr: () => hdr }),
     },
     _pinnedAttachFiles: state.pinned = new Set(),
+    _uncertainAttachFiles: state.uncertain = new Set(),
     activeClient: { id: "client" },
     queuedSaveRestriction(client) {
       state.queuedChecks = [...(state.queuedChecks || []), client];

@@ -122,6 +122,7 @@ function loadPrivacyRuntime({ initial = {}, unreadable = [], legacyAddonManager 
     },
     console: { warn: (...args) => warnings.push(args), error() {} },
     Core,
+    trackCallAttachmentFiles: () => ({ stopCollecting() {}, release() {} }),
     __testClient: makeTestClient(Core, client),
     // Clients removed or changed while a call waits (runAsClient).
     __staleClients: new Set(),

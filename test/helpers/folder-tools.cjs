@@ -21,6 +21,7 @@ function snippet(startMarker, endMarker) {
 function loadFolderTools({ accounts, folders, isAccountAllowed = () => true, copyMessages = () => {}, copyFolder = () => {}, periodicFolderRestriction = () => null }) {
   const runtime = vm.createContext({
     Core,
+    trackCallAttachmentFiles: () => ({ stopCollecting() {}, release() {} }),
     console,
     Ci: { nsMsgFolderFlags: { Trash: 0x100 } },
     isAccountAllowed,

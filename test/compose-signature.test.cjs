@@ -53,6 +53,7 @@ function loadSignatureHelpers(options = {}) {
   };
   const sandbox = {
     Core,
+    trackCallAttachmentFiles: () => ({ stopCollecting() {}, release() {} }),
     TextDecoder,
     Uint8Array,
     Cr: { NS_BASE_STREAM_CLOSED: "NS_BASE_STREAM_CLOSED" },
