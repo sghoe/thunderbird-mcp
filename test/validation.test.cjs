@@ -38,6 +38,7 @@ function loadProductionAttachmentValidation(overrides = {}) {
   const sandbox = {
     getConfiguredGetMessagesLimit: () => 20,
     _tempAttachFiles: new Set(),
+    _pinnedAttachFiles: new Set(),
     _tempFileCounter: 0,
     // The private copy is tested separately (attachment-copy.test.cjs); here
     // the checked file stands in for it so the path checks stay visible.
@@ -1818,6 +1819,7 @@ describe('Outbound attachment failures are atomic', () => {
         assert.equal(state.created.size, 0);
         assert.equal(state.removed.length, 1);
         assert.deepEqual(Array.from(runtime._tempAttachFiles), ['/prior-call.txt']);
+        assert.equal(runtime._pinnedAttachFiles.size, 0, 'refused calls unpin their files');
       });
     }
   }

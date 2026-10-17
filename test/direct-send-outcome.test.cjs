@@ -74,6 +74,11 @@ function loadSend(options = {}) {
       messageServiceFromURI: () => ({ messageURIToMsgHdr: () => hdr }),
     },
     _pinnedAttachFiles: state.pinned = new Set(),
+    activeClient: { id: "client" },
+    queuedSaveRestriction(client) {
+      state.queuedChecks = [...(state.queuedChecks || []), client];
+      return options.queuedRefusal ? { error: options.queuedRefusal, operationState: "failed" } : null;
+    },
     releaseOutgoingAttachments(descs) { state.released = [...(state.released || []), descs]; },
     // Whether a saved message is found in its folder (STORED MESSAGE CONFIRMATION).
     folderMessageKeys: (folderURI) => new Set([`known:${folderURI}`]),
@@ -507,4 +512,61 @@ describe("direct saves run one at a time; their files are pinned (Stage 5 review
     h.start("direct", modes.Now);
     assert.ok(h.state.pinned.has("/outgoing/1_1_a.txt"));
   });
+});
+
+describe("a queued save is checked again before it starts (Stage 5 review round 4)", () => {
+  const tick = () => new Promise(resolve => setImmediate(resolve));
+  it("refuses a waiting save without creating the message if the client or destination changed", async () => {
+    const h = loadSend({ queuedRefusal: "This client was removed or its settings changed while the save was waiting; nothing was saved." });
+    const first = h.start("direct", modes.SaveAsDraft);
+    const firstListener = h.state.listener;
+    const second = h.start("direct", modes.SaveAsDraft);
+    firstListener.onStopCopy(0);
+    await first;
+    const value = await second;
+    await tick();
+    assert.equal(h.state.calls.length, 1, "no message created for the refused save");
+    assert.equal(value.operationState, "failed");
+    assert.match(value.error, /while the save was waiting/);
+    assert.deepEqual({ ...h.state.queuedChecks[0] }, { id: "client" }, "checked for the client of the call");
+  });
+
+  it("does not re-check a save that starts immediately", async () => {
+    const h = loadSend({ queuedRefusal: "x" });
+    h.start("direct", modes.SaveAsDraft);
+    assert.equal(h.state.calls.length, 1);
+    assert.equal(h.state.queuedChecks, undefined);
+  });
+});
+
+describe("queuedSaveRestriction (Stage 5 review round 4)", () => {
+  const { Core } = require("./helpers/core-modules.cjs");
+  function load({ current = true, access = { folder: { getFlag: () => true } }, periodic = null } = {}) {
+    const sandbox = {
+      Core,
+      Ci: { nsIMsgCompDeliverMode: modes, nsMsgFolderFlags: { Drafts: 0x400 } },
+      clientRecordCurrent: () => current,
+      getIdentityDraftFolderURI: () => "imap://user@example.test/Drafts",
+      getAccessibleFolder: () => access,
+      draftFolderPeriodicRestriction: () => periodic,
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(snippet("QUEUED SAVE CHECK"), sandbox);
+    return (mode = modes.SaveAsDraft) => sandbox.queuedSaveRestriction({ id: "c" }, {}, mode);
+  }
+  it("allows an unchanged client and destination", () => {
+    assert.equal(load()(), null);
+  });
+  for (const [label, options, pattern] of [
+    ["a removed or changed client", { current: false }, /while the save was waiting/],
+    ["an inaccessible Drafts folder", { access: { error: "Account not accessible" } }, /no longer accessible/],
+    ["a folder without the Drafts flag", { access: { folder: { getFlag: () => false } } }, /no longer accessible/],
+    ["a periodic rule on the Drafts folder", { periodic: { error: "periodic rule" } }, /Not saved: periodic rule/],
+  ]) {
+    it(`refuses ${label}`, () => {
+      const result = load(options)();
+      assert.match(result.error, pattern);
+      assert.equal(result.operationState, "failed");
+    });
+  }
 });

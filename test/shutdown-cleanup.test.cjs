@@ -88,3 +88,43 @@ describe("attachment files at add-on shutdown (Stage 5)", () => {
     assert.deepEqual(retained, []);
   });
 });
+
+describe("attachment hand-over to the next instance (Stage 5)", () => {
+  const adoptStart = source.indexOf("const PREF_RETAINED_ATTACHMENTS");
+  const adoptEnd = source.indexOf("const _adoptedAttachFiles", adoptStart);
+  assert.ok(adoptStart >= 0 && adoptEnd > adoptStart, "adoption code not found");
+  function adopt(list) {
+    const prefs = new Map([["extensions.thunderbird-mcp-hardened.retainedAttachments", JSON.stringify(list)]]);
+    const sandbox = {
+      Services: {
+        prefs: { getStringPref: (k, d) => (prefs.has(k) ? prefs.get(k) : d), clearUserPref: k => prefs.delete(k) },
+        dirsvc: { get: () => ({ path: "/tmp", append(n) { this.path += `/${n}`; } }) },
+      },
+      Ci: { nsIFile: {} },
+      Cc: { "@mozilla.org/file/local;1": { createInstance: () => ({
+        initWithPath(p) { this.path = p; this.leafName = p.split("/").pop(); this.parent = { path: p.slice(0, p.lastIndexOf("/")) }; },
+      }) } },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(`${source.slice(adoptStart, adoptEnd)}\nthis.adopted = adoptRetainedAttachmentFiles();`, sandbox);
+    return { adopted: sandbox.adopted, prefs };
+  }
+
+  it("adopts every valid retained file, also beyond 1,000", () => {
+    const list = Array.from({ length: 1500 }, (_, i) => `/tmp/thunderbird-mcp-hardened/outgoing/1_${i}_f.txt`);
+    const { adopted, prefs } = adopt(list);
+    assert.equal(adopted.length, 1500);
+    assert.equal(prefs.size, 0, "the hand-over is consumed");
+  });
+
+  it("adopts nothing outside the private outgoing directory", () => {
+    const { adopted } = adopt([
+      "/tmp/thunderbird-mcp-hardened/outgoing/1_1_ok.txt",
+      "/home/user/1_2_secret.txt",
+      "/tmp/thunderbird-mcp-hardened/outgoing/sub/1_3_x.txt",
+      "/tmp/thunderbird-mcp-hardened/outgoing/notes.txt",
+      42,
+    ]);
+    assert.deepEqual([...adopted], ["/tmp/thunderbird-mcp-hardened/outgoing/1_1_ok.txt"]);
+  });
+});

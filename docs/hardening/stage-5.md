@@ -174,6 +174,13 @@ draft and the refused waiting call.
 | Switching a disabled rule on does not change its fingerprint, so it skipped the register pre-check and the undo; with a full register a client could switch on a user's Forward rule that revocation never reaches (Sol, Opus) | switching a rule on counts as a change that must be recorded: pre-check before saving, undo if recording fails (renaming and disabling stay always possible) |
 | Two concurrent saves replacing drafts with the same Message-ID could each find the other's new header (a failed one reporting `completed`) (Sol) | direct saves into Drafts/Outbox run one at a time (immediate sends are not queued), so the key snapshot of a save only sees its own copy. Residual: a save that timed out (`unknown`) may still finish while the next one runs; a draft the user re-saves by hand in the same moment is not distinguished |
 | Add-on shutdown deleted files of running direct operations and of `unknown` outcomes (no compose window references them) (Sol) | such files are pinned from the start of the operation until a known outcome releases them; pinned files survive an add-on shutdown and are handed over like window files; adopted files stay pinned until application shutdown. The cleanup is a marked block with unit tests (`test/shutdown-cleanup.test.cjs`; negative control: without the pin check the test fails) |
+## Review round 4 (Sol, Opus)
+
+| Finding | Fix |
+|---|---|
+| A save that waited in the queue started without checking again; meanwhile the client could have been revoked or narrowed, or the identity's Drafts setting moved to an account the client may not use (Sol, Opus) | before a queued save starts, the client record must still be current and the identity's current Drafts folder accessible, Drafts-flagged and free of Periodic rules the client may not run; otherwise `failed` without creating the message (`QUEUED SAVE CHECK`) |
+| Direct reply/forward create their private files before the asynchronous MIME read of the original; an add-on shutdown in that window deleted them (Sol) | files are pinned when they are created and unpinned when the call is refused (attachment errors) or a direct send/save ends with a known outcome; others (review windows, calls refused later in preparation, `unknown`) stay until application shutdown |
+| The hand-over adopted only the first 1,000 paths and lost the rest (Sol) | every valid entry is adopted; unit tests for > 1,000 entries and for paths outside the private directory |
 ## Bound approvals – how each approval is tied to the concrete action
 
 | Approval | Bound to | Where |

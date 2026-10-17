@@ -98,6 +98,7 @@ describe("content-bound path attachments (Stage 5)", () => {
     assert.equal(state.dirPerm, 0o700);
     assert.deepEqual(created, [copy]);
     assert.ok(sandbox._tempAttachFiles.has(copy.path));
+    assert.ok(sandbox._pinnedAttachFiles.has(copy.path), "pinned from creation: the call may still be preparing its message");
     assert.equal(state.inputClosed, true);
     assert.equal(state.outputClosed, true);
   });
@@ -134,7 +135,6 @@ describe("content-bound path attachments (Stage 5)", () => {
   it("releases only this call's tracked copies", () => {
     const { sandbox, state, original } = load();
     const copy = sandbox.copyCheckedAttachmentFile(original, original.fileSize, []);
-    sandbox._pinnedAttachFiles.add(copy.path);
     sandbox.releaseOutgoingAttachments([
       { tempPath: copy.path }, { tempPath: "/untracked" }, { url: "mailbox-message://part" }, null,
     ]);

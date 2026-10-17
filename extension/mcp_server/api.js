@@ -810,7 +810,7 @@ function adoptRetainedAttachmentFiles() {
     const dir = Services.dirsvc.get("TmpD", Ci.nsIFile);
     dir.append("thunderbird-mcp-hardened");
     dir.append("outgoing");
-    for (const entry of list.slice(0, 1000)) {
+    for (const entry of list) {
       if (typeof entry !== "string") continue;
       const file = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
       file.initWithPath(entry);
@@ -821,9 +821,11 @@ function adoptRetainedAttachmentFiles() {
 }
 const _adoptedAttachFiles = adoptRetainedAttachmentFiles();
 const _tempAttachFiles = new Set(_adoptedAttachFiles);
-// Files a direct send/save still needs (running, or outcome unknown); they
-// survive an add-on shutdown like files of open compose windows. Adopted
-// files stay pinned until application shutdown.
+// Files still needed: pinned when created (a call may still be preparing
+// its message), unpinned when the call is refused or a direct send/save
+// ends with a known outcome. Pinned files survive an add-on shutdown like
+// files of open compose windows; adopted ones stay pinned until application
+// shutdown.
 const _pinnedAttachFiles = new Set(_adoptedAttachFiles);
 // Track compose windows already claimed by an in-flight replyToMessage or
 // forwardMessage call, so concurrent reply/forward operations on the same
@@ -4273,6 +4275,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               output.init(copy, 0x02 | 0x08 | 0x80, 0o600, 0);
               createdTempFiles.push(copy);
               _tempAttachFiles.add(copy.path);
+              _pinnedAttachFiles.add(copy.path);
               let writer;
               try {
                 writer = Cc["@mozilla.org/binaryoutputstream;1"].createInstance(Ci.nsIBinaryOutputStream);
@@ -4511,6 +4514,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                     ostream.init(tmpFile, 0x02 | 0x08 | 0x80, 0o600, 0);
                     createdTempFiles.push(tmpFile);
                     _tempAttachFiles.add(tmpFile.path);
+                    _pinnedAttachFiles.add(tmpFile.path);
                     let bstream;
                     try {
                       bstream = Cc["@mozilla.org/binaryoutputstream;1"]
@@ -4542,6 +4546,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   try {
                     tmpFile.remove(false);
                     _tempAttachFiles.delete(tmpFile.path);
+                    _pinnedAttachFiles.delete(tmpFile.path);
                   } catch (e) {
                     // Retain it in the shutdown cleanup set if removal failed.
                     console.warn("thunderbird-mcp: temporary attachment cleanup failed:", e);
@@ -4855,6 +4860,32 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             }
             const UNCONFIRMED_SAVE_ERROR = "Thunderbird finished the save, but the message could not be found in the intended folder (the copy may have failed, been declined, or gone to Local Folders). Check Drafts before retrying.";
             // END STORED MESSAGE CONFIRMATION
+
+            // BEGIN QUEUED SAVE CHECK
+            // A save that waited behind another one was authorized for the state
+            // at call time; the client and its Drafts destination are checked
+            // again before it starts (as runAsClient does after waiting).
+            function queuedSaveRestriction(client, identity, mode) {
+              const failed = error => ({ error, operationState: Core.operationState.OPERATION_STATES.FAILED });
+              if (!client || !clientRecordCurrent(client)) {
+                return failed("This client was removed or its settings changed while the save was waiting; nothing was saved.");
+              }
+              if (mode !== Ci.nsIMsgCompDeliverMode.SaveAsDraft) return null;
+              try {
+                const draftURI = getIdentityDraftFolderURI(identity);
+                const destination = draftURI ? getAccessibleFolder(draftURI) : { error: "no Drafts folder" };
+                if (destination.error || typeof destination.folder?.getFlag !== "function" ||
+                    !destination.folder.getFlag(Ci.nsMsgFolderFlags.Drafts)) {
+                  return failed("Not saved: the Drafts folder is no longer accessible to this client.");
+                }
+                const periodic = draftFolderPeriodicRestriction(draftURI);
+                if (periodic) return failed(`Not saved: ${periodic.error}`);
+              } catch {
+                return failed("Not saved: the Drafts folder could not be checked again.");
+              }
+              return null;
+            }
+            // END QUEUED SAVE CHECK
 
             // BEGIN COMPOSE WINDOW DRAFT HELPER
             function saveComposeWindowAsDraft(composeWin) {
@@ -5214,7 +5245,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               if (mode === Ci.nsIMsgCompDeliverMode.Now) {
                 operation = run();
               } else {
-                operation = directSaveTail ? directSaveTail.then(run) : run();
+                const client = activeClient;
+                const runQueued = () => {
+                  const refusal = queuedSaveRestriction(client, identity, mode);
+                  return refusal ? Promise.resolve(refusal) : run();
+                };
+                operation = directSaveTail ? directSaveTail.then(runQueued) : run();
                 const tail = operation.catch(() => {}).then(() => {
                   if (directSaveTail === tail) directSaveTail = null;
                 });
