@@ -244,6 +244,16 @@ draft and the refused waiting call.
 | Finding | Fix |
 |---|---|
 | Switching on one of several identical rules not created through MCP registered it (fingerprint unchanged, so the twin check was skipped); after the user edited or deleted one of them, revocation could disable the untouched one (Sol, Opus) | the twin check also runs when a rule is switched on, counting the identical rules other than the rule itself; refused if any of them is not registered |
+## Result
+
+Round 13: both reviewers without substantive findings (Opus additionally
+re-derived the register invariant path by path: create, update incl.
+rename/enable/disable/effect change, delete, reorder, applyFilters,
+folder rename/move/delete, revocation, client deletion). Verified at
+HEAD: unit tests (only the two known Windows Flatpak path failures of
+Stage 0), 74 native tests, native parity with upstream v0.9.2 (64 calls,
+40 tools, no differences; `operationState` as the documented additive
+key).
 ## Bound approvals – how each approval is tied to the concrete action
 
 | Approval | Bound to | Where |
