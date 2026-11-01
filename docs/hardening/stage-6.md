@@ -96,10 +96,10 @@ respective fix.
 
 ## Tested combinations and open points
 
-* Tested dynamically: Windows 11, Thunderbird 153.5.0esr and 158.0
-  (portable, isolated profile), Node.js 22.23.2; local mbox accounts,
+* Tested dynamically: Windows 11, Thunderbird 153.5.0esr, 158.0 and 159.0
+  (isolated profile), Node.js 22.23.2; local mbox accounts,
   Local Folders, a storage calendar, a local SMTP sink. The manifest
-  accepts 140–158.*; 140 and 154–157 are not tested.
+  accepts 140–159.*; 140 and 154–157 are not tested.
 * Not tested natively: Thunderbird 140 ESR (the manifest still allows
   140 – owner decision 3 of Stage 0), Linux and macOS (unit tests and CI
   run there; the discovery and path rules for Snap/Flatpak/macOS are
@@ -121,6 +121,19 @@ green. The native harness now sends `Connection: close`: an idle
 keep-alive socket hitting the server restart during the add-on reload
 test made Node's HTTP client fail once (test process only; the add-on
 was not involved).
+
+## Thunderbird 159
+
+With `strict_max_version` `158.*`, Thunderbird 159.0 marked the add-on
+`appDisabled` and the server never started. With `159.*` and the
+installed official Thunderbird 159.0 (win64, isolated test profile), all
+81 native tests pass and native parity with upstream v0.9.2 shows no
+differences (64 calls, 40 tools, 4 SMTP deliveries; `operationState` as
+additive key). Thunderbird 159 grants Marionette chrome access only when
+`MOZ_REMOTE_ALLOW_SYSTEM_ACCESS=1` is set (the `-remote-allow-system-access`
+flag alone is no longer enough), so the native harness sets it; without
+it every native suite fails in its setup hook. 153.5.0esr and 158.0 were
+not re-run for this change.
 ## Diagnostic log (added after acceptance)
 
 * Optional, off by default (`extensions.thunderbird-mcp-hardened.diagnosticLog`,

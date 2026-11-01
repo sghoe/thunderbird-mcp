@@ -14,7 +14,7 @@ Give your AI assistant full access to Thunderbird -- search mail, compose messag
 
 > Inspired by [bb1/thunderbird-mcp](https://github.com/bb1/thunderbird-mcp). Rewritten from scratch with a bundled HTTP server, proper MIME decoding, and UTF-8 handling throughout.
 
-> **Hardened fork.** This repository is an incrementally hardened fork of [TKasperczyk/thunderbird-mcp](https://github.com/TKasperczyk/thunderbird-mcp) `v0.9.2`. It uses its own add-on ID, preference namespace (`extensions.thunderbird-mcp-hardened.*`), runtime/export directories and port range (8775–8784), and has **no automatic update channel**. Upstream settings are not inherited. Security changes and their migration notes are documented in [docs/hardening](docs/hardening/). Tested only on Windows with Thunderbird 153.5.0esr and 158.0 (the manifest accepts 140–158; other versions are untested).
+> **Hardened fork.** This repository is an incrementally hardened fork of [TKasperczyk/thunderbird-mcp](https://github.com/TKasperczyk/thunderbird-mcp) `v0.9.2`. It uses its own add-on ID, preference namespace (`extensions.thunderbird-mcp-hardened.*`), runtime/export directories and port range (8775–8784), and has **no automatic update channel**. Upstream settings are not inherited. Security changes and their migration notes are documented in [docs/hardening](docs/hardening/). Tested only on Windows with Thunderbird 153.5.0esr, 158.0 and 159.0 (the manifest accepts 140–159; other versions are untested).
 
 ---
 

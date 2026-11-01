@@ -8,7 +8,7 @@
       "id": "{97229bb5-ab92-4724-adf0-85fbea3bf56e}",
       "update_url": "https://update-channel-disabled.invalid/updates.json",
       "strict_min_version": "140.0",
-      "strict_max_version": "158.*"
+      "strict_max_version": "159.*"
     }
   },
   "icons": {

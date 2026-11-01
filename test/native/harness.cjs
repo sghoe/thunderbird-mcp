@@ -406,7 +406,9 @@ async function startThunderbird({ mailboxes, extraPrefs, headless = true, authHe
     },
   });
 
-  const env = { ...process.env, TMP: tmpDir, TEMP: tmpDir, TMPDIR: tmpDir, MOZ_CRASHREPORTER_DISABLE: "1", MOZ_DISABLE_AUTO_SAFE_MODE: "1" };
+  // Thunderbird 159 grants Marionette chrome access only via the environment
+  // variable; the -remote-allow-system-access flag stays for older versions.
+  const env = { ...process.env, TMP: tmpDir, TEMP: tmpDir, TMPDIR: tmpDir, MOZ_CRASHREPORTER_DISABLE: "1", MOZ_DISABLE_AUTO_SAFE_MODE: "1", MOZ_REMOTE_ALLOW_SYSTEM_ACCESS: "1" };
   const args = ["-profile", profileDir, "-no-remote", "-purgecaches", "--marionette", "-remote-allow-system-access"];
   if (headless) args.push("--headless");
   const log = [];
